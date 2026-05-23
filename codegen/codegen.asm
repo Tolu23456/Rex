@@ -1,7 +1,7 @@
 ; codegen.asm - Code Generator for Rex
 ; Generates x86_64 machine code and ELF64 header
 
-%include "src/include/common.inc"
+%include "include/common.inc"
 
 section .data
     ; ELF Header (64-bit)
@@ -48,11 +48,19 @@ section .text
     global rex_emit_cmp_rax_rcx
     global rex_emit_jmp
     global rex_emit_je
+    global rex_emit_jne
+    global rex_emit_label
+    global rex_patch_jump
+    global rex_get_code_ptr
     global rex_finish
 
 rex_codegen_init:
     lea rax, [code_buffer]
     mov [code_ptr], rax
+    ret
+
+rex_get_code_ptr:
+    mov rax, [code_ptr]
     ret
 
 rex_emit_byte:
@@ -69,108 +77,138 @@ rex_emit_dq:
 
 rex_emit_mov_rax_imm:
     mov r9, rdi
-    mov dil, 0x48 \ call rex_emit_byte
-    mov dil, 0xB8 \ call rex_emit_byte
+    mov dil, 0x48
+    call rex_emit_byte
+    mov dil, 0xB8
+    call rex_emit_byte
     mov rdi, r9
     call rex_emit_dq
     ret
 
 rex_emit_push_rax:
-    mov dil, 0x50 \ call rex_emit_byte
+    mov dil, 0x50
+    call rex_emit_byte
     ret
 
 rex_emit_pop_rax:
-    mov dil, 0x58 \ call rex_emit_byte
+    mov dil, 0x58
+    call rex_emit_byte
     ret
 
 rex_emit_pop_rcx:
-    mov dil, 0x59 \ call rex_emit_byte
+    mov dil, 0x59
+    call rex_emit_byte
     ret
 
 rex_emit_add_rax_rcx:
-    mov dil, 0x48 \ call rex_emit_byte
-    mov dil, 0x01 \ call rex_emit_byte
-    mov dil, 0xC8 \ call rex_emit_byte
+    mov dil, 0x48
+    call rex_emit_byte
+    mov dil, 0x01
+    call rex_emit_byte
+    mov dil, 0xC8
+    call rex_emit_byte
     ret
 
 rex_emit_sub_rax_rcx:
-    mov dil, 0x48 \ call rex_emit_byte
-    mov dil, 0x29 \ call rex_emit_byte
-    mov dil, 0xC8 \ call rex_emit_byte
+    mov dil, 0x48
+    call rex_emit_byte
+    mov dil, 0x29
+    call rex_emit_byte
+    mov dil, 0xC8
+    call rex_emit_byte
     ret
 
 rex_emit_mul_rcx:
-    mov dil, 0x48 \ call rex_emit_byte
-    mov dil, 0xF7 \ call rex_emit_byte
-    mov dil, 0xE1 \ call rex_emit_byte
+    mov dil, 0x48
+    call rex_emit_byte
+    mov dil, 0xF7
+    call rex_emit_byte
+    mov dil, 0xE1
+    call rex_emit_byte
     ret
 
 rex_emit_syscall:
-    mov dil, 0x0F \ call rex_emit_byte
-    mov dil, 0x05 \ call rex_emit_byte
+    mov dil, 0x0F
+    call rex_emit_byte
+    mov dil, 0x05
+    call rex_emit_byte
     ret
 
 rex_emit_call_rax:
-    mov dil, 0xFF \ call rex_emit_byte
-    mov dil, 0xD0 \ call rex_emit_byte
+    mov dil, 0xFF
+    call rex_emit_byte
+    mov dil, 0xD0
+    call rex_emit_byte
     ret
 
 rex_emit_cmp_rax_rcx:
-    mov dil, 0x48 \ call rex_emit_byte
-    mov dil, 0x39 \ call rex_emit_byte
-    mov dil, 0xC8 \ call rex_emit_byte
+    mov dil, 0x48
+    call rex_emit_byte
+    mov dil, 0x39
+    call rex_emit_byte
+    mov dil, 0xC8
+    call rex_emit_byte
     ret
 
-; Simple relative jumps
+rex_emit_jne:
+    mov dil, 0x0F
+    call rex_emit_byte
+    mov dil, 0x85
+    call rex_emit_byte
+    mov rax, [code_ptr]
+    mov dword [rax], 0
+    add qword [code_ptr], 4
+    ret
+
 rex_emit_jmp:
-    mov dil, 0xE9 \ call rex_emit_byte
-    mov rdi, 0 ; placeholder
-    mov rdx, [code_ptr] \ mov [rdx], edi \ add qword [code_ptr], 4
+    mov dil, 0xE9
+    call rex_emit_byte
+    mov rax, [code_ptr]
+    mov dword [rax], 0
+    add qword [code_ptr], 4
     ret
 
-rex_emit_je:
-    mov dil, 0x0F \ call rex_emit_byte
-    mov dil, 0x84 \ call rex_emit_byte
-    mov rdi, 0 ; placeholder
-    mov rdx, [code_ptr] \ mov [rdx], edi \ add qword [code_ptr], 4
+rex_emit_label:
+    mov rax, [code_ptr]
+    ret
+
+rex_patch_jump:
+    mov rdx, rsi
+    sub rdx, rdi
+    sub rdx, 4
+    mov [rdi], edx
     ret
 
 rex_finish:
     lea rbx, [code_buffer]
     mov rdx, [code_ptr]
     sub rdx, rbx
-
     mov rax, rdx
     add rax, 120
     mov [program_header + 32], rax
     mov [program_header + 40], rax
-
     mov rax, SYS_OPEN
     mov rdi, out_filename
     mov rsi, O_CREAT | O_WRONLY | O_TRUNC
     mov rdx, 0755o
     syscall
     mov [out_fd], rax
-
     mov rdi, rax
     mov rax, SYS_WRITE
     mov rsi, elf_header
     mov rdx, 64
     syscall
-
     mov rdi, [out_fd]
     mov rax, SYS_WRITE
     mov rsi, program_header
     mov rdx, 56
     syscall
-
     mov rdi, [out_fd]
     mov rax, SYS_WRITE
     lea rsi, [code_buffer]
     mov rdx, [code_ptr]
     sub rdx, rsi
     syscall
-
     mov rax, SYS_CLOSE
     mov rdi, [out_fd]
     syscall

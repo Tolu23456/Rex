@@ -1,8 +1,8 @@
 ; lexer.asm - Lexical Analyzer for Rex
 ; Tokenizes source code and handles indentation levels
 
-%include "src/include/common.inc"
-%include "src/include/tokens.inc"
+%include "include/common.inc"
+%include "include/tokens.inc"
 
 section .data
     ; Table of keywords and their token types
@@ -130,19 +130,53 @@ rex_lex_next:
     cmp al, 9
     je .inc_src_skip
 
-    ; Handle comments
-    cmp al, '/'
+    ; Handle single-line comments (#)
+    cmp al, '#'
+    je .skip_single_line_comment
+
+    ; Handle multi-line comments (""")
+    cmp al, '"'
     jne .check_newline
-    cmp byte [rsi + 1], '/'
+    cmp byte [rsi + 1], '"'
     jne .check_newline
-.skip_comment:
+    cmp byte [rsi + 2], '"'
+    jne .check_newline
+    jmp .skip_multi_line_comment
+
+.skip_single_line_comment:
     inc qword [src_ptr]
     mov rsi, [src_ptr]
     cmp rsi, [src_end]
     jae .eof
-    cmp byte [rsi], 10
+    cmp byte [rsi], 10 ; Newline
     je .handle_newline
-    jmp .skip_comment
+    jmp .skip_single_line_comment
+
+.skip_multi_line_comment:
+    add qword [src_ptr], 3 ; Skip opening """
+.mlc_loop:
+    mov rsi, [src_ptr]
+    cmp rsi, [src_end]
+    jae .eof
+
+    mov al, [rsi]
+    cmp al, 10
+    jne .mlc_check_close
+    inc qword [line_num] ; Increment line count inside multi-line comment
+
+.mlc_check_close:
+    cmp al, '"'
+    jne .mlc_next
+    cmp byte [rsi + 1], '"'
+    jne .mlc_next
+    cmp byte [rsi + 2], '"'
+    jne .mlc_next
+    add qword [src_ptr], 3 ; Skip closing """
+    jmp .skip_whitespace
+
+.mlc_next:
+    inc qword [src_ptr]
+    jmp .mlc_loop
 
 .check_newline:
     cmp al, 10
