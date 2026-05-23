@@ -9,7 +9,7 @@ section .data
         db 0x7F, 'ELF', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0
         dw 2, 62
         dd 1
-        dq 0x400000 + 0x78  ; e_entry
+        dq 0x400000 + 120    ; e_entry
         dq 0x40             ; e_phoff
         dq 0                ; e_shoff
         dd 0                ; e_flags
@@ -21,8 +21,8 @@ section .data
         dq 0                ; p_offset
         dq 0x400000         ; p_vaddr
         dq 0x400000         ; p_paddr
-        dq 0                ; p_filesz (updated at finish)
-        dq 0                ; p_memsz (updated at finish)
+        dq 0                ; p_filesz
+        dq 0                ; p_memsz
         dq 0x1000           ; p_align
 
     out_filename db "output", 0
@@ -37,63 +37,114 @@ section .text
     global rex_emit_byte
     global rex_emit_dq
     global rex_emit_mov_rax_imm
-    global rex_emit_call
+    global rex_emit_push_rax
+    global rex_emit_pop_rax
+    global rex_emit_pop_rcx
+    global rex_emit_add_rax_rcx
+    global rex_emit_sub_rax_rcx
+    global rex_emit_mul_rcx
+    global rex_emit_syscall
+    global rex_emit_call_rax
+    global rex_emit_cmp_rax_rcx
+    global rex_emit_jmp
+    global rex_emit_je
     global rex_finish
 
-; Initialize the code generator
 rex_codegen_init:
     lea rax, [code_buffer]
     mov [code_ptr], rax
     ret
 
-; Emit a single byte
 rex_emit_byte:
     mov rdx, [code_ptr]
     mov [rdx], dil
     inc qword [code_ptr]
     ret
 
-; Emit 64-bit imm
 rex_emit_dq:
     mov rdx, [code_ptr]
     mov [rdx], rdi
     add qword [code_ptr], 8
     ret
 
-; Emit mov rax, imm64
 rex_emit_mov_rax_imm:
-    mov dil, 0x48
-    call rex_emit_byte
-    mov dil, 0xB8
-    call rex_emit_byte
+    mov r9, rdi
+    mov dil, 0x48 \ call rex_emit_byte
+    mov dil, 0xB8 \ call rex_emit_byte
+    mov rdi, r9
     call rex_emit_dq
     ret
 
-; Emit call rel32 (placeholder logic)
-rex_emit_call:
-    mov dil, 0xE8
-    call rex_emit_byte
-    ; For now, emit dummy offset
-    mov rdi, 0
-    mov rdx, [code_ptr]
-    mov [rdx], edi
-    add qword [code_ptr], 4
+rex_emit_push_rax:
+    mov dil, 0x50 \ call rex_emit_byte
     ret
 
-; Write the final ELF binary
+rex_emit_pop_rax:
+    mov dil, 0x58 \ call rex_emit_byte
+    ret
+
+rex_emit_pop_rcx:
+    mov dil, 0x59 \ call rex_emit_byte
+    ret
+
+rex_emit_add_rax_rcx:
+    mov dil, 0x48 \ call rex_emit_byte
+    mov dil, 0x01 \ call rex_emit_byte
+    mov dil, 0xC8 \ call rex_emit_byte
+    ret
+
+rex_emit_sub_rax_rcx:
+    mov dil, 0x48 \ call rex_emit_byte
+    mov dil, 0x29 \ call rex_emit_byte
+    mov dil, 0xC8 \ call rex_emit_byte
+    ret
+
+rex_emit_mul_rcx:
+    mov dil, 0x48 \ call rex_emit_byte
+    mov dil, 0xF7 \ call rex_emit_byte
+    mov dil, 0xE1 \ call rex_emit_byte
+    ret
+
+rex_emit_syscall:
+    mov dil, 0x0F \ call rex_emit_byte
+    mov dil, 0x05 \ call rex_emit_byte
+    ret
+
+rex_emit_call_rax:
+    mov dil, 0xFF \ call rex_emit_byte
+    mov dil, 0xD0 \ call rex_emit_byte
+    ret
+
+rex_emit_cmp_rax_rcx:
+    mov dil, 0x48 \ call rex_emit_byte
+    mov dil, 0x39 \ call rex_emit_byte
+    mov dil, 0xC8 \ call rex_emit_byte
+    ret
+
+; Simple relative jumps
+rex_emit_jmp:
+    mov dil, 0xE9 \ call rex_emit_byte
+    mov rdi, 0 ; placeholder
+    mov rdx, [code_ptr] \ mov [rdx], edi \ add qword [code_ptr], 4
+    ret
+
+rex_emit_je:
+    mov dil, 0x0F \ call rex_emit_byte
+    mov dil, 0x84 \ call rex_emit_byte
+    mov rdi, 0 ; placeholder
+    mov rdx, [code_ptr] \ mov [rdx], edi \ add qword [code_ptr], 4
+    ret
+
 rex_finish:
-    ; Calculate sizes
     lea rbx, [code_buffer]
     mov rdx, [code_ptr]
-    sub rdx, rbx            ; rdx = code size
+    sub rdx, rbx
 
-    ; Total file size = 64 (EH) + 56 (PH) + code size
     mov rax, rdx
     add rax, 120
-    mov [program_header + 32], rax ; p_filesz
-    mov [program_header + 40], rax ; p_memsz
+    mov [program_header + 32], rax
+    mov [program_header + 40], rax
 
-    ; Open output file
     mov rax, SYS_OPEN
     mov rdi, out_filename
     mov rsi, O_CREAT | O_WRONLY | O_TRUNC
@@ -101,7 +152,6 @@ rex_finish:
     syscall
     mov [out_fd], rax
 
-    ; Write headers
     mov rdi, rax
     mov rax, SYS_WRITE
     mov rsi, elf_header
@@ -114,7 +164,6 @@ rex_finish:
     mov rdx, 56
     syscall
 
-    ; Write code
     mov rdi, [out_fd]
     mov rax, SYS_WRITE
     lea rsi, [code_buffer]
