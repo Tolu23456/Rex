@@ -1,2 +1,2 @@
-let x = 5
-output x 
+int x = 42
+output x
