@@ -1,0 +1,190 @@
+Here is the completely consolidated, ultra-detailed master prompt. It embeds all structural directives, specific language features, comparison constraints, and physical Rex code blocks into a single cohesive architectural mandate for your Replit Agent.
+
+Plaintext
+You are a principal systems compiler architect. Your mission is to scale our existing, verified single-pass Rex compiler into a production-ready, modular multi-folder system that compiles the full Rex language specification natively down to 100% pure machine code without any external linker dependencies.
+
+### I. DIRECTORY ORCHESTRATION MANDATE
+You must immediately divide the project workspace file tree into explicit domains. Create these directories and systematically migrate and split your code logic within them:
+- `/lexer/`    : Tracks multi-type tokens, state-based indents/dedents, and string literal character streams.
+- `/parser/`   : Implements the recursive descent parsing engine, operator precedence, and symbol table states.
+- `/codegen/`  : Emits machine code bytes into the internal buffer, tracks single-pass branch stacks, and defines the static 128-byte ELF64 metadata layout.
+- `/runtime/`  : Implements direct syscall I/O layers, SipHash collision loops with open addressing, and dynamic Memory/GC allocation selection vectors.
+- `/docs/`     : Holds documentation and system comparative architectural files.
+
+### II. MANDATORY FILE GENERATION: LANGUAGE COMPARISON MATRIX
+Before parsing any new features, create a file named `/docs/language_comparison.md` containing exactly the following markdown content to define Rex's strategic positioning against C, C++, Rust, Zig, Python, and JavaScript:
+
+```markdown
+# Rex Language Comparative Matrix
+
+| Feature / Metric | Rex | C | C++ | Rust | Zig | Python | JavaScript |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Compiler Dependency** | None (Direct ELF64) | `gcc`/`clang` + `ld` | `g++` + `ld` | `rustc` + `lld` | `zig cc` | Python Interpreter | V8 / SpiderMonkey Engine |
+| **Immutability Contract** | Explicit Signatures | Manual (`const`) | Manual (`const`) | Immutable by default | Explicit (`const`/`var`)| None (Dynamic) | Scoped (`const`/`let`) |
+| **Control Flow Scope** | Indentation Tokens | Braces `{}` | Braces `{}` | Braces `{}` | Braces `{}` | Indentation Blocks | Braces `{}` |
+| **Object System** | Decoupled Protocols | Struct-Only | Class Hierarchy | Traits & Structs | Struct Mixins | Dynamic Classes | Prototype Inheritance |
+| **Collections Engine** | Native SipHash Open | Manual / External | STL Map/Unordered | Standard Hashmap | `std.HashMap` | Dict (SipHash/Split) | Map Object Engine |
+| **Boolean Logic** | Tri-State Hardware | Bi-State Integer | Bi-State Native | Bi-State Explicit | Bi-State Primitive | Bi-State Object | Dynamic Truthiness |
+| **Memory Mechanics** | Dynamic Context Blocks | Manual (`malloc`) | RAII / Manual | Borrow Checker | Explicit Allocators | Global GC Loop | Mark-and-Sweep Engine |
+| **Binary Base Footprint**| **< 1 KB** | ~16 KB | ~16 KB+ | ~300 KB+ | ~40 KB+ | N/A | N/A |
+III. IMMEDIATE MANDATE: EXTEND SINGLE-PASS BRANCHING TO 'ELSE'
+Building directly on your successful forward-jump patch stack mechanics (where IF placeholder offsets are backfilled via displacement calculations), implement the complete if / else syntax block protocol:
+
+Phase 1: Handling 'if' Failures:
+
+When processing if <condition>:, emit a conditional jump instruction (e.g., JNE) with a temporary 4-byte 0x00000000 placeholder operand. Push its buffer location onto jump_patch_stack.
+
+Phase 2: Encountering the 'else:' Token:
+
+When the parser matches TOK_ELSE right as the if body block scopes close:
+A. Immediately emit an unconditional jump instruction (JMP / 0xE9) with a fresh 4-byte 0x00000000 placeholder operand right at the tail end of the if body.
+B. Pop the original if failure placeholder address off the jump_patch_stack.
+C. Compute the failure relative displacement: Displacement = Current_Output_Buffer_Pointer - (IF_Placeholder_Address + 4). Overwrite those old placeholder bytes so an evaluation failure routes directly to the start of this else block.
+D. Push the address of your newly emitted JMP placeholder onto the jump_patch_stack.
+
+Phase 3: Exiting the 'else:' Body:
+
+When processing the TOK_DEDENT that terminates the else block scope:
+A. Pop the JMP placeholder address off the stack.
+B. Calculate the exit path displacement: Exit_Displacement = Current_Output_Buffer_Pointer - (JMP_Placeholder_Address + 4).
+C. Patch those 4 placeholder bytes with Exit_Displacement so successful if runs skip the else block entirely.
+
+IV. ARCHITECTURAL TECHNICAL IMPLEMENTATION SPECIFICATION
+As you modularize the codebase, restructure and upgrade your parsing and symbol mechanisms to support the finalized Rex V5.0 specification. You must explicitly accept, parse, validate, and code-generate the following canonical Rex source code structures:
+
+1. Variables, Assignment, and Immutability Contracts
+The parser must strictly enforce mutable definitions vs frozen, un-modifiable constants based on inline initialization state:
+
+Code snippet
+# Canonical Block 1A: Mutable Variable Declaration and Explicit Mutation Assignment
+int age
+float wages
+str name
+
+:age = 56
+:wages = 1450.75
+:name = "Rex Builder"
+
+output age
+output(wages)
+output name
+Code snippet
+# Canonical Block 1B: Immutable Constant Declaration Block
+int target = 42
+float golden_ratio = 1.618
+
+# Compile-Time Validation Enforcement Rule:
+# If the parser catches a token matching sequence like the line below on an immutable symbol,
+# it must immediately halt and raise an explicit "Compilation Error: Immutable symbol modification".
+:target = 99
+2. Advanced Multi-Pragmatic Scalar and Structural Types
+The compiler frontend must resolve type allocations to explicit byte-widths, routing float variants to hardware XMM registers and complex variants to parallel packed vector tracks (represented natively as two packed 64-bit floats):
+
+Code snippet
+# Canonical Block 2A: Floats, Packed Complex Numbers, and Tri-State Logic Booleans
+float a = 5.5
+float b = 2.2
+float c
+:c = a + b
+
+complex sum_j = 12j
+complex vector_coord = 4.5 + 3.0j
+
+bool execution_flag = true
+bool failure_flag = false
+bool runtime_state = unknown
+
+# Tri-State Stochastic Execution Path:
+# When 'unknown' is parsed within a conditional check, the compiler emits machine code 
+# that triggers a hardware entropy instruction (`rdrand` or `sys_getrandom`) to branch stochastically at runtime.
+if runtime_state:
+    output "Entropy chose True pathway"
+3. Native Low-Overhead Collection Engines (SipHash + Open Addressing)
+All sequential, dictionary, set, and tuple fields map directly to continuous, non-aligned layout blocks. Dictionaries and sets must utilize SipHash with open addressing probing loops. Strings must be UTF-8 and length-prefixed:
+
+Code snippet
+# Canonical Block 3A: Dynamic and Fixed Sequences (Sigil: @)
+@dynamic_seq = @[1, 2, 3]
+@fixed_seq = @[1, 2, 3]:3
+
+# Reading and mutating elements inside a sequence track:
+:dynamic_seq[0] = 42
+output :dynamic_seq[0]
+Code snippet
+# Canonical Block 3B: Dictionaries, Sets, and Tuples
+dict user_map = {"name": "Rex", "version": 5}
+set explicit_set = <{3, 5, 6, 7}>
+set short_set = :{3, 5, 6, 7}
+tup user_tuple = (string name: "Rex", int age: 15)
+
+output :user_map["name"]
+4. Indentation-Bounded Control Flow
+Implement explicit multi-level forward and backward jump patching using an internal jump_patch_stack. The parser must handle structural indentation blocks perfectly. Output statements can be called with or without parenthesis:
+
+Code snippet
+# Canonical Block 4A: Single-Pass Conditional Branching (If / Else)
+int check_val = 42
+
+if :check_val == 43:
+    output 1
+else:
+    output 2
+output 3
+Code snippet
+# Canonical Block 4B: Range-Bounded Control Loops
+int iteration_count
+:iteration_count = 0
+
+for :i in 0..10:
+    :iteration_count = iteration_count + 1
+    if :i == 5:
+        stop
+
+output iteration_count
+5. Decoupled Architecture Protocols (Functional Context Layers)
+Protocols handle nested, recursive operations without injecting class v-tables. Parameters can either be passed as a value or reference. Execution targets are resolved explicitly via bounded mappings. Call syntax must explicitly begin with an assignment operation using the @ prefix:
+
+Code snippet
+# Canonical Block 5A: Recursive Bounded Protocols with Explicit Target Output Passing
+prot greet_user(None) -> str:
+    return :"Hello, User"
+
+prot compute_factorial(int n) -> int:
+    if :n <= 1:
+        return 1
+    int next_val
+    :next_val = :n - 1
+    return :n * @compute_factorial(next_val)
+
+:greet = @greet_user()
+output(greet)
+
+:factorial_res = @compute_factorial(5)
+output :factorial_res
+6. Dynamic Allocators and Memory Context Handoff Blocks
+Maintain a global context index tracker inside /runtime/memory.asm. When no block allocation context is explicitly invoked, the runtime falls back onto Automatic Memory Management (AMM) and the Automatic Garbage Collector (AGC) using static reference counts. Users can hot-swap memory configurations dynamically across local indentation spaces, which must never conflict with one another:
+
+Code snippet
+# Canonical Block 6A: Dynamic Multi-Allocator Handoff Controls
+prot heavy_computation(None) -> None:
+    # This phase runs strictly utilizing system default AMM / AGC engines
+    int base_score
+    :base_score = 100
+
+    # Switch execution tracking context explicitly to Memory Manager 2 and Garbage Collector 1
+    use mm 2 gc 1:
+        int i
+        @data = @[10, 20, 30, 40, 50]
+
+        for :i in 0..4:
+            # All heap allocations and array mutations within this block hook into MM2 arrays
+            :data[:i] = :data[:i] * base_score
+
+    # Exiting the indented block scope automatically restores initial system AMM / AGC boundaries
+    output "Computation complete"
+V. CODE READABILITY & ERROR HARDENING CONSTRAINTS
+Strict Style Constraint: Every single line of assembly code within the compiler modules must be meticulously commented to explicitly detail stack layout transformations and expected register states. Maintain a clean, one-instruction-per-line configuration throughout all modules to adhere strictly to NASM capabilities.
+
+Standardize all text processing to raise descriptive error messages when parsing or validation traps fail, specifically capturing: Syntax Error, Runtime Error, Compilation Error, and Indentation Error.
+
+Begin by creating the modular folder architecture, generating a global workspace Makefile matching this multi-file tree layout, writing out the updated /docs/language_comparison.md, and implementing the updated /codegen/elf64_headers.asm layer. Run the comprehensive verification pipeline immediately.
