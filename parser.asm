@@ -1,7 +1,7 @@
 ; parser.asm - Recursive Descent Parser for Rex
 
-%include "include/common.inc"
-%include "include/tokens.inc"
+%include "common.inc"
+%include "tokens.inc"
 
 section .data
     err_syntax db "Syntax Error", 10, 0

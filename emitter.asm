@@ -1,7 +1,7 @@
 ; codegen.asm - Code Generator for Rex
 ; Generates x86_64 machine code and ELF64 header
 
-%include "include/common.inc"
+%include "common.inc"
 
 section .data
     ; ELF Header (64-bit)

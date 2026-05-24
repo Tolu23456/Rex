@@ -1,6 +1,6 @@
 ; semant.asm - Semantic Analysis and Boundary Checks for Rex
 
-%include "include/common.inc"
+%include "common.inc"
 
 section .data
     err_escape db "Compile-time Error: Variable escapes custom memory manager block.", 10, 0

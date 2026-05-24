@@ -1,6 +1,6 @@
 ; main.asm - Entry point for Rex Compiler (rexc)
 
-%include "include/common.inc"
+%include "common.inc"
 
 section .data
     usage_msg db "Usage: rexc <file.rex>", 10, 0

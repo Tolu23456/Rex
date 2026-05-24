@@ -1,43 +1,56 @@
-# Rex Programming Language Documentation
+# Rex Programming Language Specification
 
-Rex is a compiled, high-performance language designed with Python-style readability and absolute control over system resources.
+Rex is a compiled, low-level language that combines the readability of Python's indentation-based blocks with the performance and control of pure x86_64 assembly.
 
-## New Features (v0.2)
-- **Flattened Codebase**: All source files are moved to the root/modular folders for better NASM indexing.
-- **Improved Comments**: Now uses `#` for single-line and `"""` for multi-line comments.
-- **Variable Scoping**: Integrated symbol table for local and global variable management.
-- **Control Flow**: Implemented `if` blocks with machine code emission and relative jump patching.
-- **Dynamic Memory Routing**: `use mm <1-5> gc <1-3>:` blocks for context-specific allocation.
-- **Memory Safety**: Strict Memory Boundary Pass to prevent variables from escaping custom MM blocks.
+## Design Philosophy
+1.  **Readability:** Code should look like Python.
+2.  **No Dependencies:** The compiler (`rexc`) is written in pure assembly and generates standalone ELF64 binaries without needing an external assembler or linker.
+3.  **Direct System Access:** Rex translates high-level constructs directly into optimized machine code and system calls.
 
 ## Syntax
 
+### Indentation
+Rex uses significant whitespace for code blocks.
+- **INDENT:** Increases the nesting level.
+- **DEDENT:** Decreases the nesting level and closes the current block.
+
 ### Variables
+All variables are currently 64-bit integers.
 ```rex
 # Declaration
-int age
-# Assignment
-:age = 56
+int count
+
+# Mutable Assignment (requires colon prefix)
+:count = 42
+```
+
+### Output
+The `output` keyword prints values to the terminal followed by a newline.
+```rex
+output count
+output 100
 ```
 
 ### Control Flow
+Rex supports `if` blocks and `for` loops.
 ```rex
-if :age > 10:
+if :count:
     output 1
+
+# Range-based loops
+for i in 0..10:
+    output i
 ```
 
-### Memory Contexts
-```rex
-use mm 2 gc 1:
-    # Code here uses MM 2 (Pool) and GC 1
-    int x
-    :x = 10
-```
+## Compiler Architecture
+The Rex compiler (`rexc`) performs a single-pass over the source file:
+1.  **Lexing:** Converts characters into a stream of tokens, tracking indentation levels on a stack.
+2.  **Parsing:** Recognizes language constructs using recursive descent.
+3.  **Emission:** Emits x86_64 machine code directly into an internal buffer.
+4.  **Patching:** Maintains a "patch stack" to resolve forward jumps (e.g., jumping from the `if` condition to the end of the block) once the target address is known.
+5.  **ELF Generation:** Manually constructs the ELF64 header and Program Header, prepending them to the emitted machine code.
 
-## Comparisons
-
-| Feature | Rex | Python | C++ | Rust |
-|---------|-----|--------|-----|------|
-| Speed | Extremely Fast (Asm) | Slow | Fast | Fast |
-| Binary Size | < 1 KB | N/A | > 10 KB | > 200 KB |
-| Memory Routing| Yes | No | No | No |
+## Technical Details
+- **Base VA:** Executables are loaded at `0x400000`.
+- **Entry Point:** Execution begins at `0x400080` (directly after the 128-byte header).
+- **Runtime:** Every binary includes a minimal runtime for integer-to-string conversion and terminal output.

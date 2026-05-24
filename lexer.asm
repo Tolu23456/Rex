@@ -1,8 +1,8 @@
 ; lexer.asm - Lexical Analyzer for Rex
 ; Tokenizes source code and handles indentation levels
 
-%include "include/common.inc"
-%include "include/tokens.inc"
+%include "common.inc"
+%include "tokens.inc"
 
 section .data
     ; Table of keywords and their token types

@@ -2,7 +2,7 @@
 ; Implements 5 memory managers: Arena, Pool, Buddy, Slab, Free-list
 ; Implements basic Reference Counting GC
 
-%include "include/common.inc"
+%include "common.inc"
 
 section .data
     current_mm db 0
