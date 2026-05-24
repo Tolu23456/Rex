@@ -4,20 +4,22 @@ set -e
 echo "=== Rex Bootstrap Compiler — Modular Stage 0 ==="
 echo ""
 echo "Assembling modules..."
-nasm -f elf64 main.asm    -o main.o
-nasm -f elf64 lexer.asm   -o lexer.o
-nasm -f elf64 parser.asm  -o parser.o
-nasm -f elf64 codegen.asm -o codegen.o
-nasm -f elf64 headers.asm -o headers.o
-nasm -f elf64 runtime.asm -o runtime.o
+nasm -f elf64 -I include/  main/main.asm    -o main/main.o
+nasm -f elf64 -I include/  lexer/lexer.asm  -o lexer/lexer.o
+nasm -f elf64 -I include/  parser/parser.asm -o parser/parser.o
+nasm -f elf64 -I include/  codegen/codegen.asm -o codegen/codegen.o
+nasm -f elf64 -I include/  headers/headers.asm -o headers/headers.o
+nasm -f elf64 -I include/  runtime/runtime.asm -o runtime/runtime.o
 
 echo "Linking..."
-ld main.o lexer.o parser.o codegen.o headers.o runtime.o -o rexc
+ld main/main.o lexer/lexer.o parser/parser.o \
+   codegen/codegen.o headers/headers.o runtime/runtime.o \
+   -o rexc
 echo "Compiler built: ./rexc"
 echo ""
 
-echo "Compiling test.rex..."
-./rexc test.rex
+echo "Compiling tests/test.rex..."
+./rexc tests/test.rex
 echo "Output binary generated: ./output"
 echo ""
 

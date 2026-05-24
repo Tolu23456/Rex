@@ -1,8 +1,13 @@
-NASM    = nasm
-LD      = ld
-NASMFLAGS = -f elf64
+NASM      = nasm
+LD        = ld
+NASMFLAGS = -f elf64 -I include/
 
-OBJS = main.o lexer.o parser.o codegen.o headers.o runtime.o
+OBJS = main/main.o \
+       lexer/lexer.o \
+       parser/parser.o \
+       codegen/codegen.o \
+       headers/headers.o \
+       runtime/runtime.o
 
 .PHONY: all clean test
 
@@ -11,29 +16,29 @@ all: rexc
 rexc: $(OBJS)
 	$(LD) $(OBJS) -o rexc
 
-main.o: main.asm rex_defs.inc
-	$(NASM) $(NASMFLAGS) main.asm -o main.o
+main/main.o: main/main.asm include/rex_defs.inc
+	$(NASM) $(NASMFLAGS) main/main.asm -o main/main.o
 
-lexer.o: lexer.asm rex_defs.inc
-	$(NASM) $(NASMFLAGS) lexer.asm -o lexer.o
+lexer/lexer.o: lexer/lexer.asm include/rex_defs.inc
+	$(NASM) $(NASMFLAGS) lexer/lexer.asm -o lexer/lexer.o
 
-parser.o: parser.asm rex_defs.inc
-	$(NASM) $(NASMFLAGS) parser.asm -o parser.o
+parser/parser.o: parser/parser.asm include/rex_defs.inc
+	$(NASM) $(NASMFLAGS) parser/parser.asm -o parser/parser.o
 
-codegen.o: codegen.asm rex_defs.inc
-	$(NASM) $(NASMFLAGS) codegen.asm -o codegen.o
+codegen/codegen.o: codegen/codegen.asm include/rex_defs.inc
+	$(NASM) $(NASMFLAGS) codegen/codegen.asm -o codegen/codegen.o
 
-headers.o: headers.asm rex_defs.inc
-	$(NASM) $(NASMFLAGS) headers.asm -o headers.o
+headers/headers.o: headers/headers.asm include/rex_defs.inc
+	$(NASM) $(NASMFLAGS) headers/headers.asm -o headers/headers.o
 
-runtime.o: runtime.asm rex_defs.inc
-	$(NASM) $(NASMFLAGS) runtime.asm -o runtime.o
+runtime/runtime.o: runtime/runtime.asm include/rex_defs.inc
+	$(NASM) $(NASMFLAGS) runtime/runtime.asm -o runtime/runtime.o
 
 clean:
 	rm -f $(OBJS) rexc output
 
 test: rexc
-	@echo "Compiling test.rex ..."
-	./rexc test.rex
+	@echo "Compiling tests/test.rex ..."
+	./rexc tests/test.rex
 	@echo "Running output binary ..."
 	./output
