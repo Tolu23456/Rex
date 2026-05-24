@@ -15,6 +15,7 @@ TOK_IF        equ 10
 TOK_FOR       equ 11
 TOK_IN        equ 12
 TOK_DOTDOT    equ 13
+TOK_EQEQ      equ 14          ; '==' equality comparison operator
 
 ; ─── Variable table ──────────────────────────────────────────────────────────
 VAR_ENTRY_SIZE equ 64   ; bytes per entry:  [0..31]=name, [32..39]=value,

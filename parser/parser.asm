@@ -18,6 +18,8 @@ extern tok_type
 extern tok_int
 extern tok_ident
 extern codegen_output_const
+extern codegen_emit_cmp_jne
+extern codegen_patch_jump
 
 %include "rex_defs.inc"
 
@@ -41,6 +43,8 @@ section .data
     err_expect_int_len   equ $ - err_expect_int
     err_expect_assign:   db "error: expected '='", 10
     err_expect_assign_len equ $ - err_expect_assign
+    err_expect_eqeq:     db "error: expected '=='", 10
+    err_expect_eqeq_len  equ $ - err_expect_eqeq
 
 ; ─── TEXT ────────────────────────────────────────────────────────────────────
 section .text
@@ -216,6 +220,9 @@ parse_stmt:
     cmp  al, TOK_OUTPUT
     je   .parse_output
 
+    cmp  al, TOK_IF
+    je   .parse_if
+
     ; Unknown token at statement level — skip
     call lexer_next
     ret
@@ -310,11 +317,17 @@ parse_stmt:
     call lexer_next         ; advance past integer literal
     ret
 
-; ─── output x ────────────────────────────────────────────────────────────────
+; ─── output <ident | int_lit> ────────────────────────────────────────────────
 .parse_output:
     ; Current: TOK_OUTPUT
     call lexer_next
     movzx eax, byte [rel tok_type]
+
+    ; Accept a bare integer literal: output 42
+    cmp  al, TOK_INT_LIT
+    je   .output_literal
+
+    ; Otherwise must be an identifier: output x
     cmp  al, TOK_IDENT
     jne  .err_expect_ident
 
@@ -338,6 +351,131 @@ parse_stmt:
 
     call lexer_next         ; advance past identifier
     ret
+
+.output_literal:
+    ; Emit code: call rt_pri with the literal value directly
+    mov  rdi, [rel tok_int]
+    call codegen_output_const
+    call lexer_next         ; advance past integer literal
+    ret
+
+; ─── if <ident> == <int_lit>: ────────────────────────────────────────────────
+;
+; Parsing sequence consumed here:
+;   TOK_IF  TOK_IDENT  TOK_EQEQ  TOK_INT_LIT  TOK_COLON
+;   TOK_NEWLINE  TOK_INDENT  <body statements>  TOK_DEDENT
+;
+; Codegen contract:
+;   1. After priming the first body token, emit cmp+JNE with a placeholder.
+;   2. Parse body statements in an inner loop until TOK_DEDENT (or TOK_EOF).
+;   3. Call codegen_patch_jump to back-fill the JNE displacement.
+;   4. Advance past the DEDENT and return — main loop sees the next statement.
+.parse_if:
+    push r12
+    push r13
+
+    ; ── Expect identifier ─────────────────────────────────────────────────────
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_IDENT
+    jne  .if_err_ident
+
+    ; Resolve variable → load its compile-time value
+    lea  rdi, [rel tok_ident]
+    call var_find
+    cmp  rax, -1
+    je   .if_err_undef
+
+    imul rax, VAR_ENTRY_SIZE
+    lea  rcx, [rel var_table]
+    add  rcx, rax
+    mov  r12, [rcx + 32]        ; r12 = variable value
+
+    ; ── Expect '==' ───────────────────────────────────────────────────────────
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_EQEQ
+    jne  .if_err_eqeq
+
+    ; ── Expect integer literal (RHS) ─────────────────────────────────────────
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_INT_LIT
+    jne  .if_err_int
+
+    mov  r13, [rel tok_int]     ; r13 = comparison value
+
+    ; ── Consume ':' → newline → INDENT → prime first body token ──────────────
+    call lexer_next             ; int_lit consumed  →  tok = ':'
+    call lexer_next             ;     ':'  consumed  →  tok = newline
+    call lexer_next             ;  newline consumed  →  tok = TOK_INDENT
+    call lexer_next             ;   INDENT consumed  →  tok = first body token
+
+    ; ── Emit: mov edi,r12 ; cmp edi,r13 ; jne <placeholder> ─────────────────
+    mov  rdi, r12
+    mov  rsi, r13
+    call codegen_emit_cmp_jne
+
+    ; ── Body loop: iterate until DEDENT or EOF ────────────────────────────────
+.if_body_loop:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_EOF
+    je   .if_body_done
+    cmp  al, TOK_DEDENT
+    je   .if_body_done
+    cmp  al, TOK_NEWLINE
+    je   .if_body_next
+    cmp  al, TOK_INDENT
+    je   .if_body_next
+    call parse_stmt             ; recursive — handles any valid statement
+    jmp  .if_body_loop
+.if_body_next:
+    call lexer_next
+    jmp  .if_body_loop
+
+    ; ── Patch the JNE displacement now that the body size is known ────────────
+.if_body_done:
+    call codegen_patch_jump
+
+    ; Advance past DEDENT so the main loop sees the next top-level statement
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_DEDENT
+    jne  .if_exit
+    call lexer_next
+
+.if_exit:
+    pop  r13
+    pop  r12
+    ret
+
+    ; ── Error paths (sys_exit, so stack imbalance is harmless) ────────────────
+.if_err_ident:
+    pop  r13
+    pop  r12
+    lea  rsi, [rel err_expect_ident]
+    mov  rdx, err_expect_ident_len
+    call fatal_error
+
+.if_err_undef:
+    pop  r13
+    pop  r12
+    lea  rsi, [rel err_undef_var]
+    mov  rdx, err_undef_var_len
+    call fatal_error
+
+.if_err_eqeq:
+    pop  r13
+    pop  r12
+    lea  rsi, [rel err_expect_eqeq]
+    mov  rdx, err_expect_eqeq_len
+    call fatal_error
+
+.if_err_int:
+    pop  r13
+    pop  r12
+    lea  rsi, [rel err_expect_int]
+    mov  rdx, err_expect_int_len
+    call fatal_error
 
 ; ─── Error handlers ───────────────────────────────────────────────────────────
 .err_const_reassign:

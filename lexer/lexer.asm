@@ -218,7 +218,22 @@ lexer_next:
     ret
 
 .emit_assign:
-    inc  qword [rel lex_pos]
+    ; lex_pos points at '='; rdi = lex_src (set in .skip_ws above)
+    mov  rcx, [rel lex_pos]
+    inc  rcx                            ; position of char after first '='
+    cmp  rcx, [rel lex_len]
+    jge  .assign_single
+    movzx eax, byte [rdi + rcx]
+    cmp  al, '='
+    jne  .assign_single
+    ; Second '=' found → emit TOK_EQEQ, consume both characters
+    inc  rcx
+    mov  [rel lex_pos], rcx
+    mov  byte [rel tok_type], TOK_EQEQ
+    mov  rax, TOK_EQEQ
+    ret
+.assign_single:
+    mov  [rel lex_pos], rcx            ; advance past the single '='
     mov  byte [rel tok_type], TOK_ASSIGN
     mov  rax, TOK_ASSIGN
     ret

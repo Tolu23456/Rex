@@ -12,6 +12,8 @@ global codegen_write_headers
 global codegen_init
 global codegen_output_const
 global codegen_finish
+global codegen_emit_cmp_jne
+global codegen_patch_jump
 global out_buffer
 global out_idx
 
@@ -24,8 +26,10 @@ extern rt_prs_blob, rt_prs_blob_end
 
 ; ─── BSS ────────────────────────────────────────────────────────────────────
 section .bss
-    out_buffer: resb 4096
-    out_idx:    resq 1
+    out_buffer:        resb 4096
+    out_idx:           resq 1
+    jump_patch_stack:  resq 64   ; buffer offsets of pending forward-jump rel32 fields
+    jump_stack_depth:  resq 1    ; how many entries are live on jump_patch_stack
 
 ; ─── TEXT ───────────────────────────────────────────────────────────────────
 section .text
@@ -165,6 +169,84 @@ codegen_output_const:
     add  rcx, 4
     sub  rax, rcx                   ; rax = signed displacement
     call emit_d                     ; writes lower 32 bits (correct for negative too)
+
+    ret
+
+; ── codegen_emit_cmp_jne ─────────────────────────────────────────────────────
+; Emits a compile-time compare + conditional JNE with a 0x00000000 placeholder.
+; The address of that placeholder inside out_buffer is pushed onto jump_patch_stack
+; so that codegen_patch_jump can back-fill the correct displacement later.
+;
+; rdi = var_value   (loaded into edi at runtime)
+; rsi = cmp_value   (compared against edi at runtime)
+;
+; Emitted code (17 bytes total):
+;   BF vv vv vv vv           mov edi, var_value     (5)
+;   81 FF cc cc cc cc        cmp edi, cmp_value     (6)
+;   0F 85 00 00 00 00        jne <placeholder>      (6)
+codegen_emit_cmp_jne:
+    push r12
+    push r13
+    mov  r12d, edi              ; var_value (clamped to 32 bits)
+    mov  r13d, esi              ; cmp_value (clamped to 32 bits)
+
+    ; mov edi, var_value  (opcode BF + imm32)
+    mov  al, 0xBF
+    call emit_b
+    mov  eax, r12d
+    call emit_d
+
+    ; cmp edi, cmp_value  (81 FF + imm32)
+    mov  al, 0x81
+    call emit_b
+    mov  al, 0xFF
+    call emit_b
+    mov  eax, r13d
+    call emit_d
+
+    ; jne rel32  (0F 85)
+    mov  al, 0x0F
+    call emit_b
+    mov  al, 0x85
+    call emit_b
+
+    ; Record current out_idx as the offset of the rel32 placeholder
+    mov  rax, [rel out_idx]
+    mov  rcx, [rel jump_stack_depth]
+    lea  rdx, [rel jump_patch_stack]
+    mov  [rdx + rcx*8], rax
+    inc  qword [rel jump_stack_depth]
+
+    ; Emit the 4-byte placeholder (0x00000000)
+    xor  eax, eax
+    call emit_d
+
+    pop  r13
+    pop  r12
+    ret
+
+; ── codegen_patch_jump ────────────────────────────────────────────────────────
+; Pops the topmost entry from jump_patch_stack and back-fills the rel32 field
+; inside out_buffer with the correct forward displacement.
+;
+; Displacement formula:
+;   disp = out_idx - placeholder_off - 4
+;   (out_idx = current write cursor = first byte after the body that was emitted)
+codegen_patch_jump:
+    ; Pop placeholder offset
+    dec  qword [rel jump_stack_depth]
+    mov  rcx, [rel jump_stack_depth]
+    lea  rdx, [rel jump_patch_stack]
+    mov  r8, [rdx + rcx*8]             ; r8  = placeholder_off
+
+    ; disp = out_idx - placeholder_off - 4
+    mov  rax, [rel out_idx]
+    sub  rax, r8
+    sub  rax, 4                         ; eax now holds the signed rel32 displacement
+
+    ; Write displacement into out_buffer at placeholder_off
+    lea  rdx, [rel out_buffer]
+    mov  [rdx + r8], eax
 
     ret
 

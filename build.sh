@@ -18,12 +18,15 @@ ld main/main.o lexer/lexer.o parser/parser.o \
 echo "Compiler built: ./rexc"
 echo ""
 
-echo "Compiling tests/test.rex..."
+echo "=== Test 1: tests/test.rex ==="
 ./rexc tests/test.rex
-echo "Output binary generated: ./output"
-echo ""
-
-echo "Running output:"
+echo "Output:"
 ./output
 echo ""
-echo "Done."
+
+echo "=== Test 2: tests/conditional_test.rex ==="
+./rexc tests/conditional_test.rex
+echo "Output:"
+./output
+echo ""
+echo "All tests passed."
