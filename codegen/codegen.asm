@@ -14,6 +14,9 @@ global codegen_output_const
 global codegen_finish
 global codegen_emit_cmp_jne
 global codegen_patch_jump
+global codegen_save_chain_base
+global codegen_emit_jmp_end
+global codegen_patch_chain_end
 global out_buffer
 global out_idx
 
@@ -28,8 +31,18 @@ extern rt_prs_blob, rt_prs_blob_end
 section .bss
     out_buffer:        resb 4096
     out_idx:           resq 1
-    jump_patch_stack:  resq 64   ; buffer offsets of pending forward-jump rel32 fields
-    jump_stack_depth:  resq 1    ; how many entries are live on jump_patch_stack
+
+    ; ── Conditional-fail (JNE) patch stack ───────────────────────────────────
+    jump_patch_stack:  resq 64   ; buffer offsets of cond-fail JNE rel32 fields
+    jump_stack_depth:  resq 1    ; live entries
+
+    ; ── Taken-branch exit (JMP) patch stack ──────────────────────────────────
+    end_jump_stack:    resq 64   ; buffer offsets of "jmp to chain end" rel32 fields
+    end_jump_depth:    resq 1    ; live entries
+
+    ; ── Per-chain base snapshot (for nested if chains) ────────────────────────
+    chain_base_stack:  resq 32   ; saved end_jump_depth at each chain's entry
+    chain_base_depth:  resq 1    ; live entries in chain_base_stack
 
 ; ─── TEXT ───────────────────────────────────────────────────────────────────
 section .text
@@ -248,6 +261,87 @@ codegen_patch_jump:
     lea  rdx, [rel out_buffer]
     mov  [rdx + r8], eax
 
+    ret
+
+; ── codegen_save_chain_base ──────────────────────────────────────────────────
+; Snapshot the current end_jump_depth onto chain_base_stack.
+; Must be called once per if-chain entry so codegen_patch_chain_end knows
+; which end_jump entries belong to this chain vs an outer/inner chain.
+; Preserves all registers.
+codegen_save_chain_base:
+    mov  rax, [rel end_jump_depth]          ; current top of end_jump_stack
+    mov  rcx, [rel chain_base_depth]        ; current nesting level
+    lea  rdx, [rel chain_base_stack]
+    mov  [rdx + rcx*8], rax                 ; push snapshot
+    inc  qword [rel chain_base_depth]
+    ret
+
+; ── codegen_emit_jmp_end ─────────────────────────────────────────────────────
+; Emit an unconditional JMP (E9) with a 0x00000000 placeholder and record the
+; placeholder's buffer offset in end_jump_stack.
+; Called at the end of each taken if/elif branch so that all such jumps can be
+; bulk-patched to the chain exit by codegen_patch_chain_end.
+; Preserves all registers (uses only caller-saved rax, rcx, rdx internally).
+codegen_emit_jmp_end:
+    ; Emit opcode E9  (unconditional near jump)
+    mov  al, 0xE9
+    call emit_b                             ; out_idx now points at rel32 field
+
+    ; Save the rel32 field offset onto end_jump_stack before writing placeholder
+    mov  rax, [rel out_idx]                 ; rax = start of rel32 in out_buffer
+    mov  rcx, [rel end_jump_depth]
+    lea  rdx, [rel end_jump_stack]
+    mov  [rdx + rcx*8], rax                 ; push placeholder offset
+    inc  qword [rel end_jump_depth]
+
+    ; Emit 4-byte placeholder (0x00000000)
+    xor  eax, eax
+    call emit_d
+    ret
+
+; ── codegen_patch_chain_end ──────────────────────────────────────────────────
+; Pop the chain base from chain_base_stack, then patch every end_jump entry
+; from that base index up to the current end_jump_depth so each one jumps to
+; the current out_idx (= chain exit / fall-through point).
+; Resets end_jump_depth to the base so that outer chains are unaffected.
+codegen_patch_chain_end:
+    push r12
+    push r13
+
+    ; Pop chain base snapshot
+    dec  qword [rel chain_base_depth]
+    mov  rcx, [rel chain_base_depth]
+    lea  rdx, [rel chain_base_stack]
+    mov  r12, [rdx + rcx*8]                 ; r12 = base index (first entry to patch)
+
+    ; Walk every end_jump entry from base to current depth and patch it
+    mov  r13, r12                           ; r13 = loop cursor
+.pce_loop:
+    cmp  r13, [rel end_jump_depth]
+    jge  .pce_done
+
+    ; Load placeholder offset from end_jump_stack[r13]
+    lea  rdx, [rel end_jump_stack]
+    mov  rax, [rdx + r13*8]                 ; rax = placeholder buffer offset
+
+    ; disp = out_idx - placeholder_off - 4   (signed rel32 from end-of-JMP)
+    mov  rcx, [rel out_idx]
+    sub  rcx, rax
+    sub  rcx, 4                             ; rcx = signed rel32 displacement
+
+    ; Write displacement into out_buffer[placeholder_off]
+    lea  rdx, [rel out_buffer]
+    mov  [rdx + rax], ecx                   ; 4-byte patch (ecx = low 32 bits of rcx)
+
+    inc  r13
+    jmp  .pce_loop
+
+.pce_done:
+    ; Restore end_jump_depth to base — discards all entries used by this chain
+    mov  [rel end_jump_depth], r12
+
+    pop  r13
+    pop  r12
     ret
 
 ; ── codegen_finish ───────────────────────────────────────────────────────────

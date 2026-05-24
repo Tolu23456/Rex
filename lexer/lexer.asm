@@ -357,6 +357,26 @@ lexer_classify:
     cmp  eax, 0x00006E69
     je   .kw_in
 
+    ; "else"   → 'e'=0x65, 'l'=0x6C, 's'=0x73, 'e'=0x65
+    ;           dword = 0x65736C65  (must verify tok_ident[4] == 0)
+    cmp  eax, 0x65736C65
+    jne  .not_kw_else
+    cmp  byte [rel tok_ident + 4], 0
+    jne  .kw_ident
+    mov  byte [rel tok_type], TOK_ELSE
+    ret
+.not_kw_else:
+
+    ; "elif"   → 'e'=0x65, 'l'=0x6C, 'i'=0x69, 'f'=0x66
+    ;           dword = 0x66696C65  (must verify tok_ident[4] == 0)
+    cmp  eax, 0x66696C65
+    jne  .not_kw_elif
+    cmp  byte [rel tok_ident + 4], 0
+    jne  .kw_ident
+    mov  byte [rel tok_type], TOK_ELIF
+    ret
+.not_kw_elif:
+
     ; "outp"   → 'o'=0x6F, 'u'=0x75, 't'=0x74, 'p'=0x70
     ;           dword = 0x7074756F
     cmp  eax, 0x7074756F

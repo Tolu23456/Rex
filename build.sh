@@ -29,4 +29,10 @@ echo "=== Test 2: tests/conditional_test.rex ==="
 echo "Output:"
 ./output
 echo ""
+
+echo "=== Test 3: tests/elif_else_test.rex ==="
+./rexc tests/elif_else_test.rex
+echo "Output:"
+./output
+echo ""
 echo "All tests passed."

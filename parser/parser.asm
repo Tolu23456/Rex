@@ -20,6 +20,9 @@ extern tok_ident
 extern codegen_output_const
 extern codegen_emit_cmp_jne
 extern codegen_patch_jump
+extern codegen_save_chain_base
+extern codegen_emit_jmp_end
+extern codegen_patch_chain_end
 
 %include "rex_defs.inc"
 
@@ -359,28 +362,38 @@ parse_stmt:
     call lexer_next         ; advance past integer literal
     ret
 
-; ─── if <ident> == <int_lit>: ────────────────────────────────────────────────
+; ─── if / elif* / else? ───────────────────────────────────────────────────────
 ;
-; Parsing sequence consumed here:
-;   TOK_IF  TOK_IDENT  TOK_EQEQ  TOK_INT_LIT  TOK_COLON
-;   TOK_NEWLINE  TOK_INDENT  <body statements>  TOK_DEDENT
+; Handles the complete if-elif*-else? chain in one single-pass descent.
 ;
-; Codegen contract:
-;   1. After priming the first body token, emit cmp+JNE with a placeholder.
-;   2. Parse body statements in an inner loop until TOK_DEDENT (or TOK_EOF).
-;   3. Call codegen_patch_jump to back-fill the JNE displacement.
-;   4. Advance past the DEDENT and return — main loop sees the next statement.
+; Register contract (callee-saved within parse_if stack frame):
+;   r12 = variable value (LHS of ==) for the current branch
+;   r13 = literal value  (RHS of ==) for the current branch
+;
+; Codegen stack protocol:
+;   jump_patch_stack  — one JNE placeholder per live conditional branch
+;   end_jump_stack    — one JMP placeholder per taken branch (skip to chain end)
+;   chain_base_stack  — end_jump_depth snapshot at chain entry for bulk-patch
 .parse_if:
     push r12
     push r13
 
-    ; ── Expect identifier ─────────────────────────────────────────────────────
+    ; Snapshot end_jump_depth so codegen_patch_chain_end patches only our jumps
+    call codegen_save_chain_base
+
+    ; Advance past TOK_IF → first token of condition (identifier)
     call lexer_next
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; .branch_parse_cond — shared entry for both 'if' and each 'elif' condition.
+;   On arrival: tok = condition identifier (TOK_IDENT)
+; ═══════════════════════════════════════════════════════════════════════════════
+.branch_parse_cond:
     movzx eax, byte [rel tok_type]
     cmp  al, TOK_IDENT
     jne  .if_err_ident
 
-    ; Resolve variable → load its compile-time value
+    ; Resolve variable → r12 = compile-time LHS value
     lea  rdi, [rel tok_ident]
     call var_find
     cmp  rax, -1
@@ -389,55 +402,117 @@ parse_stmt:
     imul rax, VAR_ENTRY_SIZE
     lea  rcx, [rel var_table]
     add  rcx, rax
-    mov  r12, [rcx + 32]        ; r12 = variable value
+    mov  r12, [rcx + 32]            ; r12 = variable value (LHS)
 
-    ; ── Expect '==' ───────────────────────────────────────────────────────────
+    ; Expect '=='
     call lexer_next
     movzx eax, byte [rel tok_type]
     cmp  al, TOK_EQEQ
     jne  .if_err_eqeq
 
-    ; ── Expect integer literal (RHS) ─────────────────────────────────────────
+    ; Expect integer literal (RHS)
     call lexer_next
     movzx eax, byte [rel tok_type]
     cmp  al, TOK_INT_LIT
     jne  .if_err_int
 
-    mov  r13, [rel tok_int]     ; r13 = comparison value
+    mov  r13, [rel tok_int]         ; r13 = comparison value (RHS)
 
-    ; ── Consume ':' → newline → INDENT → prime first body token ──────────────
-    call lexer_next             ; int_lit consumed  →  tok = ':'
-    call lexer_next             ;     ':'  consumed  →  tok = newline
-    call lexer_next             ;  newline consumed  →  tok = TOK_INDENT
-    call lexer_next             ;   INDENT consumed  →  tok = first body token
+    ; Consume ':' → newline → INDENT → prime first body token
+    call lexer_next                 ; int_lit  →  ':'
+    call lexer_next                 ; ':'      →  newline
+    call lexer_next                 ; newline  →  INDENT
+    call lexer_next                 ; INDENT   →  first body token
 
-    ; ── Emit: mov edi,r12 ; cmp edi,r13 ; jne <placeholder> ─────────────────
+    ; Emit cmp+JNE with placeholder (placeholder pushed onto jump_patch_stack)
     mov  rdi, r12
     mov  rsi, r13
     call codegen_emit_cmp_jne
 
-    ; ── Body loop: iterate until DEDENT or EOF ────────────────────────────────
-.if_body_loop:
+    ; ── Branch body loop: parse statements until DEDENT or EOF ────────────────
+.branch_body_loop:
     movzx eax, byte [rel tok_type]
     cmp  al, TOK_EOF
-    je   .if_body_done
+    je   .branch_body_done
     cmp  al, TOK_DEDENT
-    je   .if_body_done
+    je   .branch_body_done
     cmp  al, TOK_NEWLINE
-    je   .if_body_next
+    je   .branch_body_skip
     cmp  al, TOK_INDENT
-    je   .if_body_next
-    call parse_stmt             ; recursive — handles any valid statement
-    jmp  .if_body_loop
-.if_body_next:
+    je   .branch_body_skip
+    call parse_stmt                 ; recursive — handles any nested statement
+    jmp  .branch_body_loop
+.branch_body_skip:
     call lexer_next
-    jmp  .if_body_loop
+    jmp  .branch_body_loop
 
-    ; ── Patch the JNE displacement now that the body size is known ────────────
-.if_body_done:
+    ; ── Body done: advance past DEDENT → inspect what follows ─────────────────
+.branch_body_done:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_DEDENT
+    jne  .branch_check_next
+    call lexer_next                 ; consume DEDENT → first token of next line
+
+.branch_check_next:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_ELIF
+    je   .branch_elif_entry
+    cmp  al, TOK_ELSE
+    je   .branch_else_entry
+
+    ; ── No continuation: standalone if (or final elif) — end the chain ────────
+    call codegen_patch_jump         ; back-fill last cond JNE  → chain exit (here)
+    call codegen_patch_chain_end    ; back-fill all JMP-to-end → chain exit (here)
+    pop  r13
+    pop  r12
+    ret
+
+    ; ── elif <ident> == <int_lit>: ────────────────────────────────────────────
+.branch_elif_entry:
+    ; tok = TOK_ELIF
+    ; Phase A: emit unconditional JMP over the rest of the chain
+    call codegen_emit_jmp_end       ; E9 + placeholder → pushed onto end_jump_stack
+    ; Phase B: back-fill the previous cond JNE → here (start of elif test code)
     call codegen_patch_jump
+    ; Phase C: advance past TOK_ELIF → condition ident, then re-parse condition
+    call lexer_next
+    jmp  .branch_parse_cond         ; loops back through condition + body + check
 
-    ; Advance past DEDENT so the main loop sees the next top-level statement
+    ; ── else: ─────────────────────────────────────────────────────────────────
+.branch_else_entry:
+    ; tok = TOK_ELSE
+    ; Phase A: emit unconditional JMP over the else body
+    call codegen_emit_jmp_end       ; E9 + placeholder → pushed onto end_jump_stack
+    ; Phase B: back-fill the previous cond JNE → here (start of else body)
+    call codegen_patch_jump
+    ; Phase C: consume 'else' ':' → newline → INDENT → first body token
+    call lexer_next                 ; TOK_ELSE  →  ':'
+    call lexer_next                 ; ':'       →  newline
+    call lexer_next                 ; newline   →  INDENT
+    call lexer_next                 ; INDENT    →  first else body token
+
+    ; ── Else body loop ────────────────────────────────────────────────────────
+.else_body_loop:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_EOF
+    je   .else_body_done
+    cmp  al, TOK_DEDENT
+    je   .else_body_done
+    cmp  al, TOK_NEWLINE
+    je   .else_body_skip
+    cmp  al, TOK_INDENT
+    je   .else_body_skip
+    call parse_stmt
+    jmp  .else_body_loop
+.else_body_skip:
+    call lexer_next
+    jmp  .else_body_loop
+
+    ; ── Else done: patch ALL "jmp to chain end" → here ────────────────────────
+.else_body_done:
+    ; Phase D: back-fill every JMP-to-end placeholder emitted for this chain
+    call codegen_patch_chain_end
+    ; Advance past else body's DEDENT
     movzx eax, byte [rel tok_type]
     cmp  al, TOK_DEDENT
     jne  .if_exit
@@ -448,7 +523,7 @@ parse_stmt:
     pop  r12
     ret
 
-    ; ── Error paths (sys_exit, so stack imbalance is harmless) ────────────────
+    ; ── Error paths (all terminate via fatal_error → sys_exit) ────────────────
 .if_err_ident:
     pop  r13
     pop  r12

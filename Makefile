@@ -44,3 +44,6 @@ test: rexc
         @echo "=== Test 2: tests/conditional_test.rex ==="
         ./rexc tests/conditional_test.rex
         ./output
+        @echo "=== Test 3: tests/elif_else_test.rex ==="
+        ./rexc tests/elif_else_test.rex
+        ./output
