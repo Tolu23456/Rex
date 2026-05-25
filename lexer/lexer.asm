@@ -199,10 +199,18 @@ lexer_next:
     je   .emit_colon
     cmp  al, '.'
     je   .check_dotdot
+    cmp  al, '@'
+    je   .emit_at
 
     ; Unknown character: skip and try again
     inc  qword [rel lex_pos]
     jmp  .restart
+
+.emit_at:
+    inc  qword [rel lex_pos]
+    mov  byte [rel tok_type], TOK_AT
+    mov  rax, TOK_AT
+    ret
 
     ; ── Token emitters ───────────────────────────────────────────────────────
 .emit_eof:
@@ -356,6 +364,52 @@ lexer_classify:
     ;           dword = 0x00006E69
     cmp  eax, 0x00006E69
     je   .kw_in
+
+    ; "while"  → 'w'=0x77,'h'=0x68,'i'=0x69,'l'=0x6C → dword = 0x6C696877
+    ;           byte[4]='e'=0x65, byte[5]=0
+    cmp  eax, 0x6C696877
+    jne  .not_kw_while
+    cmp  byte [rel tok_ident + 4], 0x65
+    jne  .kw_ident
+    cmp  byte [rel tok_ident + 5], 0
+    jne  .kw_ident
+    mov  byte [rel tok_type], TOK_WHILE
+    ret
+.not_kw_while:
+
+    ; "prot"   → 'p'=0x70,'r'=0x72,'o'=0x6F,'t'=0x74 → dword = 0x746F7270
+    ;           byte[4] = 0
+    cmp  eax, 0x746F7270
+    jne  .not_kw_prot
+    cmp  byte [rel tok_ident + 4], 0
+    jne  .kw_ident
+    mov  byte [rel tok_type], TOK_PROT
+    ret
+.not_kw_prot:
+
+    ; "return" → 'r'=0x72,'e'=0x65,'t'=0x74,'u'=0x75 → dword = 0x75746572
+    ;           byte[4]='r'=0x72, byte[5]='n'=0x6E, byte[6]=0
+    cmp  eax, 0x75746572
+    jne  .not_kw_return
+    cmp  byte [rel tok_ident + 4], 0x72
+    jne  .kw_ident
+    cmp  byte [rel tok_ident + 5], 0x6E
+    jne  .kw_ident
+    cmp  byte [rel tok_ident + 6], 0
+    jne  .kw_ident
+    mov  byte [rel tok_type], TOK_RETURN
+    ret
+.not_kw_return:
+
+    ; "stop"   → 's'=0x73,'t'=0x74,'o'=0x6F,'p'=0x70 → dword = 0x706F7473
+    ;           byte[4] = 0
+    cmp  eax, 0x706F7473
+    jne  .not_kw_stop
+    cmp  byte [rel tok_ident + 4], 0
+    jne  .kw_ident
+    mov  byte [rel tok_type], TOK_STOP
+    ret
+.not_kw_stop:
 
     ; "else"   → 'e'=0x65, 'l'=0x6C, 's'=0x73, 'e'=0x65
     ;           dword = 0x65736C65  (must verify tok_ident[4] == 0)

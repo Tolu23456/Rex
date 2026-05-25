@@ -35,4 +35,16 @@ echo "=== Test 3: tests/elif_else_test.rex ==="
 echo "Output:"
 ./output
 echo ""
+
+echo "=== Test 4: tests/for_test.rex ==="
+./rexc tests/for_test.rex
+echo "Output:"
+./output
+echo ""
+
+echo "=== Test 5: tests/prot_test.rex ==="
+./rexc tests/prot_test.rex
+echo "Output:"
+./output
+echo ""
 echo "All tests passed."

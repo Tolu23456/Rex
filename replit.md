@@ -55,6 +55,22 @@ TOK_EQEQ=14  TOK_ELSE=15  TOK_ELIF=16
 
 ---
 
+## Implemented features (Stage 1)
+
+| Feature | Status |
+|---|---|
+| `for :i in 0..N:` range loop | ✅ |
+| Loop variable live in edi (is_loop_var flag) | ✅ |
+| `stop` keyword (break out of loop) | ✅ |
+| `while x == N:` condition loop | ✅ |
+| `prot name():` protocol definition | ✅ |
+| `@name()` standalone protocol call | ✅ |
+| `return N` inside prot | ✅ |
+| `docs/todo.md` — full V5.0 roadmap | ✅ |
+| `docs/speed_comparison.md` | ✅ |
+
+---
+
 ## Implemented features (Stage 0)
 
 | Feature | Status |
@@ -108,14 +124,14 @@ Key codegen functions:
 
 ## Next features to implement (V5.0 spec priority order)
 
-1. **`for i in 0..N:` loops** — `TOK_FOR`/`TOK_IN`/`TOK_DOTDOT` are already lexed;
-   need `codegen_emit_loop` (backward jump with patch) and a loop-counter variable.
-2. **`float` type** — add `TOK_FLOAT_LIT`, XMM register allocation in codegen, `rt_prf` blob.
-3. **`bool` type** with tri-state (`true`/`false`/`unknown`) — `unknown` triggers `rdrand`.
-4. **String literals** — UTF-8, length-prefix stored in var table, `rt_prs` already present.
-5. **`prot` (protocol/function)** — recursive call support, return value in rax.
-6. **`@` sequences / dicts / sets** — SipHash open-addressing hash table in runtime.
-7. **`use mm N gc N:` allocator contexts** — dynamic allocator handoff blocks.
+1. **`float` type** — add `TOK_FLOAT_LIT`, XMM register allocation in codegen, `rt_prf` blob.
+2. **`bool` type** with tri-state (`true`/`false`/`unknown`) — `unknown` triggers `rdrand`.
+3. **String literals** — UTF-8, length-prefix stored in var table, `rt_prs` already present.
+4. **Protocol parameters** — `prot compute_factorial(int n)`, register-based arg passing.
+5. **`@` sequences / dicts / sets** — SipHash open-addressing hash table in runtime.
+6. **`use mm N gc N:` allocator contexts** — dynamic allocator handoff blocks.
+
+See `todo.md` for the full V5.0 implementation roadmap.
 
 Refer to the architecture document in `attached_assets/` for canonical Rex V5.0 source
 examples for each of the above features.

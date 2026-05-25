@@ -17,6 +17,19 @@ global codegen_patch_jump
 global codegen_save_chain_base
 global codegen_emit_jmp_end
 global codegen_patch_chain_end
+global codegen_output_loop_var
+global codegen_begin_protos
+global codegen_end_protos
+global codegen_emit_for_start
+global codegen_emit_for_end
+global codegen_emit_while_start
+global codegen_emit_while_end
+global codegen_save_break_base
+global codegen_emit_break
+global codegen_patch_breaks
+global codegen_emit_ret
+global codegen_emit_mov_eax_imm32
+global codegen_emit_call_prot
 global out_buffer
 global out_idx
 
@@ -43,6 +56,16 @@ section .bss
     ; ── Per-chain base snapshot (for nested if chains) ────────────────────────
     chain_base_stack:  resq 32   ; saved end_jump_depth at each chain's entry
     chain_base_depth:  resq 1    ; live entries in chain_base_stack
+
+    ; ── Protocol skip-jump ────────────────────────────────────────────────────
+    prot_jmp_off:      resq 1    ; out_buffer offset of the "jmp main_code" rel32
+    prot_jmp_live:     resq 1    ; 1 = placeholder is live (not yet patched)
+
+    ; ── Loop break (stop) patch stack ─────────────────────────────────────────
+    break_jump_stack:  resq 64   ; buffer offsets of pending break jmp rel32 fields
+    break_jump_depth:  resq 1
+    break_base_stack:  resq 32   ; saved break_jump_depth per loop nesting level
+    break_base_depth:  resq 1
 
 ; ─── TEXT ───────────────────────────────────────────────────────────────────
 section .text
@@ -197,17 +220,35 @@ codegen_output_const:
 ;   BF vv vv vv vv           mov edi, var_value     (5)
 ;   81 FF cc cc cc cc        cmp edi, cmp_value     (6)
 ;   0F 85 00 00 00 00        jne <placeholder>      (6)
+; ── codegen_emit_cmp_jne ─────────────────────────────────────────────────────
+; rdi = var_value   — loaded into edi unless rdx != 0
+; rsi = cmp_value   — compared against edi
+; rdx = skip_mov_edi — 0: emit "mov edi, var_value" first; 1: edi already live (loop var)
+;
+; Emitted bytes (rdx==0, full form, 17 bytes):
+;   BF vv vv vv vv           mov edi, var_value     (5)
+;   81 FF cc cc cc cc        cmp edi, cmp_value     (6)
+;   0F 85 00 00 00 00        jne <placeholder>      (6)
+;
+; Emitted bytes (rdx!=0, no-mov form, 12 bytes):
+;   81 FF cc cc cc cc        cmp edi, cmp_value     (6)
+;   0F 85 00 00 00 00        jne <placeholder>      (6)
 codegen_emit_cmp_jne:
     push r12
     push r13
+    push r14
     mov  r12d, edi              ; var_value (clamped to 32 bits)
     mov  r13d, esi              ; cmp_value (clamped to 32 bits)
+    mov  r14,  rdx              ; skip_mov_edi flag (1 = skip, edi already live)
 
-    ; mov edi, var_value  (opcode BF + imm32)
+    ; Conditionally emit: mov edi, var_value  (BF + imm32)
+    test r14, r14
+    jnz  .cmp_skip_mov
     mov  al, 0xBF
     call emit_b
     mov  eax, r12d
     call emit_d
+.cmp_skip_mov:
 
     ; cmp edi, cmp_value  (81 FF + imm32)
     mov  al, 0x81
@@ -230,10 +271,11 @@ codegen_emit_cmp_jne:
     mov  [rdx + rcx*8], rax
     inc  qword [rel jump_stack_depth]
 
-    ; Emit the 4-byte placeholder (0x00000000)
+    ; Emit 4-byte placeholder
     xor  eax, eax
     call emit_d
 
+    pop  r14
     pop  r13
     pop  r12
     ret
@@ -341,6 +383,384 @@ codegen_patch_chain_end:
     mov  [rel end_jump_depth], r12
 
     pop  r13
+    pop  r12
+    ret
+
+; ── codegen_output_loop_var ──────────────────────────────────────────────────
+; Emits a rt_pri call for a loop variable whose value is already live in edi.
+; The call is wrapped in push rdi / pop rdi so the loop counter survives.
+;
+; Emitted bytes (7 bytes total):
+;   57                push rdi        ; save loop counter
+;   E8 <disp:LE32>    call rt_pri     ; print and newline
+;   5F                pop rdi         ; restore loop counter
+codegen_output_loop_var:
+    ; push rdi  (57 — preserves loop counter across rt_pri which clobbers edi)
+    mov  al, 0x57
+    call emit_b
+
+    ; call rt_pri  (E8 + rel32)
+    mov  al, 0xE8
+    call emit_b
+    ; disp = RT_PRI_OFFSET - (out_idx + 4)
+    mov  rax, RT_PRI_OFFSET
+    mov  rcx, [rel out_idx]
+    add  rcx, 4
+    sub  rax, rcx               ; signed displacement
+    call emit_d
+
+    ; pop rdi  (5F — restores loop counter after rt_pri returns)
+    mov  al, 0x5F
+    call emit_b
+
+    ret
+
+; ── codegen_begin_protos ─────────────────────────────────────────────────────
+; Emits one "jmp skip_protos" placeholder (E9 + 4 zero bytes) the FIRST time
+; it is called.  All subsequent calls are no-ops (guarded by prot_jmp_live).
+;
+; The jmp skips over all protocol body code so that prot definitions do not
+; execute during normal top-level evaluation.
+codegen_begin_protos:
+    ; Guard: already emitted?
+    cmp  qword [rel prot_jmp_live], 0
+    jne  .bprot_done
+
+    ; Emit E9 (jmp rel32 opcode)
+    mov  al, 0xE9
+    call emit_b
+
+    ; Record where the rel32 field starts (for patching later)
+    mov  rax, [rel out_idx]
+    mov  [rel prot_jmp_off], rax
+
+    ; Mark live
+    mov  qword [rel prot_jmp_live], 1
+
+    ; Emit 4-byte placeholder
+    xor  eax, eax
+    call emit_d
+
+.bprot_done:
+    ret
+
+; ── codegen_end_protos ───────────────────────────────────────────────────────
+; Patches the "jmp skip_protos" placeholder so it jumps to the current out_idx
+; (the start of main non-prot code).  Idempotent: cleared by prot_jmp_live.
+codegen_end_protos:
+    ; Guard: nothing live to patch
+    cmp  qword [rel prot_jmp_live], 0
+    je   .eprot_done
+
+    ; disp = out_idx - (prot_jmp_off + 4)
+    mov  rax, [rel out_idx]
+    mov  rcx, [rel prot_jmp_off]
+    add  rcx, 4
+    sub  rax, rcx               ; rax = forward displacement
+
+    ; Patch out_buffer[prot_jmp_off..+4]
+    mov  rcx, [rel prot_jmp_off]
+    lea  rdi, [rel out_buffer]
+    add  rdi, rcx
+    mov  [rdi], eax             ; lower 32 bits = displacement
+
+    ; Clear live flag so subsequent calls are no-ops
+    mov  qword [rel prot_jmp_live], 0
+
+.eprot_done:
+    ret
+
+; ── codegen_emit_for_start ───────────────────────────────────────────────────
+; rdi = start value (loop counter initialiser, e.g. 0)
+; rsi = end   value (exclusive upper bound,   e.g. 5)
+;
+; Emits:
+;   BF <start:LE32>          mov edi, start      (5)
+;   <loop_top:>
+;   81 FF <end:LE32>         cmp edi, end        (6)
+;   0F 8D 00 00 00 00        jge <placeholder>   (6)   ← pushed onto jump_patch_stack
+;
+; Returns: rax = loop_top  (buffer offset of the cmp instruction)
+codegen_emit_for_start:
+    push r12
+    push r13
+    mov  r12d, edi              ; r12d = start value
+    mov  r13d, esi              ; r13d = end value
+
+    ; Emit: mov edi, start  (BF + imm32)
+    mov  al, 0xBF
+    call emit_b
+    mov  eax, r12d
+    call emit_d
+
+    ; Record loop_top = out_idx (this is where the cmp instruction will be)
+    mov  r12, [rel out_idx]     ; r12 now = loop_top
+
+    ; Emit: cmp edi, end  (81 FF + imm32)
+    mov  al, 0x81
+    call emit_b
+    mov  al, 0xFF
+    call emit_b
+    mov  eax, r13d
+    call emit_d
+
+    ; Emit: jge rel32  (0F 8D + 4-byte placeholder)
+    mov  al, 0x0F
+    call emit_b
+    mov  al, 0x8D
+    call emit_b
+
+    ; Push rel32 offset onto jump_patch_stack
+    mov  rax, [rel out_idx]
+    mov  rcx, [rel jump_stack_depth]
+    lea  rdx, [rel jump_patch_stack]
+    mov  [rdx + rcx*8], rax
+    inc  qword [rel jump_stack_depth]
+
+    ; Emit 4-byte placeholder
+    xor  eax, eax
+    call emit_d
+
+    ; Return loop_top in rax
+    mov  rax, r12
+
+    pop  r13
+    pop  r12
+    ret
+
+; ── codegen_emit_for_end ─────────────────────────────────────────────────────
+; rdi = loop_top  (buffer offset returned by codegen_emit_for_start)
+;
+; Emits:
+;   FF C7            inc edi             (2)
+;   E9 <disp:LE32>   jmp <loop_top>      (5, backward)
+;
+; Then patches:
+;   - jge placeholder (top of jump_patch_stack) → here (after_loop)
+;   - all break (stop) jmps for this loop      → here (after_loop)
+codegen_emit_for_end:
+    push r12
+    mov  r12, rdi               ; r12 = loop_top
+
+    ; Emit: inc edi  (FF C7)
+    mov  al, 0xFF
+    call emit_b
+    mov  al, 0xC7
+    call emit_b
+
+    ; Emit: jmp backward  (E9 + rel32)
+    mov  al, 0xE9
+    call emit_b
+    ; disp = loop_top - (out_idx + 4)
+    mov  rax, r12
+    mov  rcx, [rel out_idx]
+    add  rcx, 4
+    sub  rax, rcx               ; negative signed displacement
+    call emit_d
+
+    ; Patch jge placeholder → current out_idx (after-loop target)
+    call codegen_patch_jump
+
+    ; Patch all break (stop) jmps → current out_idx
+    call codegen_patch_breaks
+
+    pop  r12
+    ret
+
+; ── codegen_emit_while_start ─────────────────────────────────────────────────
+; rdi = var_value     — compare LHS (the variable's current value)
+; rsi = cmp_value     — compare RHS (the literal to match)
+; rdx = skip_mov_edi  — 1 if var is a loop var (edi already live), 0 otherwise
+;
+; Records loop_top BEFORE emitting the cmp, then delegates to
+; codegen_emit_cmp_jne (which pushes the jne onto jump_patch_stack).
+;
+; Returns: rax = loop_top
+codegen_emit_while_start:
+    push r12
+    push r13
+    push r14
+    push rbx
+    mov  r13d, edi              ; r13d = var_value
+    mov  r14d, esi              ; r14d = cmp_value
+    movzx rbx, dl               ; rbx = skip_mov_edi flag
+
+    ; Record loop_top = out_idx (before the cmp instruction)
+    mov  r12, [rel out_idx]
+
+    ; Emit cmp+jne via shared helper (also pushes jne placeholder)
+    mov  edi, r13d
+    mov  esi, r14d
+    mov  rdx, rbx
+    call codegen_emit_cmp_jne
+
+    ; Return loop_top
+    mov  rax, r12
+
+    pop  rbx
+    pop  r14
+    pop  r13
+    pop  r12
+    ret
+
+; ── codegen_emit_while_end ───────────────────────────────────────────────────
+; rdi = loop_top  (buffer offset returned by codegen_emit_while_start)
+;
+; Emits backward jmp, patches jne → after_loop, patches all breaks.
+codegen_emit_while_end:
+    push r12
+    mov  r12, rdi               ; r12 = loop_top
+
+    ; Emit: jmp backward  (E9 + rel32)
+    mov  al, 0xE9
+    call emit_b
+    ; disp = loop_top - (out_idx + 4)
+    mov  rax, r12
+    mov  rcx, [rel out_idx]
+    add  rcx, 4
+    sub  rax, rcx               ; negative displacement
+    call emit_d
+
+    ; Patch jne → after_loop
+    call codegen_patch_jump
+
+    ; Patch all break jmps → after_loop
+    call codegen_patch_breaks
+
+    pop  r12
+    ret
+
+; ── codegen_save_break_base ──────────────────────────────────────────────────
+; Snapshots the current break_jump_depth onto break_base_stack.
+; Called once at the start of every loop (for/while).
+codegen_save_break_base:
+    mov  rax, [rel break_jump_depth]    ; current depth
+    mov  rcx, [rel break_base_depth]    ; stack top index
+    lea  rdx, [rel break_base_stack]
+    mov  [rdx + rcx*8], rax             ; push snapshot
+    inc  qword [rel break_base_depth]
+    ret
+
+; ── codegen_emit_break ───────────────────────────────────────────────────────
+; Emits an unconditional "jmp 0" placeholder and pushes its rel32 offset onto
+; break_jump_stack for later bulk-patching by codegen_patch_breaks.
+;
+; Emitted bytes:
+;   E9 00 00 00 00   jmp <placeholder>  (5)
+codegen_emit_break:
+    ; Emit E9 (jmp opcode)
+    mov  al, 0xE9
+    call emit_b
+
+    ; Push rel32 slot offset onto break_jump_stack
+    mov  rax, [rel out_idx]
+    mov  rcx, [rel break_jump_depth]
+    lea  rdx, [rel break_jump_stack]
+    mov  [rdx + rcx*8], rax
+    inc  qword [rel break_jump_depth]
+
+    ; Emit 4-byte placeholder
+    xor  eax, eax
+    call emit_d
+    ret
+
+; ── codegen_patch_breaks ─────────────────────────────────────────────────────
+; Pops the current loop's base from break_base_stack, then back-fills every
+; break jmp entry since that base with a forward displacement to out_idx
+; (the instruction immediately after the loop).
+codegen_patch_breaks:
+    push r12
+    push r13
+    push r14
+
+    ; Pop base from break_base_stack
+    dec  qword [rel break_base_depth]
+    mov  rcx, [rel break_base_depth]
+    lea  rax, [rel break_base_stack]       ; base ptr (no RIP+index in one operand)
+    mov  r12, [rax + rcx*8]                ; r12 = base index
+
+    ; r13 = current break_jump_depth (high water mark)
+    mov  r13, [rel break_jump_depth]
+
+    ; rax = forward target address (current out_idx)
+    mov  rax, [rel out_idx]
+
+    ; Loop: patch entries [base..depth-1]
+    mov  r14, r12               ; r14 = loop counter starting at base
+.pbk_loop:
+    cmp  r14, r13               ; all entries patched?
+    jge  .pbk_done
+
+    ; rel32 slot offset for this break
+    lea  rcx, [rel break_jump_stack]       ; base ptr
+    mov  rdx, [rcx + r14*8]                ; rdx = rel32 slot offset
+
+    ; disp = out_idx - (rdx + 4)
+    mov  rcx, rax
+    sub  rcx, rdx
+    sub  rcx, 4
+
+    ; Patch 4 bytes at out_buffer[rdx]
+    lea  rdi, [rel out_buffer]
+    add  rdi, rdx
+    mov  [rdi], ecx
+
+    inc  r14
+    jmp  .pbk_loop
+
+.pbk_done:
+    ; Restore break_jump_depth to base (discard all patched entries)
+    mov  [rel break_jump_depth], r12
+
+    pop  r14
+    pop  r13
+    pop  r12
+    ret
+
+; ── codegen_emit_ret ─────────────────────────────────────────────────────────
+; Emits a single RET instruction (C3).
+codegen_emit_ret:
+    mov  al, 0xC3
+    call emit_b
+    ret
+
+; ── codegen_emit_mov_eax_imm32 ───────────────────────────────────────────────
+; rdi = value  (lower 32 bits used as imm32)
+;
+; Emitted bytes:
+;   B8 <value:LE32>  mov eax, value  (5)
+codegen_emit_mov_eax_imm32:
+    push rdi
+    mov  al, 0xB8
+    call emit_b
+    pop  rax
+    call emit_d             ; emit lower 32 bits of value
+    ret
+
+; ── codegen_emit_call_prot ───────────────────────────────────────────────────
+; rdi = prot_buffer_offset  (byte offset from out_buffer start of prot's first
+;                            instruction, as returned by proto registration)
+;
+; Emitted bytes:
+;   E8 <disp:LE32>  call <prot>  (5)
+;
+; disp = prot_offset - (out_idx + 4)  [signed, computed after emitting E8]
+codegen_emit_call_prot:
+    push r12
+    mov  r12, rdi               ; r12 = prot buffer offset
+
+    ; Emit E8 (call opcode)
+    mov  al, 0xE8
+    call emit_b
+
+    ; disp = r12 - (out_idx + 4)
+    mov  rax, r12
+    mov  rcx, [rel out_idx]
+    add  rcx, 4
+    sub  rax, rcx               ; signed displacement
+
+    call emit_d
+
     pop  r12
     ret
 

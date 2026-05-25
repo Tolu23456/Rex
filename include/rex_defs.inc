@@ -18,6 +18,11 @@ TOK_DOTDOT    equ 13
 TOK_EQEQ      equ 14          ; '==' equality comparison operator
 TOK_ELSE      equ 15          ; 'else' keyword
 TOK_ELIF      equ 16          ; 'elif' keyword
+TOK_WHILE     equ 17          ; 'while' keyword
+TOK_PROT      equ 18          ; 'prot' keyword
+TOK_RETURN    equ 19          ; 'return' keyword
+TOK_STOP      equ 20          ; 'stop' keyword (break)
+TOK_AT        equ 21          ; '@' call sigil
 
 ; ─── Variable table ──────────────────────────────────────────────────────────
 VAR_ENTRY_SIZE equ 64   ; bytes per entry:  [0..31]=name, [32..39]=value,

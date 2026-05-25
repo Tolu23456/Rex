@@ -23,14 +23,34 @@ extern codegen_patch_jump
 extern codegen_save_chain_base
 extern codegen_emit_jmp_end
 extern codegen_patch_chain_end
+extern codegen_output_loop_var
+extern codegen_begin_protos
+extern codegen_end_protos
+extern codegen_emit_for_start
+extern codegen_emit_for_end
+extern codegen_emit_while_start
+extern codegen_emit_while_end
+extern codegen_save_break_base
+extern codegen_emit_break
+extern codegen_patch_breaks
+extern codegen_emit_ret
+extern codegen_emit_mov_eax_imm32
+extern codegen_emit_call_prot
+extern out_idx
 
 %include "rex_defs.inc"
 
 ; ─── BSS ────────────────────────────────────────────────────────────────────
 section .bss
-    var_table:   resb VAR_ENTRY_SIZE * VAR_MAX  ; variable table
-    var_count:   resq 1                          ; number of declared variables
-    saved_name:  resb 64                         ; temp: save ident across lexer calls
+    var_table:        resb VAR_ENTRY_SIZE * VAR_MAX  ; variable table
+    var_count:        resq 1                          ; number of declared variables
+    saved_name:       resb 64                         ; temp: save ident across lexer calls
+    saved_is_loop_var: resb 1                         ; is_loop_var flag preserved across lexer calls
+
+    ; Protocol table: 32 entries × 40 bytes (32-byte name + 8-byte buffer offset)
+    proto_table:      resb 40 * 32
+    proto_count:      resq 1    ; number of registered protocols
+    prot_body_depth:  resq 1    ; >0 when parsing inside a prot body (guards codegen_end_protos)
 
 ; ─── DATA (error messages) ───────────────────────────────────────────────────
 section .data
@@ -48,6 +68,12 @@ section .data
     err_expect_assign_len equ $ - err_expect_assign
     err_expect_eqeq:     db "error: expected '=='", 10
     err_expect_eqeq_len  equ $ - err_expect_eqeq
+    err_expect_in:       db "error: expected 'in'", 10
+    err_expect_in_len    equ $ - err_expect_in
+    err_expect_dotdot:   db "error: expected '..'", 10
+    err_expect_dotdot_len equ $ - err_expect_dotdot
+    err_undef_prot:      db "error: undefined protocol", 10
+    err_undef_prot_len   equ $ - err_undef_prot
 
 ; ─── TEXT ────────────────────────────────────────────────────────────────────
 section .text
@@ -212,7 +238,19 @@ var_add:
 ; On return, tok_type holds the token immediately after the statement
 ; (typically TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, or TOK_EOF).
 parse_stmt:
+    ; Read current token type first so we can guard on TOK_PROT below
     movzx eax, byte [rel tok_type]
+
+    ; Patch the prot-skip jmp ONLY if this statement is NOT itself a prot definition
+    ; and we are NOT inside a prot body.  Patching during a prot definition would
+    ; redirect the jmp to mid-prot code instead of to the main program.
+    cmp  al, TOK_PROT
+    je   .stmt_skip_end_protos
+    cmp  qword [rel prot_body_depth], 0
+    jne  .stmt_skip_end_protos
+    call codegen_end_protos
+    movzx eax, byte [rel tok_type]   ; re-read: call may have clobbered eax
+.stmt_skip_end_protos:
 
     cmp  al, TOK_TYPE_INT
     je   .parse_decl
@@ -225,6 +263,24 @@ parse_stmt:
 
     cmp  al, TOK_IF
     je   .parse_if
+
+    cmp  al, TOK_FOR
+    je   .parse_for
+
+    cmp  al, TOK_WHILE
+    je   .parse_while
+
+    cmp  al, TOK_PROT
+    je   .parse_prot
+
+    cmp  al, TOK_RETURN
+    je   .parse_return
+
+    cmp  al, TOK_STOP
+    je   .parse_stop
+
+    cmp  al, TOK_AT
+    je   .parse_at
 
     ; Unknown token at statement level — skip
     call lexer_next
@@ -348,9 +404,20 @@ parse_stmt:
     cmp  byte [rcx + 41], 1
     jne  .err_uninit_var
 
-    ; Emit code: call rt_pri with the known value
+    ; Check is_loop_var flag at byte[43] — loop counter already live in edi
+    cmp  byte [rcx + 43], 1
+    je   .output_loop_var
+
+    ; Static variable: emit "mov edi, value; call rt_pri"
     mov  rdi, [rcx + 32]
     call codegen_output_const
+
+    call lexer_next         ; advance past identifier
+    ret
+
+.output_loop_var:
+    ; Loop variable: edi is already live; emit "push rdi; call rt_pri; pop rdi"
+    call codegen_output_loop_var
 
     call lexer_next         ; advance past identifier
     ret
@@ -403,6 +470,9 @@ parse_stmt:
     lea  rcx, [rel var_table]
     add  rcx, rax
     mov  r12, [rcx + 32]            ; r12 = variable value (LHS)
+    ; Save is_loop_var flag (byte[43]) for passing in rdx to codegen_emit_cmp_jne
+    movzx rax, byte [rcx + 43]
+    mov  [rel saved_is_loop_var], al
 
     ; Expect '=='
     call lexer_next
@@ -425,6 +495,8 @@ parse_stmt:
     call lexer_next                 ; INDENT   →  first body token
 
     ; Emit cmp+JNE with placeholder (placeholder pushed onto jump_patch_stack)
+    ; rdx = is_loop_var (1 = skip "mov edi, val" since edi is already live)
+    movzx rdx, byte [rel saved_is_loop_var]
     mov  rdi, r12
     mov  rsi, r13
     call codegen_emit_cmp_jne
@@ -583,3 +655,504 @@ parse_stmt:
     lea  rsi, [rel err_expect_assign]
     mov  rdx, err_expect_assign_len
     call fatal_error
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; .parse_for — for :i in <start>..<end>:
+;
+; Token stream (after TOK_FOR is current):
+;   TOK_FOR → TOK_COLON → TOK_IDENT(i) → TOK_IN → TOK_INT_LIT(start)
+;   → TOK_DOTDOT → TOK_INT_LIT(end) → TOK_COLON → newline → INDENT → body → DEDENT
+;
+; Register contract:
+;   r12 = loop_top (from codegen_emit_for_start)
+;   r13 = start value
+;   r14 = end value
+;   rbx = var_table index of loop variable
+; ═══════════════════════════════════════════════════════════════════════════════
+.parse_for:
+    push r12
+    push r13
+    push r14
+    push rbx
+
+    ; Advance: TOK_FOR → ':'
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_COLON
+    jne  .for_err
+
+    ; Advance: ':' → TOK_IDENT (loop variable name)
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_IDENT
+    jne  .for_err
+
+    ; Copy loop var name into saved_name buffer
+    lea  rdi, [rel saved_name]
+    lea  rsi, [rel tok_ident]
+    mov  ecx, 32
+.for_copy_name:
+    movzx eax, byte [rsi]
+    mov  [rdi], al
+    inc  rsi
+    inc  rdi
+    test al, al
+    jz   .for_name_done
+    dec  ecx
+    jnz  .for_copy_name
+.for_name_done:
+
+    ; Advance: TOK_IDENT → TOK_IN
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_IN
+    jne  .for_err
+
+    ; Advance: TOK_IN → TOK_INT_LIT (start value)
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_INT_LIT
+    jne  .for_err
+    mov  r13, [rel tok_int]         ; r13 = start
+
+    ; Advance: int_lit → TOK_DOTDOT
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_DOTDOT
+    jne  .for_err
+
+    ; Advance: TOK_DOTDOT → TOK_INT_LIT (end value, exclusive upper bound)
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_INT_LIT
+    jne  .for_err
+    mov  r14, [rel tok_int]         ; r14 = end
+
+    ; Advance: int_lit → ':' → newline → INDENT → first body token
+    call lexer_next                 ; → ':'
+    call lexer_next                 ; → newline
+    call lexer_next                 ; → INDENT
+    call lexer_next                 ; → first body token
+
+    ; Register loop variable: mutable, initialised, is_loop_var = 1
+    lea  rdi, [rel saved_name]
+    mov  rsi, r13                   ; initial value = start
+    mov  dl,  0                     ; is_const = 0 (mutable)
+    mov  dh,  1                     ; is_initialized = 1
+    call var_add
+    mov  rbx, rax                   ; rbx = var index (returned by var_add)
+    imul rax, VAR_ENTRY_SIZE
+    lea  rcx, [rel var_table]
+    add  rcx, rax
+    mov  byte [rcx + 41], 1         ; is_initialized = 1 (var_add sets it from dl=0; fix here)
+    mov  byte [rcx + 43], 1         ; is_loop_var = 1 (edi is live carrier of counter)
+
+    ; Save break base + emit for-loop start code
+    call codegen_save_break_base
+    mov  rdi, r13                   ; start
+    mov  rsi, r14                   ; end
+    call codegen_emit_for_start
+    mov  r12, rax                   ; r12 = loop_top (returned by codegen_emit_for_start)
+
+    ; ── For body loop ────────────────────────────────────────────────────────
+.for_body_loop:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_EOF
+    je   .for_body_done
+    cmp  al, TOK_DEDENT
+    je   .for_body_done
+    cmp  al, TOK_NEWLINE
+    je   .for_body_skip
+    cmp  al, TOK_INDENT
+    je   .for_body_skip
+    call parse_stmt
+    jmp  .for_body_loop
+.for_body_skip:
+    call lexer_next
+    jmp  .for_body_loop
+.for_body_done:
+    ; Consume DEDENT if present
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_DEDENT
+    jne  .for_after_dedent
+    call lexer_next
+.for_after_dedent:
+
+    ; Emit: inc edi + backward jmp + patch jge + patch breaks
+    mov  rdi, r12
+    call codegen_emit_for_end
+
+    ; Clear is_loop_var so variable is no longer treated as live-in-edi
+    mov  rax, rbx
+    imul rax, VAR_ENTRY_SIZE
+    lea  rcx, [rel var_table]
+    add  rcx, rax
+    mov  byte [rcx + 43], 0
+
+    pop  rbx
+    pop  r14
+    pop  r13
+    pop  r12
+    ret
+
+.for_err:
+    pop  rbx
+    pop  r14
+    pop  r13
+    pop  r12
+    lea  rsi, [rel err_expect_in]
+    mov  rdx, err_expect_in_len
+    call fatal_error
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; .parse_while — while <ident> == <int_lit>:
+;
+; Token stream (after TOK_WHILE is current):
+;   TOK_WHILE → TOK_IDENT → TOK_EQEQ → TOK_INT_LIT → TOK_COLON → newline → INDENT
+;   → body → DEDENT
+;
+; Register contract:
+;   r12 = loop_top (from codegen_emit_while_start)
+;   r13 = variable value (LHS)
+;   r14 = comparison literal (RHS)
+; ═══════════════════════════════════════════════════════════════════════════════
+.parse_while:
+    push r12
+    push r13
+    push r14
+
+    ; Advance: TOK_WHILE → TOK_IDENT (condition variable)
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_IDENT
+    jne  .while_err
+
+    ; Look up variable in var_table
+    lea  rdi, [rel tok_ident]
+    call var_find
+    cmp  rax, -1
+    je   .while_err
+
+    imul rax, VAR_ENTRY_SIZE
+    lea  rcx, [rel var_table]
+    add  rcx, rax
+    mov  r13, [rcx + 32]            ; r13 = variable value (LHS)
+    movzx rax, byte [rcx + 43]
+    mov  [rel saved_is_loop_var], al ; save is_loop_var for codegen
+
+    ; Advance: TOK_IDENT → TOK_EQEQ
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_EQEQ
+    jne  .while_err
+
+    ; Advance: TOK_EQEQ → TOK_INT_LIT (comparison value)
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_INT_LIT
+    jne  .while_err
+    mov  r14, [rel tok_int]         ; r14 = comparison value (RHS)
+
+    ; Advance: int_lit → ':' → newline → INDENT → first body token
+    call lexer_next                 ; → ':'
+    call lexer_next                 ; → newline
+    call lexer_next                 ; → INDENT
+    call lexer_next                 ; → first body token
+
+    ; Save break base + emit while-loop start (records loop_top + emits cmp+jne)
+    call codegen_save_break_base
+    mov  rdi, r13
+    mov  rsi, r14
+    movzx rdx, byte [rel saved_is_loop_var]
+    call codegen_emit_while_start
+    mov  r12, rax                   ; r12 = loop_top
+
+    ; ── While body loop ──────────────────────────────────────────────────────
+.while_body_loop:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_EOF
+    je   .while_body_done
+    cmp  al, TOK_DEDENT
+    je   .while_body_done
+    cmp  al, TOK_NEWLINE
+    je   .while_body_skip
+    cmp  al, TOK_INDENT
+    je   .while_body_skip
+    call parse_stmt
+    jmp  .while_body_loop
+.while_body_skip:
+    call lexer_next
+    jmp  .while_body_loop
+.while_body_done:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_DEDENT
+    jne  .while_after_dedent
+    call lexer_next
+.while_after_dedent:
+
+    ; Emit backward jmp + patch jne → after_loop + patch breaks
+    mov  rdi, r12
+    call codegen_emit_while_end
+
+    pop  r14
+    pop  r13
+    pop  r12
+    ret
+
+.while_err:
+    pop  r14
+    pop  r13
+    pop  r12
+    lea  rsi, [rel err_expect_ident]
+    mov  rdx, err_expect_ident_len
+    call fatal_error
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; .parse_prot — prot <name>():
+;
+; Token stream (after TOK_PROT is current; '(' and ')' are unknown chars → skipped):
+;   TOK_PROT → TOK_IDENT(name) → TOK_COLON → newline → INDENT → body → DEDENT
+;
+; Protocol table entry: 40 bytes — [0..31]=name, [32..39]=code_offset (qword)
+; ═══════════════════════════════════════════════════════════════════════════════
+.parse_prot:
+    push r12                        ; r12 = prot code start (out_idx snapshot)
+    push r13                        ; r13 = proto_table entry ptr
+
+    ; Mark that we are now parsing inside a prot body (suppresses codegen_end_protos)
+    inc  qword [rel prot_body_depth]
+
+    ; Emit the one-time jmp-over-protos placeholder (idempotent)
+    call codegen_begin_protos
+
+    ; Snapshot out_idx: this is where the prot's machine code will begin
+    mov  r12, [rel out_idx]
+
+    ; Advance: TOK_PROT → TOK_IDENT (protocol name)
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_IDENT
+    jne  .prot_err
+
+    ; Compute proto_table entry ptr for proto_count-th entry
+    mov  rax, [rel proto_count]
+    imul rax, 40
+    lea  r13, [rel proto_table]
+    add  r13, rax                   ; r13 = &proto_table[proto_count]
+
+    ; Copy protocol name into entry[0..31]
+    mov  rdi, r13
+    lea  rsi, [rel tok_ident]
+    mov  ecx, 32
+.prot_copy_name:
+    movzx eax, byte [rsi]
+    mov  [rdi], al
+    inc  rsi
+    inc  rdi
+    test al, al
+    jz   .prot_name_done
+    dec  ecx
+    jnz  .prot_copy_name
+.prot_name_done:
+
+    ; Store code start offset into entry[32..39]
+    mov  [r13 + 32], r12
+
+    ; Increment proto_count
+    inc  qword [rel proto_count]
+
+    ; Advance past name (and skipped '(' ')') → TOK_COLON → newline → INDENT → body token
+    call lexer_next                 ; → TOK_COLON  (parens are unknown, skipped by lexer)
+    call lexer_next                 ; → newline
+    call lexer_next                 ; → INDENT
+    call lexer_next                 ; → first body token
+
+    ; ── Prot body loop ───────────────────────────────────────────────────────
+.prot_body_loop:
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_EOF
+    je   .prot_body_done
+    cmp  al, TOK_DEDENT
+    je   .prot_body_done
+    cmp  al, TOK_NEWLINE
+    je   .prot_body_skip
+    cmp  al, TOK_INDENT
+    je   .prot_body_skip
+    call parse_stmt
+    jmp  .prot_body_loop
+.prot_body_skip:
+    call lexer_next
+    jmp  .prot_body_loop
+.prot_body_done:
+    ; Consume DEDENT
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_DEDENT
+    jne  .prot_after_dedent
+    call lexer_next
+.prot_after_dedent:
+
+    ; Emit implicit ret (C3) to close the prot's machine code block
+    call codegen_emit_ret
+
+    ; Leave prot body scope
+    dec  qword [rel prot_body_depth]
+
+    pop  r13
+    pop  r12
+    ret
+
+.prot_err:
+    dec  qword [rel prot_body_depth]
+    pop  r13
+    pop  r12
+    lea  rsi, [rel err_expect_ident]
+    mov  rdx, err_expect_ident_len
+    call fatal_error
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; .parse_return — return [<int_lit>]
+;
+; Emits: mov eax, value (if present) then ret.
+; For the current implementation, return with a literal is supported.
+; ═══════════════════════════════════════════════════════════════════════════════
+.parse_return:
+    ; Advance past TOK_RETURN → check next token
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_INT_LIT
+    jne  .return_bare             ; bare return (no value)
+
+    ; Emit: mov eax, value
+    mov  rdi, [rel tok_int]
+    call codegen_emit_mov_eax_imm32
+
+    ; Advance past the literal
+    call lexer_next
+
+.return_bare:
+    ; Emit: ret (C3)
+    call codegen_emit_ret
+    ret
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; .parse_stop — stop  (break out of current loop)
+;
+; Emits an unconditional jmp placeholder that will be back-filled by
+; codegen_patch_breaks when the enclosing loop ends.
+; ═══════════════════════════════════════════════════════════════════════════════
+.parse_stop:
+    ; Emit: jmp 0 placeholder → pushed onto break_jump_stack
+    call codegen_emit_break
+
+    ; Advance past TOK_STOP
+    call lexer_next
+    ret
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; .parse_at — @<name>()   (standalone protocol call, result discarded)
+;
+; Token stream (after TOK_AT is current; '(' and ')' are skipped by lexer):
+;   TOK_AT → TOK_IDENT(name)   [then lexer skips '(' ')']
+;
+; Looks up the protocol in proto_table and emits a CALL instruction.
+; ═══════════════════════════════════════════════════════════════════════════════
+.parse_at:
+    push r12                        ; r12 = prot buffer offset
+
+    ; Advance: TOK_AT → TOK_IDENT (protocol name)
+    call lexer_next
+    movzx eax, byte [rel tok_type]
+    cmp  al, TOK_IDENT
+    jne  .at_err
+
+    ; Look up protocol in proto_table
+    lea  rdi, [rel tok_ident]
+    call proto_find
+    cmp  rax, -1
+    je   .at_err_undef
+    mov  r12, rax                   ; r12 = prot code offset in out_buffer
+
+    ; Advance past the ident (and ignored '(' ')') → next statement token
+    call lexer_next                 ; → should land on next meaningful token
+
+    ; Emit: call <prot>  (E8 + rel32)
+    mov  rdi, r12
+    call codegen_emit_call_prot
+
+    pop  r12
+    ret
+
+.at_err:
+    pop  r12
+    lea  rsi, [rel err_expect_ident]
+    mov  rdx, err_expect_ident_len
+    call fatal_error
+
+.at_err_undef:
+    pop  r12
+    lea  rsi, [rel err_undef_prot]
+    mov  rdx, err_undef_prot_len
+    call fatal_error
+
+; ═══════════════════════════════════════════════════════════════════════════════
+; proto_find — search proto_table for a protocol name
+;
+; rdi = pointer to null-terminated name string (max 31 chars)
+; Returns:
+;   rax = buffer offset of prot's first instruction (from proto_table entry[32..39])
+;   rax = -1 if not found
+; ═══════════════════════════════════════════════════════════════════════════════
+proto_find:
+    push r12
+    push r13
+    push rbx
+
+    mov  r12, rdi                   ; r12 = name to search for
+    xor  r13, r13                   ; r13 = table index
+
+.pf_loop:
+    cmp  r13, [rel proto_count]
+    jge  .pf_not_found
+
+    ; Compute entry pointer: proto_table + r13 * 40
+    mov  rax, r13
+    imul rax, 40
+    lea  rbx, [rel proto_table]
+    add  rbx, rax                   ; rbx = &proto_table[r13]
+
+    ; Compare name bytes until mismatch or null terminator
+    mov  rdi, rbx
+    mov  rsi, r12
+    mov  ecx, 32
+.pf_cmp_loop:
+    movzx eax, byte [rdi]
+    movzx edx, byte [rsi]
+    cmp  eax, edx
+    jne  .pf_no_match               ; byte mismatch → try next entry
+    test eax, eax                   ; both bytes == 0 → end of name → match
+    jz   .pf_match
+    inc  rdi
+    inc  rsi
+    dec  ecx
+    jnz  .pf_cmp_loop
+
+.pf_match:
+    ; Return buffer offset stored at entry[32..39]
+    mov  rax, [rbx + 32]
+
+    pop  rbx
+    pop  r13
+    pop  r12
+    ret
+
+.pf_no_match:
+    inc  r13
+    jmp  .pf_loop
+
+.pf_not_found:
+    mov  rax, -1
+
+    pop  rbx
+    pop  r13
+    pop  r12
+    ret
