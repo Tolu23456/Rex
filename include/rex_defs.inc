@@ -1,52 +1,72 @@
-; rex_defs.inc - Shared constants for Rex compiler modules
-
-; ─── Token types ────────────────────────────────────────────────────────────
-TOK_EOF       equ 0
-TOK_NEWLINE   equ 1
-TOK_INDENT    equ 2
-TOK_DEDENT    equ 3
-TOK_IDENT     equ 4
-TOK_INT_LIT   equ 5
-TOK_TYPE_INT  equ 6
-TOK_ASSIGN    equ 7
-TOK_COLON     equ 8
-TOK_OUTPUT    equ 9
-TOK_IF        equ 10
-TOK_FOR       equ 11
-TOK_IN        equ 12
-TOK_DOTDOT    equ 13
-TOK_EQEQ      equ 14          ; '==' equality comparison operator
-TOK_ELSE      equ 15          ; 'else' keyword
-TOK_ELIF      equ 16          ; 'elif' keyword
-TOK_WHILE     equ 17          ; 'while' keyword
-TOK_PROT      equ 18          ; 'prot' keyword
-TOK_RETURN    equ 19          ; 'return' keyword
-TOK_STOP      equ 20          ; 'stop' keyword (break)
-TOK_AT        equ 21          ; '@' call sigil
-
-; ─── Variable table ──────────────────────────────────────────────────────────
-VAR_ENTRY_SIZE equ 64   ; bytes per entry:  [0..31]=name, [32..39]=value,
-                        ;                   [40]=is_const, [41]=is_init, [42..63]=pad
-VAR_MAX        equ 16   ; max variables
-
-; ─── Output binary layout constants ─────────────────────────────────────────
-;   [0x00..0x3F]  ELF header        (64 bytes)
-;   [0x40..0x77]  Program header    (56 bytes)
-;   [0x78..0x7F]  Padding           ( 8 bytes)
-;                                  ─────────── total = 128 = HEADERS_SIZE
-;   [0x80]        JMP +RT_TOTAL     ( 5 bytes)
-;   [0x85]        rt_pri blob       (63 bytes)
-;   [0xC4]        rt_prs blob       (13 bytes)
-;                                  ─────────── total runtime = 81 bytes
-;   [0xD1]        Generated code starts here   (CODE_START = 209)
-
-LOAD_BASE     equ 0x400000
-HEADERS_SIZE  equ 128
-JMP_SIZE      equ 5
-RT_PRI_SIZE   equ 63
-RT_PRS_SIZE   equ 13
-RT_TOTAL_SIZE equ RT_PRI_SIZE + RT_PRS_SIZE   ; 76
-
-RT_PRI_OFFSET equ HEADERS_SIZE + JMP_SIZE               ; = 133
-RT_PRS_OFFSET equ RT_PRI_OFFSET + RT_PRI_SIZE           ; = 196
-CODE_START    equ RT_PRS_OFFSET + RT_PRS_SIZE           ; = 209
+default rel
+TOK_EOF equ 0
+TOK_NEWLINE equ 1
+TOK_INDENT equ 2
+TOK_DEDENT equ 3
+TOK_IDENT equ 4
+TOK_INT_LIT equ 5
+TOK_TYPE_INT equ 6
+TOK_ASSIGN equ 7
+TOK_COLON equ 8
+TOK_OUTPUT equ 9
+TOK_IF equ 10
+TOK_FOR equ 11
+TOK_IN equ 12
+TOK_DOTDOT equ 13
+TOK_EQEQ equ 14
+TOK_ELSE equ 15
+TOK_ELIF equ 16
+TOK_WHILE equ 17
+TOK_PROT equ 18
+TOK_RETURN equ 19
+TOK_STOP equ 20
+TOK_AT equ 21
+TOK_TYPE_FLOAT equ 22
+TOK_FLOAT_LIT equ 23
+TOK_TYPE_COMPLEX equ 24
+TOK_COMPLEX_LIT equ 25
+TOK_TYPE_BOOL equ 26
+TOK_TRUE equ 27
+TOK_FALSE equ 28
+TOK_UNKNOWN equ 29
+TOK_TYPE_STR equ 30
+TOK_STR_LIT equ 31
+TOK_PLUS equ 32
+TOK_MINUS equ 33
+TOK_LBRACK equ 34
+TOK_RBRACK equ 35
+TOK_LBRACE equ 36
+TOK_RBRACE equ 37
+TOK_COMMA equ 38
+TOK_USE equ 39
+TOK_MM equ 40
+TOK_GC equ 41
+TYPE_INT equ 1
+TYPE_FLOAT equ 2
+TYPE_BOOL equ 3
+TYPE_COMPLEX equ 4
+TYPE_STR equ 5
+TYPE_SEQ equ 6
+VAR_ENTRY_SIZE equ 64
+VAR_MAX equ 128
+VAR_STORAGE_BASE equ 4456448
+LOAD_BASE equ 4194304
+HEADERS_SIZE equ 120
+RT_PRI_SIZE equ 512
+RT_PRS_SIZE equ 512
+RT_PRB_SIZE equ 256
+RT_PRF_SIZE equ 512
+RT_PRC_SIZE equ 512
+RT_SIP_SIZE equ 1024
+RT_ALC_SIZE equ 4096
+RT_PRQ_SIZE equ 1024
+RT_TOTAL_SIZE equ 8448
+RT_PRI_OFFSET equ 125
+RT_PRS_OFFSET equ 637
+RT_PRB_OFFSET equ 1149
+RT_PRF_OFFSET equ 1405
+RT_PRC_OFFSET equ 1917
+RT_SIP_OFFSET equ 2429
+RT_ALC_OFFSET equ 3453
+RT_PRQ_OFFSET equ 7549
+CODE_START equ 8573
