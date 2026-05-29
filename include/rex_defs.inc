@@ -69,6 +69,13 @@ TOK_SHL          equ 56
 TOK_SHR          equ 57
 TOK_MOD          equ 58
 
+; Stage 4/5/7 additions
+TOK_ERR          equ 59
+TOK_TYPE_SEQ     equ 60
+TOK_PUSH         equ 61
+TOK_POP          equ 62
+TOK_LEN          equ 63
+
 ; --- Value Types ---
 TYPE_INT         equ 1
 TYPE_FLOAT       equ 2
@@ -96,7 +103,8 @@ RT_PRC_SIZE      equ 512
 RT_SIP_SIZE      equ 1024
 RT_ALC_SIZE      equ 4096
 RT_PRQ_SIZE      equ 1024
-RT_TOTAL_SIZE    equ 8448
+RT_ERR_SIZE      equ 128
+RT_TOTAL_SIZE    equ 8576
 
 ; --- Runtime Entry Offsets (from start of binary) ---
 RT_PRI_OFFSET    equ 125
@@ -115,5 +123,8 @@ RT_DICT_NEW_OFFSET equ 7550
 RT_DICT_SET_OFFSET equ 7577
 RT_DICT_GET_OFFSET equ 7626
 
+; --- Runtime stderr error blob ---
+RT_ERR_OFFSET    equ 8573
+
 ; --- Misc ---
-CODE_START       equ 8573
+CODE_START       equ 8701

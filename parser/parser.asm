@@ -60,7 +60,7 @@ extern codegen_emit_cmp_rax_rbx_jcc
 section .bss
     var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
     var_count:       resq 1
-    proto_table:     resb 40 * 32
+    proto_table:     resb 48 * 32
     proto_count:     resq 1
     prot_body_depth: resq 1
     saved_name:      resb 64
@@ -263,6 +263,12 @@ parse_stmt:
     je .at_call
     cmp al, TOK_USE
     je .use_mm
+    cmp al, TOK_ERR
+    je .err_stmt
+    cmp al, TOK_TYPE_SEQ
+    je .seq_decl
+    cmp al, TOK_PUSH
+    je .push_stmt
 
     call lexer_next
     jmp .done
@@ -660,24 +666,91 @@ parse_stmt:
     jmp .done
 
 ; --- protocol definition ---
+; Syntax: prot name():  OR  prot name(a, b, c):
 .protocol:
     inc qword [prot_body_depth]
     call codegen_begin_protos
-    call lexer_next
+    call lexer_next                 ; tok = protocol name
     mov rax, [proto_count]
-    imul rax, 40
+    imul rax, 48                    ; 48-byte proto entries
     lea r13, [proto_table]
     add r13, rax
     lea rsi, [tok_ident]
     mov rdi, r13
     call strcpy
     mov rbx, [out_idx]
-    mov [r13+32], rbx
+    mov [r13+32], rbx               ; store current code offset
+    xor r12d, r12d                  ; r12 = param count
     inc qword [proto_count]
-    call lexer_next
-    call lexer_next
-    call lexer_next
-    call lexer_next
+    call lexer_next                 ; tok = '(' or ':'
+    cmp byte [tok_type], TOK_LPAREN
+    jne .prot_no_params
+    call lexer_next                 ; skip '(', tok = first param or ')'
+.prot_param_loop:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_RPAREN
+    je .prot_params_done
+    cmp al, TOK_IDENT
+    jne .prot_params_done
+    lea rdi, [tok_ident]
+    mov cl, TYPE_INT
+    call var_add                    ; rax = new var index
+    cmp r12d, 5
+    jge .prot_pi
+    mov [r13+41+r12], al            ; store var index in proto entry
+.prot_pi:
+    inc r12d
+    call lexer_next                 ; tok = ',' or ')'
+    movzx eax, byte [tok_type]
+    cmp al, TOK_COMMA
+    jne .prot_params_done
+    call lexer_next                 ; skip ','
+    jmp .prot_param_loop
+.prot_params_done:
+    call lexer_next                 ; skip ')'
+.prot_no_params:
+    mov [r13+40], r12b              ; store param count in proto entry
+    ; skip ':' and newline/indent before body
+    call lexer_next                 ; skip ':'
+    call lexer_next                 ; skip newline
+    call lexer_next                 ; skip indent (first stmt token)
+    ; Emit: mov [var_addr], reg  for each declared parameter
+    xor r12d, r12d
+.prot_store_params:
+    movzx eax, byte [r13+40]
+    cmp r12d, eax
+    jge .prot_body
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    ; ModRM byte: rdi=0x3C, rsi=0x34, rdx=0x14, rcx=0x0C
+    cmp r12d, 0
+    je .psp_rdi
+    cmp r12d, 1
+    je .psp_rsi
+    cmp r12d, 2
+    je .psp_rdx
+    mov al, 0x0C
+    jmp .psp_modrm
+.psp_rdi:
+    mov al, 0x3C
+    jmp .psp_modrm
+.psp_rsi:
+    mov al, 0x34
+    jmp .psp_modrm
+.psp_rdx:
+    mov al, 0x14
+.psp_modrm:
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    movzx rdi, byte [r13+41+r12]
+    call get_var_va
+    call emit_d
+    inc r12d
+    jmp .prot_store_params
+.prot_body:
 .prot_loop:
     movzx eax, byte [tok_type]
     cmp al, TOK_EOF
@@ -720,17 +793,23 @@ parse_stmt:
     jmp .done
 
 ; --- @protocol_call ---
+; Syntax: @name()  OR  @name(expr1, expr2, ...)
 .at_call:
-    call lexer_next
+    call lexer_next              ; skip '@', tok = protocol name
     lea rdi, [tok_ident]
-    call proto_find
+    call proto_find              ; rax = protocol code offset, or -1
     cmp rax, -1
-    je .done
-    mov rdi, rax
+    je .ac_skip
+    mov r12, rax                 ; save protocol offset
+    call lexer_next              ; skip protocol name, tok = '('
+    call emit_at_call_args       ; eval args + emit pushes/pops, advance past ')'
+    mov rdi, r12
     call codegen_emit_call_prot
-    call lexer_next
-    call lexer_next
-    call lexer_next
+    jmp .done
+.ac_skip:
+    call lexer_next              ; skip protocol name
+    call lexer_next              ; skip '('
+    call lexer_next              ; skip ')'
     jmp .done
 
 ; --- use mm ... ---
@@ -785,6 +864,168 @@ parse_stmt:
     call codegen_emit_mm_switch
     jmp .done
 
+; --- err "msg" ---
+; Evaluates a string expression then calls rt_err (writes to stderr + newline).
+.err_stmt:
+    call lexer_next              ; skip 'err', tok = string expression
+    call parse_expr              ; emit expr code → rax at runtime (string ptr)
+    ; Emit: mov rdi, rax  (48 89 C7)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    ; Emit: call rt_err  (E8 <rel32>)
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE + RT_ERR_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    jmp .done
+
+; --- seq x ---
+; Declares a dynamic sequence variable; allocates initial heap block via rt_alc.
+; Block layout: [cap: u64][len: u64][data: u64 * cap]
+.seq_decl:
+    call lexer_next              ; skip 'seq', tok = var name
+    lea rdi, [tok_ident]
+    mov cl, TYPE_SEQ
+    call var_add                 ; rax = var index
+    cmp rax, -1
+    je .done
+    mov r15, rax                 ; r15 = var index
+    ; Emit: mov rdi, 80  (48 C7 C7 50 00 00 00)  — 16 hdr + 8 slots * 8 bytes
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 80
+    call emit_b
+    xor eax, eax
+    call emit_b
+    call emit_b
+    call emit_b
+    ; Emit: call rt_alc  (E8 <rel32>)
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE + RT_ALC_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ; Emit: mov [var_addr], rax  (48 89 04 25 <addr>)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r15
+    call get_var_va
+    call emit_d
+    ; Emit: mov qword [rax], 8  (48 C7 00 08 00 00 00)  — initial cap = 8
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    xor eax, eax
+    call emit_b
+    call emit_b
+    call emit_b
+    ; Emit: mov qword [rax+8], 0  (48 C7 40 08 00 00 00 00)  — initial len = 0
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x40
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    xor eax, eax
+    call emit_b
+    call emit_b
+    call emit_b
+    call emit_b
+    call lexer_next              ; advance past var name
+    jmp .done
+
+; --- push x val ---
+; Appends a value to a sequence. val is any integer expression.
+.push_stmt:
+    call lexer_next              ; skip 'push', tok = seq var name
+    lea rdi, [tok_ident]
+    call var_find                ; rax = var index
+    cmp rax, -1
+    je .push_skip
+    mov r15, rax                 ; r15 = seq var index
+    call lexer_next              ; skip var name, tok = value expression
+    call parse_expr              ; emit value expression → runtime rax
+    ; Emit: push rax  (50)  — save value while we load seq ptr
+    mov al, 0x50
+    call emit_b
+    ; Emit: mov rbx, [seq_var_addr]  (48 8B 1C 25 <addr>)  — load heap ptr
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r15
+    call get_var_va
+    call emit_d
+    ; Emit: mov rcx, [rbx+8]  (48 8B 4B 08)  — load current length
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; Emit: pop rax  (58)  — restore value
+    mov al, 0x58
+    call emit_b
+    ; Emit: mov [rbx+rcx*8+16], rax  (48 89 44 CB 10)  — store at data[len]
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0xCB
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; Emit: inc qword [rbx+8]  (48 FF 43 08)  — increment length
+    mov al, 0x48
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x43
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    jmp .done
+.push_skip:
+    call lexer_next              ; skip var name
+    call lexer_next              ; skip value (one token)
+    jmp .done
+
 .done:
     pop r15
     pop r14
@@ -809,7 +1050,7 @@ proto_find:
     cmp r13, [proto_count]
     jge .nf
     mov rax, r13
-    imul rax, 40
+    imul rax, 48
     lea rbx, [proto_table]
     add rbx, rax
     mov rdi, rbx
@@ -881,6 +1122,71 @@ emit_movzx_rax_al:
     call emit_b
     mov al, 0xC0
     call emit_b
+    ret
+
+; --- Helper: emit_at_call_args ---
+; Entry: [tok_type] = TOK_LPAREN  ('(')
+; Evaluates each argument expression, emitting "push rax" after each.
+; Then emits pops in reverse order into SysV argument registers:
+;   rdi (1st), rsi (2nd), rdx (3rd), rcx (4th).
+; Advances tok past the closing ')'.
+; Returns: rax = number of arguments evaluated.
+emit_at_call_args:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    xor r13d, r13d              ; r13 = argument count
+    call lexer_next             ; skip '(' → first arg or ')'
+.eaa_loop:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_RPAREN
+    je .eaa_done
+    cmp al, TOK_EOF
+    je .eaa_done
+    call parse_expr             ; emit arg expression → runtime rax
+    mov al, 0x50                ; emit: push rax
+    call emit_b
+    inc r13d
+    movzx eax, byte [tok_type]
+    cmp al, TOK_COMMA
+    jne .eaa_done
+    call lexer_next             ; skip ','
+    jmp .eaa_loop
+.eaa_done:
+    call lexer_next             ; skip ')'
+    ; Emit pops in reverse: arg[n-1] → last reg, arg[0] → rdi
+    ; Pop opcodes: rdi=0x5F, rsi=0x5E, rdx=0x5A, rcx=0x59
+    mov rbx, r13
+.eaa_pop_loop:
+    dec rbx
+    js .eaa_pop_done
+    cmp rbx, 0
+    je .eaa_rdi
+    cmp rbx, 1
+    je .eaa_rsi
+    cmp rbx, 2
+    je .eaa_rdx
+    mov al, 0x59                ; pop rcx
+    jmp .eaa_emit
+.eaa_rdi:
+    mov al, 0x5F
+    jmp .eaa_emit
+.eaa_rsi:
+    mov al, 0x5E
+    jmp .eaa_emit
+.eaa_rdx:
+    mov al, 0x5A
+.eaa_emit:
+    call emit_b
+    jmp .eaa_pop_loop
+.eaa_pop_done:
+    mov rax, r13
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 ; --- parse_expr — top-level expression entry point ---
@@ -1166,6 +1472,7 @@ parse_shift:
 parse_additive:
     push rbp
     mov rbp, rsp
+    push r14                    ; r14 = saved LHS type for propagation
     call parse_term
 .loop:
     movzx eax, byte [tok_type]
@@ -1173,13 +1480,20 @@ parse_additive:
     je .padd
     cmp al, TOK_MINUS
     je .psub
+    pop r14
     leave
     ret
 .padd:
     call lexer_next
+    movzx r14d, byte [cur_type] ; save LHS type
     mov al, 0x50
     call emit_b
-    call parse_term
+    call parse_term             ; RHS; sets cur_type to RHS type
+    ; Type propagation: if either side was float, result is float
+    cmp r14b, TYPE_FLOAT
+    jne .padd_type_done
+    mov byte [cur_type], TYPE_FLOAT
+.padd_type_done:
     ; emit: mov rbx, rax (48 89 C3)
     mov al, 0x48
     call emit_b
@@ -1200,9 +1514,14 @@ parse_additive:
     jmp .loop
 .psub:
     call lexer_next
+    movzx r14d, byte [cur_type]
     mov al, 0x50
     call emit_b
     call parse_term
+    cmp r14b, TYPE_FLOAT
+    jne .psub_type_done
+    mov byte [cur_type], TYPE_FLOAT
+.psub_type_done:
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -1224,6 +1543,7 @@ parse_additive:
 parse_term:
     push rbp
     mov rbp, rsp
+    push r14                    ; r14 = saved LHS type for propagation
     call parse_unary
 .loop:
     movzx eax, byte [tok_type]
@@ -1233,13 +1553,19 @@ parse_term:
     je .pdiv
     cmp al, TOK_MOD
     je .pmod
+    pop r14
     leave
     ret
 .pmul:
     call lexer_next
+    movzx r14d, byte [cur_type]
     mov al, 0x50
     call emit_b
     call parse_unary
+    cmp r14b, TYPE_FLOAT
+    jne .pmul_type_done
+    mov byte [cur_type], TYPE_FLOAT
+.pmul_type_done:
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -1260,9 +1586,14 @@ parse_term:
     jmp .loop
 .pdiv:
     call lexer_next
+    movzx r14d, byte [cur_type]
     mov al, 0x50
     call emit_b
     call parse_unary
+    cmp r14b, TYPE_FLOAT
+    jne .pdiv_type_done
+    mov byte [cur_type], TYPE_FLOAT
+.pdiv_type_done:
     ; emit: mov rbx, rax; pop rax; cqo; idiv rbx
     mov al, 0x48
     call emit_b
@@ -1287,9 +1618,11 @@ parse_term:
     jmp .loop
 .pmod:
     call lexer_next
+    movzx r14d, byte [cur_type]
     mov al, 0x50
     call emit_b
     call parse_unary
+    ; mod result is always int
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -1376,6 +1709,12 @@ parse_factor:
     je .ident
     cmp al, TOK_LPAREN
     je .paren
+    cmp al, TOK_AT
+    je .at_in_expr
+    cmp al, TOK_LEN
+    je .len_in_expr
+    cmp al, TOK_POP
+    je .pop_in_expr
     ; Default: emit zero, treat as int
     xor eax, eax
     mov byte [cur_type], TYPE_INT
@@ -1487,6 +1826,137 @@ parse_factor:
     call lexer_next                    ; skip '('
     call parse_expr
     call lexer_next                    ; skip ')'
+    pop rbx
+    leave
+    ret
+
+; --- @name(args) as an expression atom ---
+; Calls a protocol and leaves return value in rax.
+.at_in_expr:
+    push r12
+    call lexer_next                    ; skip '@', tok = protocol name
+    lea rdi, [tok_ident]
+    call proto_find                    ; rax = protocol offset or -1
+    cmp rax, -1
+    je .at_in_skip
+    mov r12, rax                       ; save protocol offset
+    call lexer_next                    ; skip name, tok = '('
+    call emit_at_call_args             ; eval args, push/pop, advance past ')'
+    mov rdi, r12
+    call codegen_emit_call_prot
+    mov byte [cur_type], TYPE_INT
+    pop r12
+    pop rbx
+    leave
+    ret
+.at_in_skip:
+    call lexer_next                    ; skip name
+    call lexer_next                    ; skip '('
+    call lexer_next                    ; skip ')'
+    mov byte [cur_type], TYPE_INT
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; --- len seq_name — load sequence length into rax ---
+.len_in_expr:
+    call lexer_next                    ; skip 'len', tok = seq var name
+    lea rdi, [tok_ident]
+    call var_find                      ; rax = var index or -1
+    cmp rax, -1
+    je .len_in_err
+    push rax                           ; save var index
+    ; Emit: mov rax, [var_addr]  (48 8B 04 25 <addr>)  — load seq heap ptr
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
+    ; Emit: mov rax, [rax+8]  (48 8B 40 08)  — load length field
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x40
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    mov byte [cur_type], TYPE_INT
+    call lexer_next                    ; advance past var name
+    pop rbx
+    leave
+    ret
+.len_in_err:
+    mov byte [cur_type], TYPE_INT
+    call lexer_next
+    pop rbx
+    leave
+    ret
+
+; --- pop seq_name — decrement length, return former last element in rax ---
+.pop_in_expr:
+    call lexer_next                    ; skip 'pop', tok = seq var name
+    lea rdi, [tok_ident]
+    call var_find                      ; rax = var index or -1
+    cmp rax, -1
+    je .pop_in_err
+    push rax                           ; save var index
+    ; Emit: mov rbx, [var_addr]  (48 8B 1C 25 <addr>)  — load seq heap ptr
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
+    ; Emit: dec qword [rbx+8]  (48 FF 4B 08)  — decrement length
+    mov al, 0x48
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; Emit: mov rcx, [rbx+8]  (48 8B 4B 08)  — load new length (index of popped)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; Emit: mov rax, [rbx+rcx*8+16]  (48 8B 44 CB 10)  — load popped value
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0xCB
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    mov byte [cur_type], TYPE_INT
+    call lexer_next
+    pop rbx
+    leave
+    ret
+.pop_in_err:
+    mov byte [cur_type], TYPE_INT
+    call lexer_next
     pop rbx
     leave
     ret

@@ -52,15 +52,15 @@
 
 ## Stage 4 — Native Collections (In Progress 🔄)
 - [x] Dictionaries (SipHash + open addressing) — codegen and runtime implemented
-- [ ] Dynamic sequences `@`
+- [x] Dynamic sequences — `seq x`, `push x v`, `pop x` (expr), `len x` (expr)
 - [ ] Sets and Tuples
 
 ---
 
-## Stage 5 — Advanced Protocols
-- [ ] Parameterized protocols
-- [ ] Local variable stack frames
-- [ ] Protocol return to variables
+## Stage 5 — Advanced Protocols (Complete ✅)
+- [x] Parameterized protocols — `prot name(a, b):` with `@name(expr1, expr2)`
+- [ ] Local variable stack frames (callee-saved regs, not yet implemented)
+- [x] Protocol return to variables — `@name(args)` usable as expression atom in `parse_factor`
 
 ---
 
@@ -70,11 +70,11 @@
 
 ---
 
-## Stage 7 — Runtime Hardening
-- [ ] Error output to stderr
-- [ ] Variable table growth
+## Stage 7 — Runtime Hardening (Partial ✅)
+- [x] Error output to stderr — `err "msg"` statement + `rt_err_blob`
+- [ ] Variable table growth (currently fixed at VAR_MAX=128)
 - [ ] Multi-file compilation
-- [ ] Expression type propagation (currently last-atom only)
+- [x] Expression type propagation — `cur_type` tracked through `+`, `-`, `*`, `/` chains
 
 ---
 

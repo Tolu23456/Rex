@@ -5,7 +5,7 @@
 default rel
 %include "include/rex_defs.inc"
 
-global rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob, rt_sip_blob, rt_alc_blob, rt_prq_blob
+global rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob, rt_sip_blob, rt_alc_blob, rt_prq_blob, rt_err_blob
 global rt_dict_new, rt_dict_set, rt_dict_get
 
 section .text
@@ -665,3 +665,48 @@ rt_dict_get:
     ret
 .k2: dq 0, 0
     times RT_PRQ_SIZE - ($ - rt_prq_blob) db 0x90
+
+; -----------------------------------------------------------------------------
+; rt_err_blob: write null-terminated string from RDI to stderr (fd=2) + newline
+; RDI = pointer to null-terminated error message string
+; -----------------------------------------------------------------------------
+rt_err_blob:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov rbx, rdi            ; save string pointer
+    xor rcx, rcx
+.err_len:
+    cmp byte [rbx+rcx], 0
+    je .err_write
+    inc rcx
+    jmp .err_len
+.err_write:
+    test rcx, rcx
+    jz .err_nl
+    mov rax, 1              ; sys_write
+    mov rdi, 2              ; fd = stderr
+    mov rsi, rbx
+    mov rdx, rcx
+    syscall
+.err_nl:
+    sub rsp, 8              ; allocate 8 bytes on stack for newline byte
+    mov byte [rsp], 10      ; '\n'
+    mov rax, 1              ; sys_write
+    mov rdi, 2              ; fd = stderr
+    mov rsi, rsp
+    mov rdx, 1
+    syscall
+    add rsp, 8              ; release stack newline slot
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    leave
+    ret
+    times RT_ERR_SIZE - ($ - rt_err_blob) db 0x90

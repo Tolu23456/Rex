@@ -672,33 +672,81 @@ lexer_classify:
     cmp eax, 0x66696c65           ; 'elif'
     je .is_elif
     cmp eax, 0x7074756f           ; 'outp'
-    jne .default_id
+    jne .check_new_kw
     cmp word [tok_ident+4], 0x7475  ; 'ut'
     je .is_output
+
+.check_new_kw:
+    ; --- Stage 4/5/7 keywords ---
+    cmp eax, 0x00727265             ; 'err\0'
+    je .is_err
+    cmp eax, 0x00716573             ; 'seq\0'
+    je .is_seq
+    cmp eax, 0x68737570             ; 'push' (4 chars)
+    jne .not_push
+    cmp byte [tok_ident+4], 0
+    je .is_push
+.not_push:
+    cmp eax, 0x00706F70             ; 'pop\0'
+    je .is_pop
+    cmp eax, 0x006E656C             ; 'len\0'
+    je .is_len
 
 .default_id:
     mov byte [tok_type], TOK_IDENT
     ret
 
-.is_int:     mov byte [tok_type], TOK_TYPE_INT;     ret
-.is_bool:    mov byte [tok_type], TOK_TYPE_BOOL;    ret
-.is_float:   mov byte [tok_type], TOK_TYPE_FLOAT;   ret
-.is_complex: mov byte [tok_type], TOK_TYPE_COMPLEX; ret
-.is_str:     mov byte [tok_type], TOK_TYPE_STR;     ret
-.is_dict:    mov byte [tok_type], TOK_TYPE_DICT;    ret
-.is_true:    mov byte [tok_type], TOK_TRUE;         ret
-.is_false:   mov byte [tok_type], TOK_FALSE;        ret
-.is_unknown: mov byte [tok_type], TOK_UNKNOWN;      ret
-.is_if:      mov byte [tok_type], TOK_IF;           ret
-.is_for:     mov byte [tok_type], TOK_FOR;          ret
-.is_in:      mov byte [tok_type], TOK_IN;           ret
-.is_while:   mov byte [tok_type], TOK_WHILE;        ret
-.is_use:     mov byte [tok_type], TOK_USE;          ret
-.is_mm:      mov byte [tok_type], TOK_MM;           ret
-.is_gc:      mov byte [tok_type], TOK_GC;           ret
-.is_prot:    mov byte [tok_type], TOK_PROT;         ret
-.is_return:  mov byte [tok_type], TOK_RETURN;       ret
-.is_stop:    mov byte [tok_type], TOK_STOP;         ret
-.is_else:    mov byte [tok_type], TOK_ELSE;         ret
-.is_elif:    mov byte [tok_type], TOK_ELIF;         ret
-.is_output:  mov byte [tok_type], TOK_OUTPUT;       ret
+.is_int:     mov byte [tok_type], TOK_TYPE_INT
+    ret
+.is_bool:    mov byte [tok_type], TOK_TYPE_BOOL
+    ret
+.is_float:   mov byte [tok_type], TOK_TYPE_FLOAT
+    ret
+.is_complex: mov byte [tok_type], TOK_TYPE_COMPLEX
+    ret
+.is_str:     mov byte [tok_type], TOK_TYPE_STR
+    ret
+.is_dict:    mov byte [tok_type], TOK_TYPE_DICT
+    ret
+.is_true:    mov byte [tok_type], TOK_TRUE
+    ret
+.is_false:   mov byte [tok_type], TOK_FALSE
+    ret
+.is_unknown: mov byte [tok_type], TOK_UNKNOWN
+    ret
+.is_if:      mov byte [tok_type], TOK_IF
+    ret
+.is_for:     mov byte [tok_type], TOK_FOR
+    ret
+.is_in:      mov byte [tok_type], TOK_IN
+    ret
+.is_while:   mov byte [tok_type], TOK_WHILE
+    ret
+.is_use:     mov byte [tok_type], TOK_USE
+    ret
+.is_mm:      mov byte [tok_type], TOK_MM
+    ret
+.is_gc:      mov byte [tok_type], TOK_GC
+    ret
+.is_prot:    mov byte [tok_type], TOK_PROT
+    ret
+.is_return:  mov byte [tok_type], TOK_RETURN
+    ret
+.is_stop:    mov byte [tok_type], TOK_STOP
+    ret
+.is_else:    mov byte [tok_type], TOK_ELSE
+    ret
+.is_elif:    mov byte [tok_type], TOK_ELIF
+    ret
+.is_output:  mov byte [tok_type], TOK_OUTPUT
+    ret
+.is_err:     mov byte [tok_type], TOK_ERR
+    ret
+.is_seq:     mov byte [tok_type], TOK_TYPE_SEQ
+    ret
+.is_push:    mov byte [tok_type], TOK_PUSH
+    ret
+.is_pop:     mov byte [tok_type], TOK_POP
+    ret
+.is_len:     mov byte [tok_type], TOK_LEN
+    ret
