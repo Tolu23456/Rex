@@ -62,12 +62,86 @@ rt_pri_blob:
     ret
     times RT_PRI_SIZE - ($ - rt_pri_blob) db 0x90
 
+; rt_prs_blob: print a null-terminated string pointer from RDI, followed by newline.
 rt_prs_blob:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    ; compute length: scan for null byte
+    mov rbx, rdi            ; save ptr
+    xor rcx, rcx
+.len_loop:
+    cmp byte [rbx+rcx], 0
+    je .len_done
+    inc rcx
+    jmp .len_loop
+.len_done:
+    ; sys_write(1, ptr, len)
+    test rcx, rcx
+    jz .write_nl
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, rbx
+    mov rdx, rcx
+    syscall
+.write_nl:
+    ; write newline
+    push qword 10
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, rsp
+    mov rdx, 1
+    syscall
+    add rsp, 8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    leave
     ret
     times RT_PRS_SIZE - ($ - rt_prs_blob) db 0x90
 
+; rt_prb_blob: print bool from RDI (0=false, 1=true, other=unknown) + newline.
 rt_prb_blob:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rdx
+    push rsi
+    push rdi
+    cmp rdi, 1
+    je .b_true
+    cmp rdi, 0
+    je .b_false
+    ; unknown
+    lea rsi, [rel .s_unknown]
+    mov rdx, 8
+    jmp .b_write
+.b_true:
+    lea rsi, [rel .s_true]
+    mov rdx, 5
+    jmp .b_write
+.b_false:
+    lea rsi, [rel .s_false]
+    mov rdx, 6
+.b_write:
+    mov rax, 1
+    mov rdi, 1
+    syscall
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rbx
+    leave
     ret
+.s_true:    db "true", 10
+.s_false:   db "false", 10
+.s_unknown: db "unknown", 10
     times RT_PRB_SIZE - ($ - rt_prb_blob) db 0x90
 
 rt_prf_blob:
@@ -199,8 +273,138 @@ rt_pri_no_nl:
     ret
     times RT_PRF_SIZE - ($ - rt_prf_blob) db 0x90
 
+; rt_prc_blob: print a complex value.
+; RDI = pointer to complex variable storage (128-bit: 2 × 64-bit double).
+; Prints "(real+imagj)\n".
 rt_prc_blob:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push rdi
+    mov r14, rdi                ; save complex ptr
+
+    ; print "("
+    lea rsi, [rel .lp]
+    mov rax, 1
+    mov rdi, 1
+    mov rdx, 1
+    syscall
+
+    ; print real part (first 8 bytes as double)
+    mov rdi, [r14]
+    call rt_prf_nonnl
+
+    ; print "+"
+    lea rsi, [rel .plus]
+    mov rax, 1
+    mov rdi, 1
+    mov rdx, 1
+    syscall
+
+    ; print imag part (next 8 bytes as double)
+    mov rdi, [r14+8]
+    call rt_prf_nonnl
+
+    ; print "j)\n"
+    lea rsi, [rel .suf]
+    mov rax, 1
+    mov rdi, 1
+    mov rdx, 3
+    syscall
+
+    pop rdi
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
+
+; rt_prf_nonnl: print a 64-bit double from RDI without trailing newline.
+; Used by both rt_prf_blob and rt_prc_blob.
+rt_prf_nonnl:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    sub rsp, 128
+    lea r13, [rbp-120]
+    movq xmm0, rdi
+    movmskpd eax, xmm0
+    test eax, 1
+    jz .pnl_pos
+    ; print '-'
+    mov byte [r13], '-'
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, r13
+    mov rdx, 1
+    syscall
+    mov rax, 0x7FFFFFFFFFFFFFFF
+    movq xmm1, rax
+    andpd xmm0, xmm1
+.pnl_pos:
+    cvttsd2si rbx, xmm0
+    push rdi
+    mov rdi, rbx
+    call rt_pri_no_nl
+    pop rdi
+    mov byte [r13], '.'
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, r13
+    mov rdx, 1
+    syscall
+    cvtsi2sd xmm1, rbx
+    subsd xmm0, xmm1
+    mov r12, 6
+    mov rax, 0x4024000000000000
+    movq xmm2, rax
+.pnl_frac:
+    mulsd xmm0, xmm2
+    cvttsd2si rbx, xmm0
+    add bl, '0'
+    mov [r13], bl
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, r13
+    mov rdx, 1
+    syscall
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    sub bl, '0'
+    cvtsi2sd xmm1, rbx
+    subsd xmm0, xmm1
+    dec r12
+    jnz .pnl_frac
+    add rsp, 128
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    leave
+    ret
+
+.lp:   db "("
+.plus: db "+"
+.suf:  db "j)", 10
     times RT_PRC_SIZE - ($ - rt_prc_blob) db 0x90
 
 rt_sip_blob:

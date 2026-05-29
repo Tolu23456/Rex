@@ -52,7 +52,10 @@ extern emit_q
 extern get_var_va
 extern codegen_output_rax_int
 extern codegen_output_rax_float
+extern codegen_output_rax_bool
+extern codegen_output_rax_str
 extern codegen_emit_store_rax_var
+extern codegen_emit_cmp_rax_rbx_jcc
 
 section .bss
     var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
@@ -392,6 +395,30 @@ parse_stmt:
     call var_add
     jmp .done
 
+; --- output expr ---
+; Dispatches to the correct runtime printer based on cur_type.
+.output:
+    call lexer_next
+    call parse_expr
+    movzx eax, byte [cur_type]
+    cmp al, TYPE_FLOAT
+    je .out_float
+    cmp al, TYPE_STR
+    je .out_str
+    cmp al, TYPE_BOOL
+    je .out_bool
+    call codegen_output_rax_int
+    jmp .done
+.out_float:
+    call codegen_output_rax_float
+    jmp .done
+.out_str:
+    call codegen_output_rax_str
+    jmp .done
+.out_bool:
+    call codegen_output_rax_bool
+    jmp .done
+
 ; --- : name = expr (reassignment) ---
 .assign:
     call lexer_next
@@ -451,60 +478,34 @@ parse_stmt:
     add rsp, 64
     jmp .done
 
-; --- output expr ---
-; Fixed: old code had double-cmp bug overwriting flags.
-; New code uses parse_expr so all expression types work.
-.output:
-    call lexer_next
-    call parse_expr
-    movzx eax, byte [cur_type]
-    cmp al, TYPE_FLOAT
-    je .out_float
-    call codegen_output_rax_int
-    jmp .done
-.out_float:
-    call codegen_output_rax_float
-    jmp .done
-
 ; --- if / elif / else ---
+; Conditions support full expressions on both sides of any comparison op.
+; Syntax: if expr op expr:
 .if:
     call codegen_save_chain_base
 .if_next:
-    call lexer_next
-    sub rsp, 64
-    mov rdi, rsp
-    lea rsi, [tok_ident]
-    call strcpy
-    mov rdi, rsp
-    call var_find
-    cmp rax, -1
-    je .if_err
-    mov r14, rax
-    call lexer_next
-    call lexer_next
-    mov r11, [tok_int]
-    movzx eax, byte [tok_type]
-    cmp al, TOK_TRUE
-    jne .if_nt
-    mov r11, 1
-.if_nt:
-    cmp al, TOK_FALSE
-    jne .if_nf
-    mov r11, 0
-.if_nf:
-    mov rdi, r14
-    mov rsi, r11
-    call codegen_emit_cmp_var_jne
-    add rsp, 64
-    call lexer_next
-    call lexer_next
+    call lexer_next              ; advance past keyword; tok = first LHS token
+    call parse_expr              ; LHS → rax at runtime; tok = comparison op
+    ; emit: push rax (50)  — save LHS result
+    mov al, 0x50
+    call emit_b
+    movzx r12d, byte [tok_type] ; save the comparison operator token
+    call lexer_next              ; skip comparison op; tok = first RHS token
+    call parse_expr              ; RHS → rax at runtime; tok = ':'
+    ; emit: mov rbx,rax; pop rax  (left in rax, right in rbx)
+    call emit_cmp_binop_setup
+    ; emit cmp rax,rbx + inverted Jcc (pushes to patch stack)
+    movzx rdi, r12b
+    call codegen_emit_cmp_rax_rbx_jcc
+    ; tok is now ':', advance past it
+    call lexer_next              ; skip ':'; tok = newline or indent or stmt
     cmp byte [tok_type], TOK_NEWLINE
     jne .if_no_nl
-    call lexer_next
+    call lexer_next              ; skip newline
 .if_no_nl:
     cmp byte [tok_type], TOK_INDENT
     jne .if_single
-    call lexer_next
+    call lexer_next              ; skip INDENT; tok = first stmt token
     mov r13, 1
     jmp .if_block_loop
 .if_single:
@@ -571,12 +572,10 @@ parse_stmt:
 .el_do:
     call codegen_patch_chain_end
     jmp .done
-.if_err:
-    add rsp, 64
-    jmp .done
 
 ; --- for loop ---
 .for:
+    call codegen_emit_while_start   ; save break base for stop (break) support
     call lexer_next
     call lexer_next
     sub rsp, 64
@@ -625,27 +624,24 @@ parse_stmt:
     jmp .done
 
 ; --- while loop ---
+; Conditions support full expressions on both sides of any comparison op.
+; Syntax: while expr op expr:
 .while:
-    call lexer_next
-    mov r15, [out_idx]
-    sub rsp, 64
-    mov rdi, rsp
-    lea rsi, [tok_ident]
-    call strcpy
-    mov rdi, rsp
-    call var_find
-    cmp rax, -1
-    je .w_er
-    mov r14, rax
-    call lexer_next
-    call lexer_next
-    mov r11, [tok_int]
-    mov rsi, r11
-    mov rdi, r14
-    call codegen_emit_cmp_var_jne
-    add rsp, 64
-    call lexer_next
-    call lexer_next
+    call codegen_emit_while_start   ; save break base for stop (break) support
+    call lexer_next                 ; advance past 'while'; tok = first LHS token
+    mov r15, [out_idx]             ; save loop-top offset for backward JMP
+    call parse_expr                 ; LHS → rax at runtime; tok = comparison op
+    ; emit: push rax (50)  — save LHS result
+    mov al, 0x50
+    call emit_b
+    movzx r12d, byte [tok_type]    ; save comparison operator token
+    call lexer_next                 ; skip comparison op; tok = first RHS token
+    call parse_expr                 ; RHS → rax at runtime; tok = ':'
+    call emit_cmp_binop_setup      ; emit: mov rbx,rax; pop rax
+    movzx rdi, r12b
+    call codegen_emit_cmp_rax_rbx_jcc  ; emit inverted Jcc → push to patch stack
+    call lexer_next                 ; skip ':'; tok = newline or indent or stmt
+    call lexer_next                 ; skip newline/indent first token
 .while_l:
     movzx eax, byte [tok_type]
     cmp al, TOK_EOF
@@ -660,10 +656,7 @@ parse_stmt:
     call lexer_next
 .w_nd:
     mov rdi, r15
-    call codegen_emit_while_end
-    jmp .done
-.w_er:
-    add rsp, 64
+    call codegen_emit_while_end     ; emit JMP back + patch Jcc + patch breaks
     jmp .done
 
 ; --- protocol definition ---
@@ -703,12 +696,21 @@ parse_stmt:
     jmp .done
 
 ; --- return ---
+; Supports full expressions: return expr  or  bare return (void).
 .return:
     call lexer_next
-    mov rdi, [tok_int]
-    call codegen_emit_mov_eax_imm32
+    movzx eax, byte [tok_type]
+    cmp al, TOK_NEWLINE
+    je .ret_void
+    cmp al, TOK_EOF
+    je .ret_void
+    cmp al, TOK_DEDENT
+    je .ret_void
+    call parse_expr                 ; evaluate return expression → rax at runtime
+    jmp .ret_done
+.ret_void:
+.ret_done:
     call codegen_emit_ret
-    call lexer_next
     jmp .done
 
 ; --- stop (break) ---
@@ -732,14 +734,21 @@ parse_stmt:
     jmp .done
 
 ; --- use mm ... ---
-; Note: 'use mm pool gc mark_sweep:' — hardcoded pool check via first char 'p'
+; Supports: use mm pool gc <name>:  or  use mm arena gc <name>:
 .use_mm:
     call lexer_next
     call lexer_next
     call lexer_next
-    cmp byte [tok_ident], 'p'
-    sete al
-    movzx edi, al
+    ; Full 4-byte comparison for "pool\0"
+    cmp dword [tok_ident], 0x6c6f6f70   ; "pool" in little-endian
+    jne .use_not_pool
+    cmp byte [tok_ident+4], 0
+    jne .use_not_pool
+    mov edi, 1
+    jmp .use_do_switch
+.use_not_pool:
+    xor edi, edi
+.use_do_switch:
     call codegen_emit_mm_switch
     call lexer_next
     call lexer_next
@@ -1345,7 +1354,7 @@ parse_unary:
     leave
     ret
 
-; --- parse_factor: handles atoms (int lit, float lit, ident, paren) ---
+; --- parse_factor: handles atoms (int lit, float lit, str lit, bool, ident, paren) ---
 parse_factor:
     push rbp
     mov rbp, rsp
@@ -1355,6 +1364,14 @@ parse_factor:
     je .int_lit
     cmp al, TOK_FLOAT_LIT
     je .float_lit
+    cmp al, TOK_STR_LIT
+    je .str_lit
+    cmp al, TOK_TRUE
+    je .bool_true
+    cmp al, TOK_FALSE
+    je .bool_false
+    cmp al, TOK_UNKNOWN
+    je .bool_unknown
     cmp al, TOK_IDENT
     je .ident
     cmp al, TOK_LPAREN
@@ -1470,6 +1487,112 @@ parse_factor:
     call lexer_next                    ; skip '('
     call parse_expr
     call lexer_next                    ; skip ')'
+    pop rbx
+    leave
+    ret
+
+; ---- bool literals ----
+
+.bool_true:
+    ; emit: mov rax, 1  (48 B8 01 00 00 00 00 00 00 00)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, 1
+    call emit_q
+    mov byte [cur_type], TYPE_BOOL
+    call lexer_next
+    pop rbx
+    leave
+    ret
+
+.bool_false:
+    ; emit: mov rax, 0
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    xor rax, rax
+    call emit_q
+    mov byte [cur_type], TYPE_BOOL
+    call lexer_next
+    pop rbx
+    leave
+    ret
+
+.bool_unknown:
+    ; emit: rdrand eax (0F C7 F0) — hardware random bit
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+    ; emit: and rax, 1  (48 83 E0 01)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov byte [cur_type], TYPE_BOOL
+    call lexer_next
+    pop rbx
+    leave
+    ret
+
+; ---- string literal ----
+; Emits the string inline in the code stream with a JMP over it, then
+; loads the string's virtual address into RAX.
+; Layout:
+;   JMP <past_null>    (E9 <rel32>)   5 bytes
+;   <string bytes>                    len+1 bytes (includes null terminator)
+;   MOV rax, string_va (48 B8 <q>)   10 bytes
+.str_lit:
+    push r12
+    push r13
+    mov r13, [out_idx]          ; position of the JMP instruction
+
+    ; emit: E9 00 00 00 00  (JMP with placeholder)
+    mov al, 0xE9
+    call emit_b
+    xor eax, eax
+    call emit_d
+
+    mov r12, [out_idx]          ; string data starts here; VA = LOAD_BASE + r12
+
+    ; emit: string bytes from tok_ident (null-terminated)
+    lea rbx, [tok_ident]
+.str_loop:
+    movzx eax, byte [rbx]
+    call emit_b
+    inc rbx
+    test al, al
+    jnz .str_loop               ; null byte is emitted last (al == 0 exits after emit)
+
+    ; Patch JMP: rel32 = out_idx - (r13 + 5)
+    mov rax, [out_idx]
+    sub rax, r13
+    sub rax, 5
+    lea rcx, [out_buffer]
+    mov dword [rcx+r13+1], eax  ; +1 to skip the E9 opcode
+
+    ; emit: mov rax, string_VA  (48 B8 <imm64>)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, r12
+    add rax, LOAD_BASE
+    call emit_q
+
+    mov byte [cur_type], TYPE_STR
+    call lexer_next
+    pop r13
+    pop r12
     pop rbx
     leave
     ret

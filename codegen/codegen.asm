@@ -29,6 +29,8 @@ global codegen_emit_while_end
 global codegen_emit_break
 global codegen_patch_breaks
 global codegen_emit_ret
+global codegen_output_rax_str
+global codegen_emit_cmp_rax_rbx_jcc
 global codegen_emit_mov_eax_imm32
 global codegen_emit_call_prot
 global codegen_emit_assign_var
@@ -46,6 +48,7 @@ global emit_q
 global get_var_va
 global codegen_output_rax_int
 global codegen_output_rax_float
+global codegen_output_rax_bool
 global codegen_emit_store_rax_var
 
 ; Externs from Headers & Runtime
@@ -281,6 +284,30 @@ codegen_output_typed:
     pop rdi
     pop rsi
 
+    ; For complex, swap MOV rdi,[addr] for LEA rdi,[addr] so rt_prc
+    ; receives the variable's address (letting it load both double halves).
+    cmp sil, TYPE_COMPLEX
+    jne .do_mov
+
+    ; Patch MOV (opcode 8B) → LEA (opcode 8D).
+    ; Instruction just emitted: 48 8B 3C 25 <addr32>  (8 bytes total).
+    ; Layout from start of instruction:
+    ;   offset 0: 0x48  (REX.W)
+    ;   offset 1: 0x8B  (MOV opcode) ← patch target
+    ;   offset 2: 0x3C  (ModRM)
+    ;   offset 3: 0x25  (SIB)
+    ;   offset 4-7: addr32
+    ; After emit_d, out_idx = instruction_start + 8, so 0x8B is at out_idx - 7.
+    mov rax, [out_idx]
+    sub rax, 7                  ; points at the 0x8B byte
+    lea rcx, [out_buffer]
+    mov byte [rcx+rax], 0x8D   ; patch to LEA
+    jmp .emit_call
+
+.do_mov:
+    ; nothing to patch, MOV is already correct
+
+.emit_call:
     ; E8 <offset> - call appropriate printer
     mov al, 0xE8
     call emit_b
@@ -296,10 +323,17 @@ codegen_output_typed:
     je .complex
     jmp .do_call
 
-.str:     mov rax, RT_PRS_OFFSET; jmp .do_call
-.bool:    mov rax, RT_PRB_OFFSET; jmp .do_call
-.float:   mov rax, RT_PRF_OFFSET; jmp .do_call
-.complex: mov rax, RT_PRC_OFFSET
+.str:
+    mov rax, RT_PRS_OFFSET
+    jmp .do_call
+.bool:
+    mov rax, RT_PRB_OFFSET
+    jmp .do_call
+.float:
+    mov rax, RT_PRF_OFFSET
+    jmp .do_call
+.complex:
+    mov rax, RT_PRC_OFFSET
 
 .do_call:
     add rax, LOAD_BASE
@@ -721,6 +755,7 @@ codegen_emit_for_end:
     call emit_d
 
     call codegen_patch_jump
+    call codegen_patch_breaks   ; patch any stop/break jumps inside for body
     pop r13
     pop r12
     pop rbx
@@ -823,19 +858,47 @@ codegen_emit_float_op:
 
 .f_add:
     ; F2 0F 58 C1 - addsd xmm0, xmm1
-    mov al, 0xF2; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x58; call emit_b; mov al, 0xC1; call emit_b
+    mov al, 0xF2
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x58
+    call emit_b
+    mov al, 0xC1
+    call emit_b
     jmp .f_store
 .f_sub:
     ; F2 0F 5C C1 - subsd xmm0, xmm1
-    mov al, 0xF2; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x5C; call emit_b; mov al, 0xC1; call emit_b
+    mov al, 0xF2
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x5C
+    call emit_b
+    mov al, 0xC1
+    call emit_b
     jmp .f_store
 .f_mul:
     ; F2 0F 59 C1 - mulsd xmm0, xmm1
-    mov al, 0xF2; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x59; call emit_b; mov al, 0xC1; call emit_b
+    mov al, 0xF2
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x59
+    call emit_b
+    mov al, 0xC1
+    call emit_b
     jmp .f_store
 .f_div:
     ; F2 0F 5E C1 - divsd xmm0, xmm1
-    mov al, 0xF2; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x5E; call emit_b; mov al, 0xC1; call emit_b
+    mov al, 0xF2
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x5E
+    call emit_b
+    mov al, 0xC1
+    call emit_b
 
 .f_store:
     ; 4. Store XMM0 to dest
@@ -877,49 +940,99 @@ codegen_emit_complex_op:
 
     ; 1. Load src1 (128-bit) into XMM0
     ; 66 0F 28 04 25 <addr32> - movapd xmm0, [addr]
-    mov al, 0x66; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x28; call emit_b; mov al, 0x04; call emit_b; mov al, 0x25; call emit_b
-    mov rdi, rsi; call get_var_va; call emit_d
+    mov al, 0x66
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x28
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, rsi
+    call get_var_va
+    call emit_d
 
     ; 2. Load src2 (128-bit) into XMM1
-    mov al, 0x66; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x28; call emit_b; mov al, 0x0C; call emit_b; mov al, 0x25; call emit_b
-    mov rdi, rdx; call get_var_va; call emit_d
+    ; 66 0F 28 0C 25 <addr32> - movapd xmm1, [addr]
+    mov al, 0x66
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x28
+    call emit_b
+    mov al, 0x0C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, rdx
+    call get_var_va
+    call emit_d
 
     ; 3. Perform Op
     mov rax, [rbp-16]
     cmp rax, 0
     je .c_add
     ; 66 0F 5C C1 - subpd xmm0, xmm1
-    mov al, 0x66; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x5C; call emit_b; mov al, 0xC1; call emit_b
+    mov al, 0x66
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x5C
+    call emit_b
+    mov al, 0xC1
+    call emit_b
     jmp .c_store
 .c_add:
     ; 66 0F 58 C1 - addpd xmm0, xmm1
-    mov al, 0x66; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x58; call emit_b; mov al, 0xC1; call emit_b
+    mov al, 0x66
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x58
+    call emit_b
+    mov al, 0xC1
+    call emit_b
 
 .c_store:
     ; 4. Store XMM0 to dest (128-bit)
     ; 66 0F 29 04 25 <addr32> - movapd [addr], xmm0
-    mov al, 0x66; call emit_b; mov al, 0x0F; call emit_b; mov al, 0x29; call emit_b; mov al, 0x04; call emit_b; mov al, 0x25; call emit_b
+    mov al, 0x66
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x29
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
     mov rdi, [rbp-40]
     call get_var_va
     call emit_d
 
-    pop rdi; pop rsi; pop rdx; pop rcx; pop rbx
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
     leave
     ret
 
 ; -----------------------------------------------------------------------------
 ; codegen_emit_while_start
+; Call before the loop condition emit. Saves the current break_jump_depth as
+; the base for all 'stop' (break) jumps belonging to this loop.
 ; -----------------------------------------------------------------------------
 codegen_emit_while_start:
     push rbp
     mov rbp, rsp
-    push r12
-    mov r12, [out_idx]          ; loop top
-
-    ; Logic moved to parser calling emit_cmp_var_jne
-
-    mov rax, r12
-    pop r12
+    mov rax, [break_jump_depth]
+    mov rbx, [break_base_depth]
+    lea rcx, [break_base_stack]
+    mov [rcx+rbx*8], rax
+    inc qword [break_base_depth]
     leave
     ret
 
@@ -942,7 +1055,7 @@ codegen_emit_while_end:
     call emit_d
 
     call codegen_patch_jump     ; patch the while condition failure jump
-    call codegen_patch_breaks   ; patch any stop/break jumps
+    call codegen_patch_breaks   ; patch any stop/break jumps to here
     leave
     ret
 
@@ -1079,6 +1192,135 @@ codegen_output_rax_float:
     add rdx, LOAD_BASE
     sub rax, rdx
     call emit_d
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; codegen_output_rax_bool
+; Emits runtime code to print RAX as a bool value via rt_prb.
+; Generates: mov rdi, rax  +  call rt_prb
+; -----------------------------------------------------------------------------
+codegen_output_rax_bool:
+    push rbp
+    mov rbp, rsp
+    ; emit: mov rdi, rax  (48 89 C7)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    ; emit: call rt_prb  (E8 <rel32>)
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE + RT_PRB_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; codegen_output_rax_str
+; Emits runtime code to print a null-terminated string pointer in RAX.
+; Generates: mov rdi, rax  +  call rt_prs
+; -----------------------------------------------------------------------------
+codegen_output_rax_str:
+    push rbp
+    mov rbp, rsp
+    ; emit: mov rdi, rax  (48 89 C7)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    ; emit: call rt_prs  (E8 <rel32>)
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE + RT_PRS_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; codegen_emit_cmp_rax_rbx_jcc
+; Emits: cmp rax, rbx  then the INVERTED conditional jump for the given op.
+; The inverted jump skips the body when the condition is FALSE.
+; Input: RDI = comparison token (TOK_EQEQ/NEQ/LT/GT/LTE/GTE)
+; Pushes patch offset to jump_patch_stack.
+; Assumes left operand is in RAX, right in RBX (from emit_cmp_binop_setup).
+; -----------------------------------------------------------------------------
+codegen_emit_cmp_rax_rbx_jcc:
+    push rbp
+    mov rbp, rsp
+    push rdi
+
+    ; emit: cmp rax, rbx  (48 39 D8)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x39
+    call emit_b
+    mov al, 0xD8
+    call emit_b
+
+    ; emit: 0F  (two-byte Jcc prefix)
+    mov al, 0x0F
+    call emit_b
+
+    ; Choose the second byte based on op token (emit INVERSE of condition)
+    pop rdi
+    cmp dil, TOK_EQEQ
+    je .eq
+    cmp dil, TOK_NEQ
+    je .ne
+    cmp dil, TOK_LT
+    je .lt
+    cmp dil, TOK_GT
+    je .gt
+    cmp dil, TOK_LTE
+    je .le
+    cmp dil, TOK_GTE
+    je .ge
+    ; default: treat as == (emit JNE)
+.eq:
+    mov al, 0x85    ; JNE — skip body when NOT equal
+    jmp .emit_jcc
+.ne:
+    mov al, 0x84    ; JE  — skip body when equal (i.e., condition false)
+    jmp .emit_jcc
+.lt:
+    mov al, 0x8D    ; JGE — skip body when >=
+    jmp .emit_jcc
+.gt:
+    mov al, 0x8E    ; JLE — skip body when <=
+    jmp .emit_jcc
+.le:
+    mov al, 0x8F    ; JG  — skip body when >
+    jmp .emit_jcc
+.ge:
+    mov al, 0x8C    ; JL  — skip body when <
+
+.emit_jcc:
+    call emit_b
+
+    ; Push current out_idx to jump_patch_stack for later patching
+    mov rax, [out_idx]
+    mov rbx, [jump_patch_depth]
+    lea rcx, [jump_patch_stack]
+    mov [rcx+rbx*8], rax
+    inc qword [jump_patch_depth]
+
+    ; emit: placeholder dword 0
+    xor eax, eax
+    call emit_d
+
     leave
     ret
 
