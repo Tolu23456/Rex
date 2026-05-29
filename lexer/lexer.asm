@@ -691,6 +691,22 @@ lexer_classify:
     je .is_pop
     cmp eax, 0x006E656C             ; 'len\0'
     je .is_len
+    cmp eax, 0x65707974             ; 'type'
+    jne .not_typeof
+    cmp word [tok_ident+4], 0x666f  ; 'of'
+    je .is_typeof
+.not_typeof:
+    mov eax, dword [tok_ident]
+    and eax, 0x00ffffff
+    cmp eax, 0x006e6962             ; 'bin'
+    jne .default_id
+    movzx eax, byte [tok_ident+3]
+    test al, al
+    jz .is_bin
+    cmp al, '0'
+    jl .default_id
+    cmp al, '9'
+    jle .is_bin
 
 .default_id:
     mov byte [tok_type], TOK_IDENT
@@ -749,4 +765,8 @@ lexer_classify:
 .is_pop:     mov byte [tok_type], TOK_POP
     ret
 .is_len:     mov byte [tok_type], TOK_LEN
+    ret
+.is_typeof:  mov byte [tok_type], TOK_TYPEOF
+    ret
+.is_bin:     mov byte [tok_type], TOK_BIN
     ret
