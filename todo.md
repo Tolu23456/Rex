@@ -141,3 +141,27 @@
     3. Multiplicative Ops: `*`, `/`, `%`, bitwise shifts `<<`, `>>`.
     4. Additive & Bitwise Ops: `+`, `-`, `&`, `|`, `^`.
     5. Comparison Ops: Standalone evaluations returning clean byte set (`cmp` + `setCC` + `movzx`).
+
+---
+
+## Stage 10 — Deterministic Hybrid Memory Safety Matrix (Pending 🔄)
+
+### I. Strategy A: Destructive Linear Ownership (Compile-Time)
+- [ ] Implement Affine ownership tracking in symbol table for `str`, `seq`, and `dict`.
+- [ ] Add `is_live` state to collection tokens.
+- [ ] Enforce destructive moves on assignment or protocol passing (`is_live = false`).
+- [ ] Implement parser halt and ownership safety exception on dead variable access.
+
+### II. Strategy B: Hardware Bounds Checking (Runtime Spatial Guard)
+- [ ] Refactor subscription loop (`collection[i]`) for mandatory scale checks.
+- [ ] Emit hardware scale check: load hidden length prefix (`mov rbx, [rax - 8]`).
+- [ ] Emit `cmp index, rbx` + `jae` to route to `rt_err_blob` on violation.
+
+### III. Strategy C: Lexical Region Closure (1-Cycle Reclamation)
+- [ ] Auto-emit reclamation code on `TOK_DEDENT` for `use mm arena` blocks.
+- [ ] Emit single-cycle reset: `mov qword [arena_offset], 0`.
+
+### IV. Strategy D: Zero-Overhead Composite Null Safety
+- [ ] Ban raw uninitialized/nullable pointers in type propagation.
+- [ ] Enforce tri-state boolean gating (`true`/`false`/`unknown`) for optional/unknown variants.
+- [ ] Back unknown variants with hardware processor entropy ring (`rdrand rax`).
