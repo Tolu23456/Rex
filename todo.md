@@ -81,3 +81,45 @@
 ## Stage 8 — Speed / Binary Quality
 - [x] Maintain `< 1 KB` binary size target for compiled output (currently ~500 bytes for basic programs)
 - [ ] Benchmarks and optimizations
+
+---
+
+## Stage 9 — Bare-Metal Built-in Keywords and Operators Blueprint (Pending 🔄)
+
+### I. Extended Type Infrastructure & Pridist Values
+- [ ] Update `len` keyword:
+    - [ ] `len` on `int` or `float` → Compile-time literal constant (8 bytes).
+    - [ ] `len` on `complex` → Compile-time literal constant (16 bytes).
+    - [ ] `len` on `bool` → Compile-time literal constant (1 byte).
+    - [x] `len` on `str`, `seq` (`@[]`), and `dict` (`{}`) → 1-cycle runtime memory read from hidden 8-byte prefix (`mov rax, [reg - 8]`).
+
+### II. Advanced Scalar Type Hooks
+- [x] `typeof`: Compile-time reflection returning built-in integer token for `cur_type`.
+- [x] Explicit Type Casting:
+    - [x] `int(float)` → `cvttsd2si r64, xmm`.
+    - [x] `float(int)` → `cvtsi2sd xmm, r64`.
+- [x] `bin`: Base-wrapper primitive (Base 2–16) for bitmasks/byte configs (e.g., `bin10`).
+- [ ] `abs` / `sign` / `clz`: Single-cycle hardware or branchless mapping to `lzcnt`/`bsr` and `cmovCC`.
+- [ ] `ceil` / `floor` / `fract`: SSE floating-point rounding (`roundsd`) and truncation.
+- [ ] `real` / `imag` / `conj`: 128-bit XMM parallel component isolators and register bitmasking.
+- [ ] `flip` / `rand`: Hardware boolean flags mapping to bitwise NOT pipelines and entropy ring (`rdrand rax`).
+
+### III. Advanced Hardware Pointers & Optimizers
+- [ ] `addr`: Fetch variable pointer via immediate Load Effective Address (`lea rax, [rbp - offset]`).
+- [ ] `peek` / `poke`: Direct memory-mapped register dereferencing (`mov rax, [rbx]` / `mov [rax], rbx`).
+- [ ] `const`: Compile-time parser constraint blocking subsequent mutations.
+- [ ] `volatile`: Disable register caching for symbol, forcing direct memory tracking.
+- [ ] `unreachable` / `assert`: Optimizing crash boundary guards emitting `ud2` or linking to `rt_err_blob`.
+
+### IV. Bare-Metal Hardware Operators
+- [ ] `++` / `--`: Ultra-fast, single-byte hardware increments/decrements (`inc` / `dec`) directly in memory.
+- [ ] `->`: Pipeline Operator. Smart Silicon Router cascading results across SysV ABI registers (`RDI`, `RSI`, `RDX`).
+- [ ] `$`: Direct System Call Intercept. Pull parameters and drop into kernel space via raw `syscall`.
+
+### V. Operator Precedence Refactor
+- [x] Structure math parsing into strict 5-tier recursive-descent hierarchy inside `parse_expr`:
+    1. Base Atoms & Parentheticals: `(expr)`, literals, variables, type conversions.
+    2. Unary Ops: `-x`, bitwise NOT `~x`.
+    3. Multiplicative Ops: `*`, `/`, `%`, bitwise shifts `<<`, `>>`.
+    4. Additive & Bitwise Ops: `+`, `-`, `&`, `|`, `^`.
+    5. Comparison Ops: Standalone evaluations returning clean byte set (`cmp` + `setCC` + `movzx`).
