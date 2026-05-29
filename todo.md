@@ -21,6 +21,8 @@
 - [x] `while x == N:` loop
 - [x] `if :i == N:` inside loop body (loop var support)
 - [ ] `when` statement: Expressive routing block using optimized Jump Tables for O(1) matching
+- [ ] `pass`: Zero-byte semantic placeholder for empty blocks or unimplemented protocols
+- [ ] Loop-Level `else:`: Executes if parent loop finishes naturally without triggering `stop`
 
 ---
 
@@ -48,7 +50,9 @@
 - [x] `stop` break system fully wired: `codegen_emit_while_start` called by `for`/`while`
 - [x] `codegen_output_rax_bool` — routes bool output to `rt_prb_blob`
 - [x] `codegen_emit_cmp_rax_rbx_jcc` — generic comparison-then-branch emitter
-- [ ] `and` / `or` / `not`: Semantic logical operators with short-circuiting and hardware inversion
+- [ ] `and` / `or`: Logical operators with short-circuit code generation
+- [ ] `not`: Boolean/bitwise inversion mapping to `xor rax, 1` or `not rax`
+- [ ] `is` / `is not`: Semantic identity and type-verification (evaluates to hardware `cmp`)
 
 ---
 
@@ -56,6 +60,7 @@
 - [x] Dictionaries (SipHash + open addressing) — codegen and runtime implemented
 - [x] Dynamic sequences — `seq x`, `push x v`, `pop x` (expr), `len x` (expr)
 - [ ] `in` operator: Membership check via SipHash linear probing (dict) or iteration sweeps (seq/str)
+- [ ] `each` iterator: Cache-aligned counter loop for sequential collection sweeping
 - [ ] Sets and Tuples
 
 ---
