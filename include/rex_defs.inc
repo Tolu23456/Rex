@@ -77,6 +77,7 @@ TOK_POP          equ 62
 TOK_LEN          equ 63
 TOK_TYPEOF       equ 64
 TOK_BIN          equ 65
+TOK_CAP          equ 66
 
 ; --- Value Types ---
 TYPE_INT         equ 1

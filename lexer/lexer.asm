@@ -691,6 +691,8 @@ lexer_classify:
     je .is_pop
     cmp eax, 0x006E656C             ; 'len\0'
     je .is_len
+    cmp eax, 0x00706163             ; 'cap\0'
+    je .is_cap
     cmp eax, 0x65707974             ; 'type'
     jne .not_typeof
     cmp word [tok_ident+4], 0x666f  ; 'of'
@@ -765,6 +767,8 @@ lexer_classify:
 .is_pop:     mov byte [tok_type], TOK_POP
     ret
 .is_len:     mov byte [tok_type], TOK_LEN
+    ret
+.is_cap:     mov byte [tok_type], TOK_CAP
     ret
 .is_typeof:  mov byte [tok_type], TOK_TYPEOF
     ret

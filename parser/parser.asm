@@ -1715,6 +1715,8 @@ parse_factor:
     je .at_in_expr
     cmp al, TOK_LEN
     je .len_in_expr
+    cmp al, TOK_CAP
+    je .cap_in_expr
     cmp al, TOK_POP
     je .pop_in_expr
     cmp al, TOK_TYPEOF
@@ -1867,19 +1869,93 @@ parse_factor:
     leave
     ret
 
-; --- len(expr) — load metadata length header into rax ---
-.len_in_expr:
-    call lexer_next                    ; skip 'len'
+; --- cap(expr) — load metadata capacity header into rax ---
+.cap_in_expr:
+    call lexer_next                    ; skip 'cap'
     cmp byte [tok_type], TOK_LPAREN
-    jne .len_no_paren
+    jne .cap_no_paren
     call lexer_next                    ; skip '('
     call parse_expr                    ; evaluate collection expr -> rax
     call lexer_next                    ; skip ')'
-    jmp .len_emit
-.len_no_paren:
+    jmp .cap_emit
+.cap_no_paren:
     call parse_expr                    ; evaluate collection expr -> rax
-.len_emit:
-    ; Emit: mov rax, [rax-8]  (48 8B 40 F8) — load 8-byte hidden length prefix
+.cap_emit:
+    ; Emit: mov rax, [rax-16]  (48 8B 40 F0) — load 8-byte hidden capacity prefix
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x40
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+    mov byte [cur_type], TYPE_INT
+    pop rbx
+    leave
+    ret
+
+; --- len(expr) — load metadata length header into rax ---
+.len_in_expr:
+    call lexer_next                    ; skip 'len'
+    push r12
+    movzx r12d, byte [tok_type]        ; check if we have a paren
+    cmp r12b, TOK_LPAREN
+    jne .len_no_p
+    call lexer_next
+.len_no_p:
+    call parse_expr                    ; evaluate expr -> rax; cur_type set
+
+    ; Compile-time reflection for scalar types
+    movzx eax, byte [cur_type]
+    cmp al, TYPE_INT
+    je .len_scalar_8
+    cmp al, TYPE_FLOAT
+    je .len_scalar_8
+    cmp al, TYPE_BOOL
+    je .len_scalar_1
+    cmp al, TYPE_COMPLEX
+    je .len_scalar_16
+    jmp .len_runtime
+
+.len_scalar_8:
+    ; emit: mov rax, 8
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov eax, 8
+    call emit_d
+    jmp .len_done
+
+.len_scalar_1:
+    ; emit: mov rax, 1
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov eax, 1
+    call emit_d
+    jmp .len_done
+
+.len_scalar_16:
+    ; emit: mov rax, 16
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov eax, 16
+    call emit_d
+    jmp .len_done
+
+.len_runtime:
+    ; collections: emit: mov rax, [rax-8]
     mov al, 0x48
     call emit_b
     mov al, 0x8B
@@ -1888,7 +1964,14 @@ parse_factor:
     call emit_b
     mov al, 0xF8
     call emit_b
+
+.len_done:
+    cmp r12b, TOK_LPAREN
+    jne .len_exit
+    call lexer_next                    ; skip ')'
+.len_exit:
     mov byte [cur_type], TYPE_INT
+    pop r12
     pop rbx
     leave
     ret
