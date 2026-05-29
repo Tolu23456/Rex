@@ -15,55 +15,50 @@ global tok_int
 global tok_ident
 
 section .bss
-    lex_src:         resq 1      ; Pointer to source buffer
-    lex_len:         resq 1      ; Length of source buffer
-    lex_pos:         resq 1      ; Current position in source
-    at_line_start:   resb 1      ; Flag: Are we at the start of a line?
-    indent_stack:    resq 32     ; Stack for tracking indentation levels
-    indent_depth:    resq 1      ; Current depth of indentation stack
-    pending_dedents: resq 1      ; Number of dedent tokens yet to be emitted
-    tok_type:        resb 1      ; Current token type
-    tok_int:         resq 1      ; Current token integer value (or float bits)
-    tok_ident:       resb 64     ; Current token identifier/string value
+    lex_src:         resq 1
+    lex_len:         resq 1
+    lex_pos:         resq 1
+    at_line_start:   resb 1
+    indent_stack:    resq 32
+    indent_depth:    resq 1
+    pending_dedents: resq 1
+    tok_type:        resb 1
+    tok_int:         resq 1
+    tok_ident:       resb 64
 
 section .text
 
 ; -----------------------------------------------------------------------------
 ; lexer_init
-; Initializes the lexer state.
 ; Input: RDI = source pointer, RSI = source length
 ; -----------------------------------------------------------------------------
 lexer_init:
-    push rbp                    ; Set up stack frame
+    push rbp
     mov rbp, rsp
-
-    mov [lex_src], rdi          ; Save source pointer
-    mov [lex_len], rsi          ; Save source length
-    mov qword [lex_pos], 0      ; Reset position
-    mov byte [at_line_start], 1 ; Start at line beginning
-    mov qword [indent_depth], 0 ; Clear indentation depth
-    mov qword [pending_dedents], 0 ; Clear pending dedents
-    mov qword [indent_stack], 0 ; Initialize base indent (0)
-
-    leave                       ; Restore stack frame
+    mov [lex_src], rdi
+    mov [lex_len], rsi
+    mov qword [lex_pos], 0
+    mov byte [at_line_start], 1
+    mov qword [indent_depth], 0
+    mov qword [pending_dedents], 0
+    mov qword [indent_stack], 0
+    leave
     ret
 
 ; -----------------------------------------------------------------------------
 ; lexer_next
-; Extracts the next token from the source.
 ; Output: RAX = token type (also stored in [tok_type])
 ; -----------------------------------------------------------------------------
 lexer_next:
-    push rbp                    ; Set up stack frame
+    push rbp
     mov rbp, rsp
-    push rbx                    ; Preserve callee-saved registers
+    push rbx
     push r12
     push r13
     push r14
     push r15
 
 .restart:
-    ; Check if we have dedents queued from a previous indentation change
     cmp qword [pending_dedents], 0
     jle .no_pending_dedents
     dec qword [pending_dedents]
@@ -71,12 +66,11 @@ lexer_next:
     jmp .done
 
 .no_pending_dedents:
-    ; Handle indentation logic if we are at the start of a line
     cmp byte [at_line_start], 0
     je .skip_whitespace
     mov rcx, [lex_pos]
     mov rdi, [lex_src]
-    xor rbx, rbx                ; Current line indentation counter
+    xor rbx, rbx
 
 .count_spaces:
     cmp rcx, [lex_len]
@@ -84,34 +78,31 @@ lexer_next:
     movzx eax, byte [rdi+rcx]
     cmp al, ' '
     jne .check_indent_change
-    inc rbx                     ; Increment space count
-    inc rcx                     ; Advance pointer
+    inc rbx
+    inc rcx
     jmp .count_spaces
 
 .check_indent_change:
     cmp rcx, [lex_len]
     jge .handle_eof
     movzx eax, byte [rdi+rcx]
-    cmp al, 0x0A                ; Ignore empty lines
+    cmp al, 0x0A
     je .blank_line
-
-    mov [lex_pos], rcx          ; Commit position after spaces
-    mov byte [at_line_start], 0 ; No longer at line start
-
+    mov [lex_pos], rcx
+    mov byte [at_line_start], 0
     mov rax, [indent_depth]
     lea rcx, [indent_stack]
-    mov rdx, [rcx+rax*8]        ; Get top of indent stack
-
+    mov rdx, [rcx+rax*8]
     cmp rbx, rdx
     jg .more_indent
     jl .less_indent
-    jmp .skip_whitespace        ; Indent unchanged
+    jmp .skip_whitespace
 
 .more_indent:
     inc qword [indent_depth]
     mov rax, [indent_depth]
     lea rcx, [indent_stack]
-    mov [rcx+rax*8], rbx        ; Push new indent level
+    mov [rcx+rax*8], rbx
     mov byte [tok_type], TOK_INDENT
     jmp .done
 
@@ -121,7 +112,7 @@ lexer_next:
     mov rax, [indent_depth]
     lea rcx, [indent_stack]
     mov rdx, [rcx+rax*8]
-    cmp rdx, rbx                ; Compare current level with target
+    cmp rdx, rbx
     jle .dedent_error
     dec qword [indent_depth]
     inc qword [pending_dedents]
@@ -133,7 +124,7 @@ lexer_next:
     jmp .done
 
 .blank_line:
-    inc rcx                     ; Skip newline
+    inc rcx
     mov [lex_pos], rcx
     jmp .restart
 
@@ -150,9 +141,9 @@ lexer_next:
     cmp rcx, [lex_len]
     jge .emit_eof
     movzx eax, byte [rdi+rcx]
-    cmp al, ' '                 ; Skip horizontal whitespace
+    cmp al, ' '
     je .skip_next
-    cmp al, 0x09                ; Skip tabs
+    cmp al, 0x09
     je .skip_next
     jmp .switch_token
 
@@ -161,20 +152,15 @@ lexer_next:
     jmp .skip_loop
 
 .switch_token:
-    mov [lex_pos], rcx          ; Update pos to first non-ws char
+    mov [lex_pos], rcx
     cmp rcx, [lex_len]
     jge .emit_eof
     movzx eax, byte [rdi+rcx]
 
-    ; Check for Newline
     cmp al, 0x0A
     je .emit_newline
-
-    ; Check for String Literal
     cmp al, '"'
     je .parse_string
-
-    ; Check for Structural delimiters
     cmp al, '['
     je .emit_lbrack
     cmp al, ']'
@@ -185,8 +171,10 @@ lexer_next:
     je .emit_rbrace
     cmp al, ','
     je .emit_comma
-
-    ; Check for Identifiers or Keywords
+    cmp al, '('
+    je .emit_lparen
+    cmp al, ')'
+    je .emit_rparen
     cmp al, '_'
     je .parse_identifier
     cmp al, 'a'
@@ -219,11 +207,30 @@ lexer_next:
     je .emit_plus
     cmp al, '-'
     je .emit_minus
-
-    ; Unknown character, skip
+    cmp al, '*'
+    je .emit_star
+    cmp al, '/'
+    je .handle_slash
+    cmp al, '<'
+    je .handle_lt
+    cmp al, '>'
+    je .handle_gt
+    cmp al, '!'
+    je .handle_bang
+    cmp al, '&'
+    je .emit_band
+    cmp al, '|'
+    je .emit_bor
+    cmp al, '^'
+    je .emit_bxor
+    cmp al, '~'
+    je .emit_bnot
+    cmp al, '%'
+    je .emit_mod
     inc qword [lex_pos]
     jmp .restart
 
+; --- Single-character emitters ---
 .emit_lbrack:
     inc qword [lex_pos]
     mov byte [tok_type], TOK_LBRACK
@@ -249,31 +256,14 @@ lexer_next:
     mov byte [tok_type], TOK_COMMA
     jmp .done
 
-.parse_string:
-    inc qword [lex_pos]         ; Skip opening quote
-    mov rcx, [lex_pos]
-    mov rdi, [lex_src]
-    lea rsi, [tok_ident]
-    xor rbx, rbx
+.emit_lparen:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_LPAREN
+    jmp .done
 
-.string_loop:
-    cmp rcx, [lex_len]
-    jge .string_done
-    movzx eax, byte [rdi+rcx]
-    cmp al, '"'                 ; Closing quote?
-    je .string_quote
-    mov [rsi+rbx], al
-    inc rbx
-    inc rcx
-    jmp .string_loop
-
-.string_quote:
-    inc rcx                     ; Skip closing quote
-
-.string_done:
-    mov byte [rsi+rbx], 0       ; Null terminate
-    mov [lex_pos], rcx
-    mov byte [tok_type], TOK_STR_LIT
+.emit_rparen:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_RPAREN
     jmp .done
 
 .emit_plus:
@@ -286,29 +276,142 @@ lexer_next:
     mov byte [tok_type], TOK_MINUS
     jmp .done
 
+.emit_star:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_STAR
+    jmp .done
+
 .emit_at:
     inc qword [lex_pos]
     mov byte [tok_type], TOK_AT
     jmp .done
 
-.emit_eof:
-    mov byte [tok_type], TOK_EOF
-    xor eax, eax
-    jmp .done
-
-.emit_newline:
+.emit_band:
     inc qword [lex_pos]
-    mov byte [at_line_start], 1 ; Flag for indentation check
-    mov byte [tok_type], TOK_NEWLINE
+    mov byte [tok_type], TOK_BAND
     jmp .done
 
+.emit_bor:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_BOR
+    jmp .done
+
+.emit_bxor:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_BXOR
+    jmp .done
+
+.emit_bnot:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_BNOT
+    jmp .done
+
+.emit_mod:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_MOD
+    jmp .done
+
+; --- Multi-character operator handlers ---
+; Handle '/' and '//' (line comment)
+.handle_slash:
+    mov rcx, [lex_pos]
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .emit_slash_single
+    movzx eax, byte [rdi+rcx]
+    cmp al, '/'
+    je .skip_line_comment
+.emit_slash_single:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_SLASH
+    jmp .done
+
+.skip_line_comment:
+    inc rcx
+.scl_loop:
+    cmp rcx, [lex_len]
+    jge .scl_eof
+    movzx eax, byte [rdi+rcx]
+    cmp al, 0x0A
+    je .scl_eof
+    inc rcx
+    jmp .scl_loop
+.scl_eof:
+    mov [lex_pos], rcx
+    jmp .restart
+
+; Handle '<', '<=', '<<'
+.handle_lt:
+    mov rcx, [lex_pos]
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .emit_lt_single
+    movzx eax, byte [rdi+rcx]
+    cmp al, '='
+    je .emit_lte
+    cmp al, '<'
+    je .emit_shl
+.emit_lt_single:
+    add qword [lex_pos], 1
+    mov byte [tok_type], TOK_LT
+    jmp .done
+.emit_lte:
+    add qword [lex_pos], 2
+    mov byte [tok_type], TOK_LTE
+    jmp .done
+.emit_shl:
+    add qword [lex_pos], 2
+    mov byte [tok_type], TOK_SHL
+    jmp .done
+
+; Handle '>', '>=', '>>'
+.handle_gt:
+    mov rcx, [lex_pos]
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .emit_gt_single
+    movzx eax, byte [rdi+rcx]
+    cmp al, '='
+    je .emit_gte
+    cmp al, '>'
+    je .emit_shr
+.emit_gt_single:
+    add qword [lex_pos], 1
+    mov byte [tok_type], TOK_GT
+    jmp .done
+.emit_gte:
+    add qword [lex_pos], 2
+    mov byte [tok_type], TOK_GTE
+    jmp .done
+.emit_shr:
+    add qword [lex_pos], 2
+    mov byte [tok_type], TOK_SHR
+    jmp .done
+
+; Handle '!='
+.handle_bang:
+    mov rcx, [lex_pos]
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .skip_bang
+    movzx eax, byte [rdi+rcx]
+    cmp al, '='
+    jne .skip_bang
+    add qword [lex_pos], 2
+    mov byte [tok_type], TOK_NEQ
+    jmp .done
+.skip_bang:
+    inc qword [lex_pos]
+    jmp .restart
+
+; Handle '=' and '=='
 .handle_assign:
     mov rcx, [lex_pos]
     inc rcx
     cmp rcx, [lex_len]
     jge .emit_assign
     movzx eax, byte [rdi+rcx]
-    cmp al, '='                 ; Check for '=='
+    cmp al, '='
     jne .emit_assign
     inc rcx
     mov [lex_pos], rcx
@@ -329,18 +432,46 @@ lexer_next:
     mov rcx, [lex_pos]
     inc rcx
     cmp rcx, [lex_len]
-    jge .skip_char
+    jge .skip_dot
     movzx eax, byte [rdi+rcx]
-    cmp al, '.'                 ; Check for '..'
-    jne .skip_char
+    cmp al, '.'
+    jne .skip_dot
     add qword [lex_pos], 2
     mov byte [tok_type], TOK_DOTDOT
     jmp .done
-
-.skip_char:
+.skip_dot:
     inc qword [lex_pos]
     jmp .restart
 
+; --- String literal ---
+.parse_string:
+    inc qword [lex_pos]
+    mov rcx, [lex_pos]
+    mov rdi, [lex_src]
+    lea rsi, [tok_ident]
+    xor rbx, rbx
+
+.string_loop:
+    cmp rcx, [lex_len]
+    jge .string_done
+    movzx eax, byte [rdi+rcx]
+    cmp al, '"'
+    je .string_quote
+    mov [rsi+rbx], al
+    inc rbx
+    inc rcx
+    jmp .string_loop
+
+.string_quote:
+    inc rcx
+
+.string_done:
+    mov byte [rsi+rbx], 0
+    mov [lex_pos], rcx
+    mov byte [tok_type], TOK_STR_LIT
+    jmp .done
+
+; --- Identifier / keyword ---
 .parse_identifier:
     mov rcx, [lex_pos]
     mov rdi, [lex_src]
@@ -348,13 +479,11 @@ lexer_next:
     xor rbx, rbx
 
 .id_loop:
-    cmp rbx, 63                 ; Max ident len
+    cmp rbx, 63
     jge .id_done
     cmp rcx, [lex_len]
     jge .id_done
     movzx eax, byte [rdi+rcx]
-
-    ; Identifier chars: [a-zA-Z0-9_]
     cmp al, '_'
     je .id_char
     cmp al, 'a'
@@ -372,23 +501,22 @@ lexer_next:
     cmp al, '9'
     jle .id_char
     jmp .id_done
-
 .id_char:
     mov [rsi+rbx], al
     inc rbx
     inc rcx
     jmp .id_loop
-
 .id_done:
-    mov byte [rsi+rbx], 0       ; Null terminate
+    mov byte [rsi+rbx], 0
     mov [lex_pos], rcx
-    call lexer_classify         ; Check if keyword
+    call lexer_classify
     jmp .done
 
+; --- Numeric literal ---
 .parse_numeric:
     mov rcx, [lex_pos]
     mov rdi, [lex_src]
-    xor rbx, rbx                ; Integer part accumulator
+    xor rbx, rbx
 
 .int_loop:
     cmp rcx, [lex_len]
@@ -408,11 +536,10 @@ lexer_next:
 .check_float:
     cmp al, '.'
     jne .check_complex
-
-    cvtsi2sd xmm0, rbx          ; Convert integer part to float
+    cvtsi2sd xmm0, rbx
     inc rcx
     mov r8, 10
-    cvtsi2sd xmm2, r8           ; Divisor for fractional part
+    cvtsi2sd xmm2, r8
     movsd xmm1, xmm2
 
 .float_loop:
@@ -433,7 +560,7 @@ lexer_next:
 
 .float_done:
     mov [lex_pos], rcx
-    movq [tok_int], xmm0        ; Store double in tok_int
+    movq [tok_int], xmm0
     mov byte [tok_type], TOK_FLOAT_LIT
     jmp .done
 
@@ -452,9 +579,20 @@ lexer_next:
     mov byte [tok_type], TOK_INT_LIT
     jmp .done
 
+.emit_eof:
+    mov byte [tok_type], TOK_EOF
+    xor eax, eax
+    jmp .done
+
+.emit_newline:
+    inc qword [lex_pos]
+    mov byte [at_line_start], 1
+    mov byte [tok_type], TOK_NEWLINE
+    jmp .done
+
 .done:
-    movzx eax, byte [tok_type]  ; Return token type in RAX
-    pop r15                     ; Restore registers
+    movzx eax, byte [tok_type]
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -463,100 +601,104 @@ lexer_next:
     ret
 
 ; -----------------------------------------------------------------------------
-; lexer_classify
-; Matches identifier against keyword list.
+; lexer_classify — match identifier against keyword list
 ; -----------------------------------------------------------------------------
 lexer_classify:
     mov eax, dword [tok_ident]
 
-    ; Keyword match table
-    cmp eax, 0x6c6f6f62 ; 'bool'
+    cmp eax, 0x6c6f6f62           ; 'bool'
     je .is_bool
-    cmp eax, 0x616f6c66 ; 'floa'
+    cmp eax, 0x616f6c66           ; 'floa'
     jne .not_float
     cmp byte [tok_ident+4], 't'
     je .is_float
 .not_float:
-    cmp eax, 0x706d6f63 ; 'comp'
+    cmp eax, 0x706d6f63           ; 'comp'
     jne .not_complex
-    cmp dword [tok_ident+4], 0x78656c ; 'lex'
+    cmp dword [tok_ident+4], 0x78656c  ; 'lex'
     je .is_complex
 .not_complex:
-    cmp eax, 0x00727473 ; 'str'
+    cmp eax, 0x00727473           ; 'str'
     je .is_str
-    cmp eax, 0x65757274 ; 'true'
+    cmp eax, 0x74636964           ; 'dict'
+    jne .not_dict
+    cmp byte [tok_ident+4], 0
+    je .is_dict
+.not_dict:
+    cmp eax, 0x65757274           ; 'true'
     je .is_true
-    cmp eax, 0x736c6166 ; 'fals'
+    cmp eax, 0x736c6166           ; 'fals'
     jne .not_false
     cmp byte [tok_ident+4], 'e'
     je .is_false
 .not_false:
-    cmp eax, 0x6e6b6e75 ; 'unkn'
+    cmp eax, 0x6e6b6e75           ; 'unkn'
     jne .not_unknown
-    cmp dword [tok_ident+4], 0x6e776f ; 'own'
+    cmp dword [tok_ident+4], 0x6e776f   ; 'own'
     je .is_unknown
 .not_unknown:
-    cmp eax, 0x00746e69 ; 'int'
+    cmp eax, 0x00746e69           ; 'int'
     je .is_int
-    cmp eax, 0x00006669 ; 'if'
+    cmp eax, 0x00006669           ; 'if'
     je .is_if
-    cmp eax, 0x00726f66 ; 'for'
+    cmp eax, 0x00726f66           ; 'for'
     je .is_for
-    cmp eax, 0x00006e69 ; 'in'
+    cmp eax, 0x00006e69           ; 'in'
     je .is_in
-    cmp eax, 0x6C696877 ; 'whil'
+    cmp eax, 0x6c696877           ; 'whil'
     jne .check_use
     cmp byte [tok_ident+4], 'e'
     je .is_while
 .check_use:
-    cmp eax, 0x00657375 ; 'use'
+    cmp eax, 0x00657375           ; 'use'
     je .is_use
-    cmp eax, 0x00006d6d ; 'mm'
+    cmp eax, 0x00006d6d           ; 'mm'
     je .is_mm
-    cmp eax, 0x00006367 ; 'gc'
+    cmp eax, 0x00006367           ; 'gc'
     je .is_gc
-    cmp eax, 0x746F7270 ; 'prot'
+    cmp eax, 0x746f7270           ; 'prot'
     je .is_prot
-    cmp eax, 0x75746572 ; 'retu'
+    cmp eax, 0x75746572           ; 'retu'
     jne .not_return
     cmp byte [tok_ident+4], 'r'
     jne .not_return
     cmp byte [tok_ident+5], 'n'
     je .is_return
 .not_return:
-    cmp eax, 0x706F7473 ; 'stop'
+    cmp eax, 0x706f7473           ; 'stop'
     je .is_stop
-    cmp eax, 0x65736C65 ; 'else'
+    cmp eax, 0x65736c65           ; 'else'
     je .is_else
-    cmp eax, 0x66696C65 ; 'elif'
+    cmp eax, 0x66696c65           ; 'elif'
     je .is_elif
-    cmp eax, 0x7074756F ; 'outp'
+    cmp eax, 0x7074756f           ; 'outp'
     jne .default_id
-    cmp word [tok_ident+4], 0x7475 ; 'ut'
+    cmp word [tok_ident+4], 0x7475  ; 'ut'
     je .is_output
 
 .default_id:
     mov byte [tok_type], TOK_IDENT
     ret
 
-.is_int:     mov byte [tok_type], TOK_TYPE_INT; ret
-.is_bool:    mov byte [tok_type], TOK_TYPE_BOOL; ret
-.is_float:   mov byte [tok_type], TOK_TYPE_FLOAT; ret
+.is_int:     mov byte [tok_type], TOK_TYPE_INT;     ret
+.is_bool:    mov byte [tok_type], TOK_TYPE_BOOL;    ret
+.is_float:   mov byte [tok_type], TOK_TYPE_FLOAT;   ret
 .is_complex: mov byte [tok_type], TOK_TYPE_COMPLEX; ret
-.is_str:     mov byte [tok_type], TOK_TYPE_STR; ret
-.is_true:    mov byte [tok_type], TOK_TRUE; ret
-.is_false:   mov byte [tok_type], TOK_FALSE; ret
-.is_unknown: mov byte [tok_type], TOK_UNKNOWN; ret
-.is_if:      mov byte [tok_type], TOK_IF; ret
-.is_for:     mov byte [tok_type], TOK_FOR; ret
-.is_in:      mov byte [tok_type], TOK_IN; ret
-.is_while:   mov byte [tok_type], TOK_WHILE; ret
-.is_use:     mov byte [tok_type], TOK_USE; ret
-.is_mm:      mov byte [tok_type], TOK_MM; ret
-.is_gc:      mov byte [tok_type], TOK_GC; ret
-.is_prot:    mov byte [tok_type], TOK_PROT; ret
-.is_return:  mov byte [tok_type], TOK_RETURN; ret
-.is_stop:    mov byte [tok_type], TOK_STOP; ret
-.is_else:    mov byte [tok_type], TOK_ELSE; ret
-.is_elif:    mov byte [tok_type], TOK_ELIF; ret
-.is_output:  mov byte [tok_type], TOK_OUTPUT; ret
+.is_str:     mov byte [tok_type], TOK_TYPE_STR;     ret
+.is_dict:    mov byte [tok_type], TOK_TYPE_DICT;    ret
+.is_true:    mov byte [tok_type], TOK_TRUE;         ret
+.is_false:   mov byte [tok_type], TOK_FALSE;        ret
+.is_unknown: mov byte [tok_type], TOK_UNKNOWN;      ret
+.is_if:      mov byte [tok_type], TOK_IF;           ret
+.is_for:     mov byte [tok_type], TOK_FOR;          ret
+.is_in:      mov byte [tok_type], TOK_IN;           ret
+.is_while:   mov byte [tok_type], TOK_WHILE;        ret
+.is_use:     mov byte [tok_type], TOK_USE;          ret
+.is_mm:      mov byte [tok_type], TOK_MM;           ret
+.is_gc:      mov byte [tok_type], TOK_GC;           ret
+.is_prot:    mov byte [tok_type], TOK_PROT;         ret
+.is_return:  mov byte [tok_type], TOK_RETURN;       ret
+.is_stop:    mov byte [tok_type], TOK_STOP;         ret
+.is_else:    mov byte [tok_type], TOK_ELSE;         ret
+.is_elif:    mov byte [tok_type], TOK_ELIF;         ret
+.is_output:  mov byte [tok_type], TOK_OUTPUT;       ret

@@ -28,10 +28,6 @@ section .bss
     src_fd:     resq 1          ; Source file descriptor
     out_fd:     resq 1          ; Output file descriptor
 
-section .data
-    msg_parse: db "Parsing token: ", 0
-    msg_newline: db 10, 0
-
 section .text
 
 _start:
@@ -80,15 +76,6 @@ _start:
 
     cmp al, TOK_NEWLINE
     je .skip_newline
-
-    ; Debug: Print token type and ident
-    push rax
-    mov rdi, 1
-    lea rsi, [tok_ident]
-    mov rdx, 8
-    mov rax, 1
-    syscall
-    pop rax
 
     call parse_stmt
     jmp .parse_loop

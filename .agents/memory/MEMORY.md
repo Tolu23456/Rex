@@ -1,0 +1,1 @@
+- [Rex V5.0 compiler architecture](rex-v5-arch.md) — modular NASM ELF64 compiler; key bugs, offsets, and conventions to preserve across sessions.

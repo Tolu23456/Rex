@@ -6,6 +6,7 @@ default rel
 %include "include/rex_defs.inc"
 
 global rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob, rt_sip_blob, rt_alc_blob, rt_prq_blob
+global rt_dict_new, rt_dict_set, rt_dict_get
 
 section .text
 

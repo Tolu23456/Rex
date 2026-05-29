@@ -39,6 +39,15 @@ global codegen_emit_float_op
 global codegen_emit_complex_op
 global codegen_output_float_const
 
+; Expression emission helpers (called by parser's expression functions)
+global emit_b
+global emit_d
+global emit_q
+global get_var_va
+global codegen_output_rax_int
+global codegen_output_rax_float
+global codegen_emit_store_rax_var
+
 ; Externs from Headers & Runtime
 extern elf_header
 extern program_header
@@ -1016,5 +1025,83 @@ codegen_output_float_const:
     sub rax, rdx
     call emit_d
 
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; codegen_output_rax_int
+; Emits runtime code to print RAX as an integer.
+; Generates: mov rdi, rax  +  call rt_pri
+; -----------------------------------------------------------------------------
+codegen_output_rax_int:
+    push rbp
+    mov rbp, rsp
+    ; emit: mov rdi, rax  (48 89 C7)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    ; emit: call rt_pri  (E8 <rel32>)
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE + RT_PRI_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; codegen_output_rax_float
+; Emits runtime code to print RAX as a float (bits -> rdi -> rt_prf).
+; Generates: mov rdi, rax  +  call rt_prf
+; -----------------------------------------------------------------------------
+codegen_output_rax_float:
+    push rbp
+    mov rbp, rsp
+    ; emit: mov rdi, rax  (48 89 C7)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    ; emit: call rt_prf  (E8 <rel32>)
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE + RT_PRF_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; codegen_emit_store_rax_var
+; Emits: mov [var_addr], rax  using the variable's storage address.
+; Input: RDI = variable index
+; -----------------------------------------------------------------------------
+codegen_emit_store_rax_var:
+    push rbp
+    mov rbp, rsp
+    push rdi
+    ; emit: mov [addr32], rax  (48 89 04 25 <addr32>)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
     leave
     ret
