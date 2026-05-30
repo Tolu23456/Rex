@@ -62,6 +62,7 @@ extern rt_prc_blob
 extern rt_sip_blob
 extern rt_alc_blob
 extern rt_prq_blob
+extern rt_err_blob
 
 section .bss
     out_buffer:       resb 131072    ; Buffer for generated ELF binary
@@ -225,6 +226,10 @@ codegen_init:
 
     lea rsi, [rt_prq_blob]
     mov rcx, RT_PRQ_SIZE
+    call emit_blob
+
+    lea rsi, [rt_err_blob]
+    mov rcx, RT_ERR_SIZE
     call emit_blob
 
     leave

@@ -323,6 +323,10 @@ rt_prc_blob:
     leave
     ret
 
+.lp:   db "("
+.plus: db "+"
+.suf:  db "j)", 10
+
 ; rt_prf_nonnl: print a 64-bit double from RDI without trailing newline.
 ; Used by both rt_prf_blob and rt_prc_blob.
 rt_prf_nonnl:
@@ -401,10 +405,6 @@ rt_prf_nonnl:
     pop rbx
     leave
     ret
-
-.lp:   db "("
-.plus: db "+"
-.suf:  db "j)", 10
     times RT_PRC_SIZE - ($ - rt_prc_blob) db 0x90
 
 rt_sip_blob:

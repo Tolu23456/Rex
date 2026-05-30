@@ -44,6 +44,7 @@ extern codegen_emit_float_op
 extern codegen_emit_complex_op
 extern codegen_output_float_const
 extern out_idx
+extern out_buffer
 
 ; Externs for expression emission (raw byte emitters from codegen)
 extern emit_b
