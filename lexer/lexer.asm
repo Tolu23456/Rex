@@ -385,10 +385,17 @@ lexer_next:
     jge .emi1
     movzx eax, byte [rdi+rcx]
     cmp al, '-'
-    jne .emi1
+    jne .emi_arrow
     inc rcx
     mov [lex_pos], rcx
     mov byte [tok_type], TOK_MINUSMINUS
+    jmp .done
+.emi_arrow:
+    cmp al, '>'
+    jne .emi1
+    inc rcx
+    mov [lex_pos], rcx
+    mov byte [tok_type], TOK_ARROW
     jmp .done
 .emi1:
     mov [lex_pos], rcx
@@ -664,6 +671,20 @@ lexer_classify:
     cmp byte [tok_ident+2], 0
     je .kis
 .nis:
+    cmp eax, 0x70657473
+    jne .nstep
+    cmp byte [tok_ident+4], 0
+    je .kstep
+.nstep:
+    cmp eax, 0x656E6F4E
+    jne .kid
+    cmp byte [tok_ident+4], 0
+    jne .kid
+    mov byte [tok_type], TOK_NONE
+    ret
+.kstep:
+    mov byte [tok_type], TOK_STEP
+    ret
 .kid:
     mov byte [tok_type], TOK_IDENT
     ret

@@ -77,6 +77,9 @@ TOK_SWAP       equ 74
 TOK_ABS        equ 75
 TOK_CAP        equ 76
 TOK_IS         equ 77
+TOK_ARROW      equ 78
+TOK_STEP       equ 79
+TOK_NONE       equ 80
 TYPE_INT equ 1
 TYPE_FLOAT equ 2
 TYPE_BOOL equ 3

@@ -36,6 +36,7 @@ global codegen_emit_inc_var, codegen_emit_dec_var
 global codegen_emit_swap_vars
 global codegen_emit_abs_rax
 global codegen_emit_cap_rax
+global codegen_set_for_step, for_step_val
 extern elf_header, program_header
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
@@ -56,6 +57,7 @@ cont_base_stack:  resq 32
 cont_base_depth:  resq 1
 prot_jmp_idx:     resq 1
 prot_jmp_live:    resb 1
+for_step_val:     resq 1
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -451,6 +453,7 @@ codegen_end_protos:
 
 ; ── for loop (static bounds) ──────────────────────────────────────────────────
 codegen_emit_for_start:
+    ; rdi=loop_var_idx  rsi=from_val  rdx=end_val
     push rbx
     push r12
     push r13
@@ -461,7 +464,43 @@ codegen_emit_for_start:
     lea rcx, [break_base_stack]
     mov [rcx+rbx*8], rax
     inc qword [break_base_depth]
-    ; init loop var: emit mov rax,imm64; mov [var_addr],rax
+    mov qword [for_step_val], 1
+    ; optimised init: choose smallest encoding for from_val (rsi)
+    test rsi, rsi
+    jnz .fs_init_nz
+    mov al, 0x31
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov rdi, r12
+    call get_var_va
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    call emit_d
+    jmp .fs_cond
+.fs_init_nz:
+    mov rax, rsi
+    shr rax, 32
+    jnz .fs_init64
+    mov al, 0xB8
+    call emit_b
+    mov eax, esi
+    call emit_d
+    mov rdi, r12
+    call get_var_va
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    call emit_d
+    jmp .fs_cond
+.fs_init64:
     mov al, 0x48
     call emit_b
     mov al, 0xB8
@@ -479,23 +518,21 @@ codegen_emit_for_start:
     mov rdi, r12
     call get_var_va
     call emit_d
+.fs_cond:
     mov rbx, [out_idx]
-    ; condition: emit mov rax,[var_addr]; cmp rax,end; jge .exit
+    ; optimised condition: cmp qword [var_addr], end_val (no load into register)
+    ; cmp qword [addr], imm32 = 48 81 3C 25 <addr32> <imm32>
     mov al, 0x48
     call emit_b
-    mov al, 0x8B
+    mov al, 0x81
     call emit_b
-    mov al, 0x04
+    mov al, 0x3C
     call emit_b
     mov al, 0x25
     call emit_b
     mov rdi, r12
     call get_var_va
     call emit_d
-    mov al, 0x48
-    call emit_b
-    mov al, 0x3D
-    call emit_b
     mov rax, r13
     call emit_d
     mov al, 0x0F
@@ -521,29 +558,33 @@ codegen_emit_for_end:
     push rbx
     push r12
     push r13
-    mov r12, rdi
-    mov r13, rsi
-    ; emit: mov rax,[loop_var]; inc rax; mov [loop_var],rax
-    mov al, 0x48
-    call emit_b
-    mov al, 0x8B
-    call emit_b
-    mov al, 0x04
-    call emit_b
-    mov al, 0x25
-    call emit_b
-    mov rdi, r13
-    call get_var_va
-    call emit_d
+    push r14
+    mov r12, rdi             ; loop_start_pc
+    mov r13, rsi             ; loop_var_idx
+    mov r14, [for_step_val]  ; step value
+    mov qword [for_step_val], 1
+    cmp r14, 1
+    jne .fe_step
+    ; inc qword [loop_var_addr]  (7 bytes: 48 FF 04 25 <addr32>)
     mov al, 0x48
     call emit_b
     mov al, 0xFF
     call emit_b
-    mov al, 0xC0
+    mov al, 0x04
     call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r13
+    call get_var_va
+    call emit_d
+    jmp .fe_jmp
+.fe_step:
+    cmp r14, 127
+    jg .fe_imm32
+    ; add qword [addr], imm8  (8 bytes: 48 83 04 25 <addr32> <imm8>)
     mov al, 0x48
     call emit_b
-    mov al, 0x89
+    mov al, 0x83
     call emit_b
     mov al, 0x04
     call emit_b
@@ -552,6 +593,25 @@ codegen_emit_for_end:
     mov rdi, r13
     call get_var_va
     call emit_d
+    mov al, r14b
+    call emit_b
+    jmp .fe_jmp
+.fe_imm32:
+    ; add qword [addr], imm32  (11 bytes: 48 81 04 25 <addr32> <imm32>)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r13
+    call get_var_va
+    call emit_d
+    mov eax, r14d
+    call emit_d
+.fe_jmp:
     ; emit: jmp back to loop start
     mov al, 0xE9
     call emit_b
@@ -565,6 +625,7 @@ codegen_emit_for_end:
     call codegen_patch_jump
     call codegen_patch_breaks
     call codegen_pop_cont
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -579,6 +640,7 @@ codegen_emit_for_start_dyn:
     push r14
     mov r12, rdi
     mov r13, rsi
+    mov qword [for_step_val], 1
     mov rax, [break_jump_depth]
     mov r14, [break_base_depth]
     lea rcx, [break_base_stack]
@@ -731,11 +793,23 @@ codegen_emit_ret:
     ret
 
 codegen_emit_mov_eax_imm32:
-    ; rdi=imm: emit mov eax,imm32  (zero-extends to rax; result in rax)
+    ; rdi=imm: emit mov eax,imm32 or xor eax,eax for zero
+    test rdi, rdi
+    jnz .nonzero
+    mov al, 0x31
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    ret
+.nonzero:
     mov al, 0xB8
     call emit_b
     mov eax, edi
     call emit_d
+    ret
+
+codegen_set_for_step:
+    mov [for_step_val], rdi
     ret
 
 codegen_emit_call_prot:

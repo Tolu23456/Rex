@@ -37,6 +37,7 @@ extern codegen_emit_inc_var, codegen_emit_dec_var
 extern codegen_emit_swap_vars
 extern codegen_emit_abs_rax
 extern codegen_emit_cap_rax
+extern codegen_set_for_step
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
 var_count:       resq 1
@@ -52,6 +53,7 @@ cur_proto_idx:   resq 1
 proto_ret_type:  resb 1
 when_var_idx:    resq 1
 when_case_count: resq 1
+decl_mutable:    resb 1
 section .data
 err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
@@ -931,7 +933,13 @@ parse_stmt:
 .pi:
     mov r15b, TYPE_INT
 .pg:
+    mov byte [decl_mutable], 0
     call lexer_next
+    cmp byte [tok_type], TOK_COLON
+    jne .pg_name
+    mov byte [decl_mutable], 1
+    call lexer_next
+.pg_name:
     cmp byte [tok_type], TOK_IDENT
     jne .err
     lea rsi, [tok_ident]
@@ -951,7 +959,8 @@ parse_stmt:
     call parse_expr
     lea rdi, [saved_name]
     xor rsi, rsi
-    mov dl, 1
+    movzx edx, byte [decl_mutable]
+    xor dl, 1
     mov cl, r15b
     call var_add
     cmp rax, -1
@@ -1011,7 +1020,17 @@ parse_stmt:
 ; ── output expr ───────────────────────────────────────────────────────────────
 .out:
     call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .out_nopar
+    call lexer_next
     call parse_expr
+    cmp byte [tok_type], TOK_RPAREN
+    jne .out_emit
+    call lexer_next
+    jmp .out_emit
+.out_nopar:
+    call parse_expr
+.out_emit:
     movzx edi, byte [cur_type]
     call codegen_output_rax
     jmp .done
@@ -1122,7 +1141,16 @@ parse_stmt:
     jne .for_nodd
     call lexer_next
 .for_nodd:
-    call parse_expr             ; parse end expr, tok = ':'
+    call parse_expr             ; parse end expr
+    cmp byte [tok_type], TOK_STEP
+    jne .for_nostep
+    call lexer_next             ; skip 'step'
+    cmp byte [tok_type], TOK_INT_LIT
+    jne .for_nostep
+    mov rdi, [tok_int]
+    call codegen_set_for_step
+    call lexer_next             ; skip step value
+.for_nostep:
     lea rdi, [for_end_name]
     lea rsi, [saved_name]
     call strcpy
@@ -1232,6 +1260,11 @@ parse_stmt:
     je .prot_pd
     cmp byte [tok_type], TOK_EOF
     je .prot_pd
+    cmp byte [tok_type], TOK_NONE
+    jne .prot_pl_ident
+    call lexer_next
+    jmp .prot_pd
+.prot_pl_ident:
     cmp byte [tok_type], TOK_IDENT
     jne .prot_pd
     sub rsp, 64
@@ -1263,6 +1296,11 @@ parse_stmt:
     cmp byte [tok_type], TOK_RPAREN
     jne .prot_nobody
     call lexer_next
+    cmp byte [tok_type], TOK_ARROW
+    jne .prot_se_init
+    call lexer_next
+    call lexer_next
+.prot_se_init:
     xor r14, r14
 .prot_se:
     cmp r14, r12
