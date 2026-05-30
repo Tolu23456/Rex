@@ -30,11 +30,11 @@ int age
 | `float`   | `float b = 1.5`                         | 64-bit double (SSE2)           |
 | `complex` | `complex c = 12j`                       | 128-bit XMM pair               |
 | `str`     | `str name = "Rex"`                      | Null-terminated UTF-8 pointer  |
-| `bin`     | `bin10 = 01010101`                      | Base-N binary literal          |
+| `bin`     | `bin10 = 01010101`                      | Binary literal; suffix = target base (e.g. `bin10` converts to base 10, `bin16` to hex) |
 | `dict`    | `dict details = {int key: int value}`   | Typed key-value map            |
 | `@seq`    | `@seq items`                            | Dynamic sequence (heap)        |
-| `set`     | `set d = <{5, 4, 3}>` or `:{5, 4, 3}`  | Unordered unique collection    |
-| `tup`     | `tup = (int age, str name)`             | Fixed typed tuple              |
+| `set`     | `set d = <{5, 4, 3}>` or `:{5, 4, 3}`  | Unordered unique collection (both syntaxes valid) |
+| `tup`     | `tup f = (int age, str name)`           | Fixed typed tuple              |
 
 ---
 
