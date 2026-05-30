@@ -222,7 +222,28 @@ lexer_next:
     mov byte [tok_type], TOK_STAR
     jmp .done
 .eslash:
-    inc qword [lex_pos]
+    mov rcx, [lex_pos]
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .eslash1
+    movzx eax, byte [rdi+rcx]
+    cmp al, '/'
+    jne .eslash1
+    ; // comment — skip bytes until newline or EOF
+    inc rcx
+.eslash_skip:
+    cmp rcx, [lex_len]
+    jge .eslash_eol
+    movzx eax, byte [rdi+rcx]
+    cmp al, 0x0A
+    je .eslash_eol
+    inc rcx
+    jmp .eslash_skip
+.eslash_eol:
+    mov [lex_pos], rcx
+    jmp .r
+.eslash1:
+    mov [lex_pos], rcx
     mov byte [tok_type], TOK_SLASH
     jmp .done
 .epct:
@@ -342,11 +363,35 @@ lexer_next:
     mov byte [tok_type], TOK_STR_LIT
     jmp .done
 .epl:
-    inc qword [lex_pos]
+    mov rcx, [lex_pos]
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .epl1
+    movzx eax, byte [rdi+rcx]
+    cmp al, '+'
+    jne .epl1
+    inc rcx
+    mov [lex_pos], rcx
+    mov byte [tok_type], TOK_PLUSPLUS
+    jmp .done
+.epl1:
+    mov [lex_pos], rcx
     mov byte [tok_type], TOK_PLUS
     jmp .done
 .emi:
-    inc qword [lex_pos]
+    mov rcx, [lex_pos]
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .emi1
+    movzx eax, byte [rdi+rcx]
+    cmp al, '-'
+    jne .emi1
+    inc rcx
+    mov [lex_pos], rcx
+    mov byte [tok_type], TOK_MINUSMINUS
+    jmp .done
+.emi1:
+    mov [lex_pos], rcx
     mov byte [tok_type], TOK_MINUS
     jmp .done
 .eat:
@@ -599,6 +644,26 @@ lexer_classify:
 .ntype:
     cmp eax, 0x006e6962
     je .kbin
+    cmp eax, 0x70617773
+    jne .nswap
+    cmp byte [tok_ident+4], 0
+    je .kswap
+.nswap:
+    cmp eax, 0x00736261
+    jne .nabs
+    cmp byte [tok_ident+3], 0
+    je .kabs
+.nabs:
+    cmp eax, 0x00706163
+    jne .ncap
+    cmp byte [tok_ident+3], 0
+    je .kcap
+.ncap:
+    cmp eax, 0x00007369
+    jne .nis
+    cmp byte [tok_ident+2], 0
+    je .kis
+.nis:
 .kid:
     mov byte [tok_type], TOK_IDENT
     ret
@@ -706,4 +771,16 @@ lexer_classify:
     ret
 .kbin:
     mov byte [tok_type], TOK_BIN
+    ret
+.kswap:
+    mov byte [tok_type], TOK_SWAP
+    ret
+.kabs:
+    mov byte [tok_type], TOK_ABS
+    ret
+.kcap:
+    mov byte [tok_type], TOK_CAP
+    ret
+.kis:
+    mov byte [tok_type], TOK_IS
     ret

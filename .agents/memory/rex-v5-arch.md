@@ -5,13 +5,19 @@ description: Key decisions, bugs, offsets, and conventions for the Rex V5.0 NASM
 
 ## Build
 - `make` assembles 6 object files (main, lexer, parser, codegen, headers, runtime) and links with `ld`.
-- NASM 2.15.05 from `~/.nix-profile/bin/nasm` segfaults in this Replit environment. Use nasm 2.16+ or CI.
+- NASM 2.16.03 is available at full path in Makefile — build is clean and all tests pass.
 - `rexc.asm` (old monolithic file) has been deleted. All content is now modular.
 
 ## NASM Semicolon Bug (FIXED)
 - NASM treats `;` as a comment, so `instruction1; instruction2` on one line only executes instruction1.
-- Was present in `codegen_emit_float_op`, `codegen_emit_complex_op`, and `codegen_output_typed`.
 - Fix: every instruction on its own line. All known instances fixed.
+
+## Lexer `//` Comment Handler (FIXED)
+- `.eslash` in lexer.asm originally emitted `TOK_SLASH` for every `/` without peeking ahead.
+- `//` with non-ASCII UTF-8 bytes (e.g. em-dash `—` = 0xE2 0x80 0x94) would corrupt the lexer state.
+- Fix: `.eslash` now peeks at next byte; if also `/`, scans forward until `\n` (0x0A) or EOF before returning.
+- **Why:** UTF-8 high bytes (>0x7F) fall through all character comparisons and land at `inc lex_pos; jmp .r`,
+  but the first `/` had already been emitted as TOK_SLASH, scrambling the token stream for the parser.
 
 ## Dict Runtime Offsets
 - `RT_DICT_NEW_OFFSET=7550`, `RT_DICT_SET_OFFSET=7577`, `RT_DICT_GET_OFFSET=7626` — offsets from
@@ -33,75 +39,50 @@ description: Key decisions, bugs, offsets, and conventions for the Rex V5.0 NASM
 
 ## Proto Table Entry Layout (48 bytes) — FINALIZED
 - [0..31]=name (null-padded), [32..39]=out_idx offset (qword), [40]=param_count (byte),
-  [41..46]=param var indices (one byte each, up to 6 params), [47]=padding.
+  [41..46]=param var indices (one byte each, up to 6 params), [47]=ret_type (byte).
 - `proto_find` and `.protocol` both use `imul rax, 48`. Old 40-byte size is gone.
-- **Why:** 48 bytes needed for 6 param slots; must be consistent between find and write paths.
-- **How to apply:** any new proto table traversal MUST use `imul rax, 48`.
+- `proto_find` stores ret_type at [rax+47] into `proto_ret_type` BSS (parser.asm) after lookup.
+- **Why:** 48 bytes needed for 6 param slots + ret_type; must be consistent between find and write paths.
 
-## Parameterized Protocols (IMPLEMENTED)
-- Syntax: `prot name(a, b):` or `prot name():`.
-- `.protocol` handler: parses param names via `var_add(TYPE_INT)`, stores var indices at [r13+41+i].
-- After param parse, emits `mov [var_addr], reg` for each param (rdi=0x3C, rsi=0x34, rdx=0x14, rcx=0x0C
-  as ModRM bytes for the MOV r/m64,r64 + SIB absolute-addr form: 48 89 XX 25 <addr32>).
-- Body parsing skips ':', NEWLINE, INDENT via 3 `call lexer_next` before the body loop.
-- No-paren style `prot name:` still works (falls through to `.prot_no_params`).
+## emit_b_indirect / emit_d_indirect (FIXED)
+- Previously these were no-ops (just `ret`). Now they `jmp codegen_emit_b_raw` / `jmp codegen_emit_d_raw`
+  which are `global` wrappers in codegen.asm that forward to internal `emit_b` / `emit_d`.
+- Also added `codegen_get_var_va_proxy` (global) wrapping internal `get_var_va`.
+- **Why:** prot_se loop in parser.asm emits param-store instructions into the output stream; it lives in
+  parser.o which cannot see codegen internals directly.
 
-## Protocol Call With Args (IMPLEMENTED)
-- `emit_at_call_args` (file-local helper in parser.asm): called when tok=TOK_LPAREN.
-  Evaluates comma-separated arg expressions, emits `push rax` after each (in order).
-  Then emits pop opcodes in reverse: arg[n-1]→last reg, arg[0]→rdi.
-  Pop opcodes: rdi=0x5F, rsi=0x5E, rdx=0x5A, rcx=0x59.
-  Advances tok past ')'. Returns arg count in rax.
-- Used from both `.at_call` (parse_stmt) and `.at_in_expr` (parse_factor).
-- `.at_in_expr` saves/restores r12 with explicit push/pop (parse_factor prologue only saves rbx).
+## Parameterized Protocols — Up to 6 Params (FIXED)
+- `.prot_se` loop emits `mov [var_addr], reg` for params 0-5. REX prefix = 0x48 for rdi/rsi/rdx/rcx,
+  0x4C for r8/r9. ModRM bytes: rdi=0x3C, rsi=0x34, rdx=0x14, rcx=0x0C, r8=0x04, r9=0x0C.
+- `codegen_emit_arg_pops` extended to support up to 6 args (added r8/r9 pop opcodes).
 
-## Dynamic Sequences (IMPLEMENTED)
-- Syntax: `seq x` (declare), `push x val` (append), `val = pop x` (remove last), `n = len x` (length).
-- Heap block layout: [+0: cap u64][+8: len u64][+16..: data u64 array]. Initial alloc=80 bytes (cap=8).
-- `seq x` → `call rt_alc(80)`, store ptr, set [ptr]=8, [ptr+8]=0.
-- `push x v` → push rax (save v), load ptr into rbx, load [rbx+8] into rcx, pop rax,
-  store [rbx+rcx*8+16] = rax (SIB byte 0xCB = rcx*8+rbx), inc [rbx+8].
-- `pop x` (expr) → load ptr into rbx, dec [rbx+8], load new len into rcx,
-  load [rbx+rcx*8+16] into rax.
-- `len x` (expr) → load ptr into rax, load [rax+8] into rax.
-- No bounds check or realloc implemented (cap is fixed at initial 8 slots).
+## overflow guard in emit_b (FIXED)
+- If `out_idx >= 131071`, emit_b now calls `rt_err_blob` and halts instead of silently overwriting.
+- Buffer is 128KB (`out_buffer resb 131072` in codegen BSS).
 
-## err Statement (IMPLEMENTED)
-- Syntax: `err "message"` — evaluates a string expression, calls `rt_err_blob`.
-- `rt_err_blob` (128 bytes at RT_ERR_OFFSET=8573): writes null-terminated string to fd=2 (stderr),
-  then writes a newline byte (allocated on stack via sub rsp,8 / mov byte[rsp],10 / add rsp,8).
-- Emits: `mov rdi, rax` (48 89 C7) + `call rt_err` (E8 <rel32 using LOAD_BASE+RT_ERR_OFFSET>).
+## Float Return Type Through Protocol (FIXED)
+- `proto_ret_type` BSS in parser.asm mirrors [entry+47] from proto_table.
+- `proto_find` sets it after every lookup. `.ret` stores `cur_type` into [entry+47].
+- Used by `codegen_output_typed` to dispatch float-typed protocol return values correctly.
 
-## Runtime Blob Layout (within RT segment)
-- All blobs are padded with NOPs (0x90) via `times RT_Xxx_SIZE - ($ - rt_xxx_blob) db 0x90`.
-- `rt_prq_blob` ends at offset 8573 from binary start. `rt_err_blob` immediately follows.
-- `rt_prs_blob` (512B): null-terminated string printer via sys_write + newline.
-- `rt_prb_blob` (256B): bool printer — prints "true\n", "false\n", or "unknown\n". Data labels at end.
-- `rt_prc_blob` (512B): complex printer "(real+imagj)\n". Contains helper `rt_prf_nonnl`.
-- `codegen_output_typed` for TYPE_COMPLEX: patches emitted MOV (8B) → LEA (8D) at out_idx-7 so that
-  RDI receives the variable's address, not its (truncated) 64-bit value.
-
-## Token Constants (rex_defs.inc)
-- TOK_EQEQ=14, TOK_NEQ=49, TOK_LT=47, TOK_GT=48, TOK_LTE=50, TOK_GTE=51
-- TOK_ERR=59, TOK_TYPE_SEQ=60, TOK_PUSH=61, TOK_POP=62, TOK_LEN=63
-- TOK_TRUE, TOK_FALSE, TOK_UNKNOWN — handled in parse_factor as TYPE_BOOL atoms.
-- TOK_STR_LIT — handled in parse_factor: emits JMP-over-data + string bytes + null + MOV rax,VA.
-- TOK_AT=21 — dispatched in parse_stmt (.at_call) and parse_factor (.at_in_expr).
-
-## Lexer Keyword Detection
-- New keywords `err`, `seq`, `push`, `pop`, `len` added in `lexer_classify` via `.check_new_kw` label
-  (inserted before `.default_id` at the bottom of the keyword chain). Uses 4-byte dword comparison.
-- `push` = 0x68737570 ('h','s','u','p' LE), `pop` = 0x00706F70, `len` = 0x006E656C,
-  `err` = 0x00727265, `seq` = 0x00716573.
-
-## use_mm Pool Detection
-- Old code: `cmp byte [tok_ident], 'p'` (only checked first char).
-- Fixed: `cmp dword [tok_ident], 0x6C6F6F70` (= "pool" LE) + `cmp byte [tok_ident+4], 0`.
+## New Features Added (5 from todo.md)
+1. `++x` / `--x` — prefix inc/dec operators. Lexer: TOK_PLUSPLUS=72, TOK_MINUSMINUS=73.
+   codegen: `codegen_emit_inc_var` / `codegen_emit_dec_var` (inc/dec qword [addr]).
+2. `swap x y` — swaps two int vars via xchg rax,rbx. Lexer: TOK_SWAP=74.
+   codegen: `codegen_emit_swap_vars`.
+3. `abs(x)` — absolute value via `cmovns rax,rbx` pattern. Lexer: TOK_ABS=75.
+   codegen: `codegen_emit_abs_rax`. Used as a parse_factor atom.
+4. `cap x` — capacity of a sequence (loads qword at [ptr+0]). Lexer: TOK_CAP=76.
+   codegen: `codegen_emit_cap_rax`. Used as a parse_factor atom.
+5. `when x: is N: body ... else: body` — switch-like statement. Lexer: TOK_IS=77.
+   Parser: `.when` creates temp `__when__` var, uses `when_case_count` (BSS) instead of
+   accessing codegen-internal `jump_patch_depth`/`chain_base_stack` (which are not exported).
+   **Why:** accessing codegen BSS symbols from parser.asm causes "symbol not defined" link errors.
+   Each `is` case: load when_var, cmp with literal, `codegen_emit_test_rax_jz`.
 
 ## Remaining Open Issues (see docs/issues.md)
 - Dict offsets hardcoded — will break if blob sizes change.
 - for-loop range bounds must be integer literals.
 - No sequence bounds check / realloc (fixed cap=8 slots).
 - VAR_MAX=128 — no var table growth.
-- Proto params limited to 4 (rdi/rsi/rdx/rcx); 5th/6th slot stored but not emitted.
-- ELF p_memsz is static 0x80000; output buffer has no bounds check.
+- ELF p_memsz is static 0x80000; output buffer guard added but no dynamic growth.

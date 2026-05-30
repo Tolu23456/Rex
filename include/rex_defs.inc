@@ -71,6 +71,12 @@ TOK_EACH equ 68
 TOK_WHEN equ 69
 TOK_TYPEOF equ 70
 TOK_BIN equ 71
+TOK_PLUSPLUS   equ 72
+TOK_MINUSMINUS equ 73
+TOK_SWAP       equ 74
+TOK_ABS        equ 75
+TOK_CAP        equ 76
+TOK_IS         equ 77
 TYPE_INT equ 1
 TYPE_FLOAT equ 2
 TYPE_BOOL equ 3

@@ -31,6 +31,11 @@ global codegen_emit_seq_len_rax
 global codegen_emit_mov_rdi_rax, codegen_emit_call_rt_err
 global codegen_emit_for_start_dyn, codegen_emit_arg_pops
 global codegen_push_cont, codegen_pop_cont, codegen_emit_skip
+global codegen_emit_b_raw, codegen_emit_d_raw, codegen_get_var_va_proxy
+global codegen_emit_inc_var, codegen_emit_dec_var
+global codegen_emit_swap_vars
+global codegen_emit_abs_rax
+global codegen_emit_cap_rax
 extern elf_header, program_header
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
@@ -58,12 +63,18 @@ emit_b:
     push rbx
     push rcx
     mov rcx, [out_idx]
+    cmp rcx, 131071
+    jge .overflow
     lea rbx, [out_buffer]
     mov [rbx+rcx], al
     inc qword [out_idx]
     pop rcx
     pop rbx
     ret
+.overflow:
+    mov rax, 60
+    mov rdi, 1
+    syscall
 emit_d:
     push rbx
     push rcx
@@ -741,23 +752,40 @@ codegen_emit_call_prot:
     ret
 
 codegen_emit_arg_pops:
-    ; rdi=count: emit pop instructions (pop rdi, rsi, rdx, rcx)
+    ; rdi=count: emit pop instructions (pop rdi, rsi, rdx, rcx [, r8, r9])
+    ; r8 = 41 58  r9 = 41 59  (2-byte pops)
     push rbx
     push rcx
+    push r12
     mov rbx, rdi
-    mov rcx, rbx
-    cmp rcx, 4
+    cmp rbx, 6
     jle .ok
-    mov rcx, 4
+    mov rbx, 6
 .ok:
-    test rcx, rcx
+    test rbx, rbx
     jz .done
-    dec rcx
+    dec rbx
+    cmp rbx, 4
+    jge .r89
     lea rax, [rel .pop_bytes]
-    movzx eax, byte [rax+rcx]
+    movzx eax, byte [rax+rbx]
+    call emit_b
+    jmp .ok
+.r89:
+    ; pop r8 (41 58) or pop r9 (41 59)
+    mov al, 0x41
+    call emit_b
+    cmp rbx, 4
+    je .r8
+    mov al, 0x59
+    jmp .r89e
+.r8:
+    mov al, 0x58
+.r89e:
     call emit_b
     jmp .ok
 .done:
+    pop r12
     pop rcx
     pop rbx
     ret
@@ -1509,4 +1537,167 @@ codegen_emit_call_rt_err:
     add rdx, LOAD_BASE
     sub rax, rdx
     call emit_d
+    ret
+
+; ── raw emit proxy exports (for parser indirect calls) ────────────────────────
+codegen_emit_b_raw:
+    jmp emit_b
+
+codegen_emit_d_raw:
+    jmp emit_d
+
+codegen_get_var_va_proxy:
+    jmp get_var_va
+
+; ── in-place inc/dec ──────────────────────────────────────────────────────────
+codegen_emit_inc_var:
+    ; rdi=var_idx: emit inc qword [var_addr]; mov rax,[var_addr]
+    push rdi
+    mov al, 0x48
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    push rdi
+    call get_var_va
+    call emit_d
+    pop rdi
+    call codegen_emit_mov_rax_var
+    ret
+
+codegen_emit_dec_var:
+    ; rdi=var_idx: emit dec qword [var_addr]; mov rax,[var_addr]
+    push rdi
+    mov al, 0x48
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x0C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    push rdi
+    call get_var_va
+    call emit_d
+    pop rdi
+    call codegen_emit_mov_rax_var
+    ret
+
+; ── variable swap ─────────────────────────────────────────────────────────────
+codegen_emit_swap_vars:
+    ; rdi=var1_idx rsi=var2_idx
+    ; emit: mov rax,[v1]; mov rbx,[v2]; mov [v1],rbx; mov [v2],rax
+    push rbx
+    push rdi
+    push rsi
+    ; mov rax, [var1]
+    call codegen_emit_mov_rax_var
+    ; mov rbx, [var2] : 48 8B 1C 25 <addr>
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rsi
+    push rsi
+    mov rdi, rsi
+    call get_var_va
+    call emit_d
+    pop rsi
+    pop rdi
+    push rdi
+    push rsi
+    ; mov [var1], rbx : 48 89 1C 25 <addr>
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rsi
+    pop rdi
+    push rdi
+    push rsi
+    call get_var_va
+    call emit_d
+    pop rsi
+    pop rdi
+    ; mov [var2], rax : 48 89 04 25 <addr>
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, rsi
+    call get_var_va
+    call emit_d
+    pop rbx
+    ret
+
+; ── abs(rax) ─────────────────────────────────────────────────────────────────
+codegen_emit_abs_rax:
+    ; emit: mov rbx,rax; neg rax; cmovns rax,rbx
+    ; mov rbx,rax  : 48 89 C3
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    ; neg rax      : 48 F7 D8
+    mov al, 0x48
+    call emit_b
+    mov al, 0xF7
+    call emit_b
+    mov al, 0xD8
+    call emit_b
+    ; cmovns rax,rbx : 48 0F 49 C3
+    mov al, 0x48
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x49
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    ret
+
+; ── cap(seq_var) → rax ───────────────────────────────────────────────────────
+codegen_emit_cap_rax:
+    ; rdi=var_idx: emit mov rax,[ptr_addr]; mov rax,[rax+0]
+    push rdi
+    ; mov rax, [ptr_addr]
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    push rdi
+    call get_var_va
+    call emit_d
+    ; mov rax, [rax+0] : 48 8B 00
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    pop rdi
     ret

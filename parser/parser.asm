@@ -32,6 +32,11 @@ extern codegen_emit_seq_len_rax
 extern codegen_emit_mov_rdi_rax, codegen_emit_call_rt_err
 extern codegen_emit_for_start_dyn, codegen_emit_arg_pops
 extern codegen_push_cont, codegen_pop_cont, codegen_emit_skip
+extern codegen_emit_b_raw, codegen_emit_d_raw, codegen_get_var_va_proxy
+extern codegen_emit_inc_var, codegen_emit_dec_var
+extern codegen_emit_swap_vars
+extern codegen_emit_abs_rax
+extern codegen_emit_cap_rax
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
 var_count:       resq 1
@@ -43,10 +48,15 @@ for_end_name:    resb 64
 cur_type:        resb 1
 scope_stack:     resq 32
 scope_depth:     resq 1
+cur_proto_idx:   resq 1
+proto_ret_type:  resb 1
+when_var_idx:    resq 1
+when_case_count: resq 1
 section .data
 err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
 fe_suffix: db "_fe",0
+when_tmp:  db "__when__",0
 section .text
 
 ; ── string helpers ────────────────────────────────────────────────────────────
@@ -249,6 +259,10 @@ parse_factor:
     je .lenx
     cmp al, TOK_POP
     je .popx
+    cmp al, TOK_ABS
+    je .absx
+    cmp al, TOK_CAP
+    je .capx
     ; default: zero
     mov rdi, 0
     call codegen_emit_mov_eax_imm32
@@ -375,6 +389,12 @@ parse_factor:
 .prt_do:
     mov rdi, r12
     call codegen_emit_call_prot
+    movzx ecx, byte [proto_ret_type]
+    test cl, cl
+    jz .prt_default_type
+    mov byte [cur_type], cl
+    jmp .done
+.prt_default_type:
     mov byte [cur_type], TYPE_INT
     jmp .done
 .prt_skip:
@@ -462,6 +482,36 @@ parse_factor:
     je .done
     mov rdi, rax
     call codegen_emit_seq_pop_rax
+    mov byte [cur_type], TYPE_INT
+    call lexer_next
+    jmp .done
+.absx:
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    cmp byte [tok_type], TOK_RPAREN
+    jne .abs_done
+    call lexer_next
+.abs_done:
+    call codegen_emit_abs_rax
+    jmp .done
+.capx:
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .done
+    sub rsp, 64
+    mov rdi, rsp
+    lea rsi, [tok_ident]
+    call strcpy
+    mov rdi, rsp
+    call var_find
+    add rsp, 64
+    cmp rax, -1
+    je .done
+    mov rdi, rax
+    call codegen_emit_cap_rax
     mov byte [cur_type], TYPE_INT
     call lexer_next
     jmp .done
@@ -782,6 +832,8 @@ proto_find:
     jnz .cl
 .m:
     mov rax, [rbx+32]
+    movzx ecx, byte [rbx+47]
+    mov [proto_ret_type], cl
     jmp .done
 .nm:
     inc r13
@@ -852,6 +904,14 @@ parse_stmt:
     je .err_stmt
     cmp al, TOK_PUSH
     je .push_stmt
+    cmp al, TOK_PLUSPLUS
+    je .incr_stmt
+    cmp al, TOK_MINUSMINUS
+    je .decr_stmt
+    cmp al, TOK_SWAP
+    je .swap_stmt
+    cmp al, TOK_WHEN
+    je .when
     call lexer_next
     jmp .done
 
@@ -1158,6 +1218,9 @@ parse_stmt:
     mov rbx, [out_idx]
     mov [r13+32], rbx
     mov byte [r13+40], 0
+    mov byte [r13+47], 0
+    mov rax, [proto_count]
+    mov [cur_proto_idx], rax
     inc qword [proto_count]
     call lexer_next
     cmp byte [tok_type], TOK_LPAREN
@@ -1204,15 +1267,22 @@ parse_stmt:
 .prot_se:
     cmp r14, r12
     jge .prot_nobody
-    cmp r14, 4
+    cmp r14, 6
     jge .prot_nobody
     movzx rbx, byte [r13+41+r14]
     lea rax, [rel .prot_mrm]
     movzx ecx, byte [rax+r14]
+    ; choose REX prefix: 0x4C for r8/r9 (params 4,5), 0x48 for rdi/rsi/rdx/rcx
     push rbx
     push rcx
     push r14
+    cmp r14, 4
+    jge .prot_rex_r
     mov al, 0x48
+    jmp .prot_rex_emit
+.prot_rex_r:
+    mov al, 0x4C
+.prot_rex_emit:
     call emit_b_indirect
     mov al, 0x89
     call emit_b_indirect
@@ -1232,7 +1302,7 @@ parse_stmt:
     pop rbx
     inc r14
     jmp .prot_se
-.prot_mrm: db 0x3C, 0x34, 0x14, 0x0C
+.prot_mrm: db 0x3C, 0x34, 0x14, 0x0C, 0x04, 0x0C
 
 .prot_nobody:
     ; save var_count for protocol-level scoping
@@ -1286,6 +1356,13 @@ parse_stmt:
     cmp al, TOK_DEDENT
     je .ret_bare
     call parse_expr
+    ; store return type into current proto entry (B-8 fix)
+    mov rax, [cur_proto_idx]
+    imul rax, PROTO_ENTRY_SIZE
+    lea rbx, [proto_table]
+    add rbx, rax
+    movzx ecx, byte [cur_type]
+    mov [rbx+47], cl
     call codegen_emit_ret
     jmp .done
 .ret_bare:
@@ -1421,6 +1498,208 @@ parse_stmt:
     call codegen_emit_seq_push
     jmp .done
 
+; ── ++ / -- prefix increment / decrement ──────────────────────────────────────
+.incr_stmt:
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .done
+    lea rdi, [saved_name]
+    lea rsi, [tok_ident]
+    call strcpy
+    lea rdi, [saved_name]
+    call var_find
+    cmp rax, -1
+    je .done
+    mov rdi, rax
+    call codegen_emit_inc_var
+    call lexer_next
+    jmp .done
+
+.decr_stmt:
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .done
+    lea rdi, [saved_name]
+    lea rsi, [tok_ident]
+    call strcpy
+    lea rdi, [saved_name]
+    call var_find
+    cmp rax, -1
+    je .done
+    mov rdi, rax
+    call codegen_emit_dec_var
+    call lexer_next
+    jmp .done
+
+; ── swap x y ─────────────────────────────────────────────────────────────────
+.swap_stmt:
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .done
+    lea rdi, [saved_name]
+    lea rsi, [tok_ident]
+    call strcpy
+    lea rdi, [saved_name]
+    call var_find
+    cmp rax, -1
+    je .done
+    mov r14, rax
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .done
+    sub rsp, 64
+    mov rdi, rsp
+    lea rsi, [tok_ident]
+    call strcpy
+    mov rdi, rsp
+    call var_find
+    add rsp, 64
+    cmp rax, -1
+    je .done
+    mov rdi, r14
+    mov rsi, rax
+    call codegen_emit_swap_vars
+    call lexer_next
+    jmp .done
+
+; ── when x: is N: body ... ─────────────────────────────────────────────────────
+.when:
+    call lexer_next
+    call parse_expr
+    ; store when value in __when__ temp var
+    lea rdi, [when_tmp]
+    xor rsi, rsi
+    xor dl, dl
+    mov cl, TYPE_INT
+    call var_add
+    cmp rax, -1
+    je .done
+    mov [when_var_idx], rax
+    mov rdi, rax
+    call codegen_emit_store_rax_to_var
+    call codegen_save_chain_base
+    mov qword [when_case_count], 0
+    ; skip ':' newline indent
+    movzx eax, byte [tok_type]
+    cmp al, TOK_COLON
+    jne .when_nl
+    call lexer_next
+.when_nl:
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .when_in
+    call lexer_next
+.when_in:
+    cmp byte [tok_type], TOK_INDENT
+    jne .when_loop
+    call lexer_next
+    mov r13, 1
+    jmp .when_loop
+.when_loop:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .when_end
+    cmp al, TOK_DEDENT
+    je .when_end
+    cmp al, TOK_IS
+    je .when_is
+    cmp al, TOK_ELSE
+    je .when_else
+    call parse_stmt
+    jmp .when_loop
+.when_is:
+    ; if not first case: emit jmp_end + patch previous jz
+    cmp qword [when_case_count], 0
+    je .when_is_first
+    call codegen_emit_jmp_end
+    call codegen_patch_jump
+.when_is_first:
+    inc qword [when_case_count]
+    call lexer_next
+    ; emit: load when_var → rax, push it; parse is-value → rax; pop rbx; cmp
+    mov rdi, [when_var_idx]
+    call codegen_emit_mov_rax_var
+    call codegen_emit_push_rax
+    call parse_expr
+    call codegen_emit_pop_rbx
+    mov rdi, 0x94
+    call codegen_emit_cmp_rbx_rax_setcc
+    call codegen_emit_test_rax_jz
+    ; skip ':' newline indent body
+    movzx eax, byte [tok_type]
+    cmp al, TOK_COLON
+    jne .when_ib_nl
+    call lexer_next
+.when_ib_nl:
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .when_ib_in
+    call lexer_next
+.when_ib_in:
+    cmp byte [tok_type], TOK_INDENT
+    jne .when_ibl
+    call lexer_next
+    mov r13, 1
+.when_ibl:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .when_ib_end
+    cmp al, TOK_DEDENT
+    je .when_ib_end
+    cmp al, TOK_IS
+    je .when_ib_end
+    cmp al, TOK_ELSE
+    je .when_ib_end
+    call parse_stmt
+    jmp .when_ibl
+.when_ib_end:
+    test r13, r13
+    jz .when_loop
+    cmp byte [tok_type], TOK_DEDENT
+    jne .when_loop
+    call lexer_next
+    xor r13, r13
+    jmp .when_loop
+.when_else:
+    ; patch the last jz if any case was open
+    cmp qword [when_case_count], 0
+    je .when_else_body
+    call codegen_emit_jmp_end
+    call codegen_patch_jump
+.when_else_body:
+    call lexer_next
+    call lexer_next
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .when_el_in
+    call lexer_next
+.when_el_in:
+    cmp byte [tok_type], TOK_INDENT
+    jne .when_ell
+    call lexer_next
+    mov r13, 1
+.when_ell:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .when_el_end
+    cmp al, TOK_DEDENT
+    je .when_el_end
+    call parse_stmt
+    jmp .when_ell
+.when_el_end:
+    test r13, r13
+    jz .when_end
+    cmp byte [tok_type], TOK_DEDENT
+    jne .when_end
+    call lexer_next
+.when_end:
+    ; patch final open jz if no else was present
+    cmp qword [when_case_count], 0
+    je .when_done
+    call codegen_patch_jump
+.when_done:
+    call codegen_patch_chain_end
+    ; clean up __when__ temp var
+    dec qword [var_count]
+    jmp .done
+
 .done:
     pop r15
     pop r14
@@ -1430,13 +1709,12 @@ parse_stmt:
     leave
     ret
 
-; ── indirect emit stubs (protocol param stores — no-op for now) ───────────────
+; ── indirect emit helpers (wired to codegen raw exports) ─────────────────────
 emit_b_indirect:
-    ret
+    jmp codegen_emit_b_raw
+
 emit_d_indirect:
-    ret
+    jmp codegen_emit_d_raw
+
 get_var_va_indirect:
-    mov rax, rdi
-    shl rax, 6
-    add rax, VAR_STORAGE_BASE
-    ret
+    jmp codegen_get_var_va_proxy
