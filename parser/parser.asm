@@ -406,7 +406,6 @@ parse_stmt:
     cmp al,TOK_USE;         je .use
     cmp al,TOK_ERR;         je .err_stmt
     cmp al,TOK_PUSH;        je .push_stmt
-    cmp al,TOK_TYPE_SEQ;    je .pq   ; redundant but safe
     call lexer_next; jmp .done
 ; ── type declarations ─────────────────────────────────────────────────────────
 .pf: mov r15b,TYPE_FLOAT;   jmp .pg
@@ -701,7 +700,7 @@ parse_stmt:
     call codegen_emit_call_rt_err
     jmp .done
 ; ── seq statement ─────────────────────────────────────────────────────────────
-.pq:
+.seq_stmt:
     call lexer_next             ; skip 'seq', tok = var name
     cmp byte [tok_type],TOK_IDENT; jne .done
     lea rdi,[saved_name]; lea rsi,[tok_ident]; call strcpy
