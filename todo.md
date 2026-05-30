@@ -213,6 +213,7 @@ int-to-string conversion before calling `rt_err`.
 - [ ] `blast` / `pipe`: Vectorized iteration unrolling into `movntdq` / `movdqa` (bypassing CPU cache).
 - [ ] `skip`: Semantic twin to `stop` (break). Emits unconditional `jmp` to loop condition evaluation.
 - [ ] `match`: Structural pattern-matching. Sequential integers map to high-speed O(1) Jump Tables.
+- [ ] `repeat N:`: Counted loop with no explicit counter variable. Emits a single `dec`+`jnz` hardware loop.
 - [ ] `unreachable` / `assert`: Optimizing crash boundary guards emitting `ud2` or linking to `rt_err_blob`.
 
 ### IV. Bare-Metal Hardware Atoms & Intrinsics
