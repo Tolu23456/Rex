@@ -86,6 +86,106 @@
 
 ---
 
+## Known Bugs and Hard Limitations
+
+These are confirmed defects in the current implementation, identified by static analysis.
+Each must be fixed before the affected feature can be considered complete.
+
+### B-1: Recursive protocols produce wrong results
+Protocol parameters are stored in global `var_table` slots (at `VAR_STORAGE_BASE + idx*64`).
+A recursive call overwrites the caller's copy of those slots before the caller resumes.
+`fib(n)` calling `fib(n-1)` destroys `n` in the caller's frame.
+**Fix required:** Per-call stack frames — push/pop param vars onto the hardware stack.
+**Affects:** `parser/parser.asm` `.protocol` + `.prot_store_params`
+
+### B-2: `seq` push beyond capacity silently corrupts heap
+`push x v` emits `mov [rbx+rcx*8+16], rax` with no bounds check. Initial capacity is 8
+slots (80-byte alloc). A 9th `push` writes 8 bytes past the end of the allocation, into
+whatever the `rt_alc` allocator placed there.
+**Fix required:** Emit a cap check before the store; call a realloc blob if `len == cap`.
+**Affects:** `.push_stmt` in `parser/parser.asm`
+
+### B-3: `for` loop bounds must be integer literals
+`codegen_emit_for_start` receives `rdi=from`, `rsi=to` as immediate integers parsed directly
+from `tok_int`. The syntax `for :i in 0..n:` where `n` is a variable does not work — the
+parser reads `n` as an identifier and the codegen never receives an integer value.
+**Fix required:** Replace bounds parsing with `parse_expr`; store result before emitting loop.
+**Affects:** `.for` handler in `parser/parser.asm`
+
+### B-4: Protocol parameters capped at 4 — 5th and 6th ignored at call site
+`.prot_store_params` emits `mov [var_addr], rdi/rsi/rdx/rcx` for params 0–3 only. Params 4
+and 5 are stored in `proto_table[entry+45]` and `[entry+46]` but the emit loop stops at
+index 3 (no `r8`/`r9` emission). Protocols declared with 5 or 6 params silently drop them.
+**Fix required:** Add `r8` (ModRM 0x04) and `r9` (ModRM 0x0C with REX.R) cases in the
+store loop.
+**Affects:** `.prot_store_params` in `parser/parser.asm`
+
+### B-5: VAR_MAX = 128 is a hard ceiling with no overflow guard
+`var_add` increments `[var_count]` without checking against `VAR_MAX`. Adding a 129th
+variable writes past the end of `var_table` into adjacent BSS, silently corrupting
+`proto_table` or other globals.
+**Fix required:** Add `cmp [var_count], VAR_MAX; jge .var_full` guard in `var_add`; emit
+compile-error diagnostic and halt.
+**Affects:** `var_add` in `parser/parser.asm`
+
+### B-6: `stop` only breaks the innermost loop — no outer-loop break
+`codegen_emit_break` emits a `JMP` into the current loop's patch stack. When loops are
+nested, `stop` inside the inner loop always patches to the inner loop's exit. There is no
+syntax or mechanism to break an outer loop.
+**Fix required:** `skip N` or labelled breaks (Stage 9 `skip`).
+**Affects:** `codegen_emit_break` in `codegen/codegen.asm`
+
+### B-7: `out_buffer` has no overflow guard
+The emit buffer is `resb 65536`. `emit_b` writes `[out_buffer + out_idx]` and increments
+`out_idx` with no bounds check. A program that generates more than 65536 bytes of code
+silently overwrites BSS past the buffer.
+**Fix required:** Add `cmp [out_idx], 65535; jge .emit_overflow` in `emit_b`; halt with
+error.
+**Affects:** `emit_b` in `codegen/codegen.asm`
+
+### B-8: `float` type lost through protocol return
+When `@prot()` is used as an expression atom (`.at_in_expr` in `parse_factor`), the
+handler hard-codes `mov byte [cur_type], TYPE_INT` after `codegen_emit_call_prot`.
+A protocol that computes and returns a float value will cause the calling scope to route
+the result through `rt_pri` (integer printer) instead of `rt_prf`.
+**Fix required:** Store return type in `proto_table` entry; restore `cur_type` from it
+after the call.
+**Affects:** `.at_in_expr` and `.at_call` in `parser/parser.asm`
+
+### B-9: Negative for-loop bounds not supported
+`tok_int` is stored as `uint64`. The lexer does not emit a unary-minus token before an
+integer literal when it appears in a range context. `for :i in -5..5:` lexes as
+`TOK_MINUS`, `TOK_INT_LIT(5)`, `TOK_DOTDOT`, `TOK_INT_LIT(5)` — the minus is never
+applied to the start bound, and the parser discards it.
+**Fix required:** Handle `TOK_MINUS` before range start in `.for` handler, or switch bounds
+to `parse_expr`.
+**Affects:** `.for` handler in `parser/parser.asm` (linked to B-3)
+
+### B-10: Dict keys must be string literals — variable keys not supported
+The dict handler emits a `call rt_sip(key_va, key_len)` with the key bytes embedded inline
+in the code stream. There is no path for `d[x]` where `x` is a variable holding a runtime
+string pointer.
+**Fix required:** When the key token is `TOK_IDENT`, resolve the variable's runtime address
+and pass it to the SipHash call instead of an inline literal.
+**Affects:** Dict get/set handlers in `parser/parser.asm`
+
+### B-11: No string concatenation and no `int → str` conversion
+`output` routes `TYPE_STR` correctly, but there is no operator or builtin that joins two
+strings or converts an integer to a string at runtime. `str s; :s = x + "px"` does not
+work.
+**Fix required:** Add `rt_str_cat` blob (Stage 9); add `str(expr)` cast syntax.
+**Affects:** Expression parser, runtime
+
+### B-12: `err` only accepts a string pointer — integer codes not supported
+`.err_stmt` calls `parse_expr` and assumes the result in `rax` is a null-terminated string
+pointer. `err 42` or `err code` where `code` is an `int` will pass a small integer to
+`rt_err_blob`'s strlen loop, which will spin or segfault.
+**Fix required:** Check `cur_type` after `parse_expr`; if `TYPE_INT`, route through an
+int-to-string conversion before calling `rt_err`.
+**Affects:** `.err_stmt` in `parser/parser.asm`
+
+---
+
 ## Stage 8 — Speed / Binary Quality
 - [x] Maintain `< 1 KB` binary size target for compiled output (currently ~500 bytes for basic programs)
 - [ ] Benchmarks and optimizations

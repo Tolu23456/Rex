@@ -49,6 +49,39 @@ Measure the assembled size before increasing code inside a blob.
 
 ---
 
+## Language
+
+### Rule L-1: Rex must be built in pure x86-64 NASM assembly — no exceptions
+
+Every component of the Rex compiler, runtime, toolchain, and any future tooling (assembler,
+disassembler, linker, debugger, test runner, benchmark harness) **must** be written
+exclusively in x86-64 NASM assembly.
+
+**This rule prohibits:**
+- C, C++, Rust, Python, Shell, Go, or any other programming language inside the Rex project
+- Makefile `$(shell ...)` recipes that call external language runtimes to generate code
+- Generated source files produced by scripts written in non-assembly languages
+- Third-party libraries or object files compiled from non-assembly sources
+- Inline C or GCC-intrinsic extensions inside assembly files
+
+**This rule permits:**
+- The `Makefile` itself (build system only, no logic — only `nasm`, `ld`, and `ar` invocations)
+- Shell one-liners in the `Makefile` that are purely file-system operations (`rm`, `mkdir`, `cp`)
+- `.rex` test source files in `tests/` and `benchmark/` (those are Rex language, not compiler code)
+- Benchmark subjects written in other languages placed in `benchmark/` for comparison only
+  (e.g., `bench_sum.c`) — these are measurement targets, not part of Rex itself
+
+**Rationale:**
+Rex is a demonstration that a full compiler — lexer, parser, codegen, runtime, and tooling —
+can be built entirely in bare-metal assembly. Introducing any higher-level language defeats
+this core thesis. Every line of `.asm` in this project is a deliberate choice. If a feature
+cannot be implemented in NASM x86-64, the architecture must be redesigned, not the language rule relaxed.
+
+**Scope:** All files under `main/`, `lexer/`, `parser/`, `codegen/`, `headers/`, `runtime/`,
+`compiler/`, and any future tooling directory.
+
+---
+
 ## Architecture
 
 ### Rule A-1: Dict runtime offsets must be re-measured after blob changes
