@@ -567,11 +567,12 @@ rt_prq_blob:
     ret
 rt_dict_new:
     push rdi
-    mov rdi, 272
+    mov rdi, 280                 ; 8-byte hidden len + 8-byte cap + 16 * 16-byte entries
     mov rax, LOAD_BASE + RT_ALC_OFFSET
     call rax
-    mov qword [rax], 16
-    mov qword [rax+8], 0
+    mov qword [rax], 0           ; hidden len = 0
+    add rax, 8                   ; skip hidden len
+    mov qword [rax], 16          ; cap = 16
     pop rdi
     ret
 rt_dict_set:
@@ -598,9 +599,9 @@ rt_dict_set:
     mov rax, rdx
     shl rax, 4
     add rax, r12
-    add rax, 16
+    add rax, 8                   ; data starts at dict_ptr + 8 (cap is at dict_ptr)
     cmp qword [rax], 0
-    je .f1
+    je .new_entry
     cmp qword [rax], r13
     je .f1
     inc rdx
@@ -609,6 +610,8 @@ rt_dict_set:
     xor rdx, rdx
 .p1a:
     jmp .p1
+.new_entry:
+    inc qword [r12-8]            ; increment hidden length
 .f1:
     mov [rax], r13
     mov [rax+8], r14
@@ -641,7 +644,7 @@ rt_dict_get:
     mov rax, rdx
     shl rax, 4
     add rax, r12
-    add rax, 16
+    add rax, 8
     cmp qword [rax], 0
     je .nf
     cmp qword [rax], r13

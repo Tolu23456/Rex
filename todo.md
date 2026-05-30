@@ -20,6 +20,9 @@
 - [x] `stop` keyword (loop break) — fully wired to break_base/patch system
 - [x] `while x == N:` loop
 - [x] `if :i == N:` inside loop body (loop var support)
+- [ ] `when` statement: Expressive routing block using optimized Jump Tables for O(1) matching
+- [ ] `pass`: Zero-byte semantic placeholder for empty blocks or unimplemented protocols
+- [ ] Loop-Level `else:`: Executes if parent loop finishes naturally without triggering `stop`
 
 ---
 
@@ -38,7 +41,7 @@
 
 ---
 
-## Stage 3b — Expression System Fixes (Complete ✅)
+## Stage 3b — Expression System Expansion (Complete ✅)
 - [x] Full expression conditions in `if` / `elif` / `else` (any comparison operator)
 - [x] Full expression conditions in `while`
 - [x] `true` / `false` / `unknown` as expression atoms in `parse_factor`
@@ -47,12 +50,17 @@
 - [x] `stop` break system fully wired: `codegen_emit_while_start` called by `for`/`while`
 - [x] `codegen_output_rax_bool` — routes bool output to `rt_prb_blob`
 - [x] `codegen_emit_cmp_rax_rbx_jcc` — generic comparison-then-branch emitter
+- [ ] `and` / `or`: Logical operators with short-circuit code generation
+- [ ] `not`: Boolean/bitwise inversion mapping to `xor rax, 1` or `not rax`
+- [ ] `is` / `is not`: Semantic identity and type-verification (evaluates to hardware `cmp`)
 
 ---
 
 ## Stage 4 — Native Collections (In Progress 🔄)
 - [x] Dictionaries (SipHash + open addressing) — codegen and runtime implemented
 - [x] Dynamic sequences — `seq x`, `push x v`, `pop x` (expr), `len x` (expr)
+- [ ] `in` operator: Membership check via SipHash linear probing (dict) or iteration sweeps (seq/str)
+- [ ] `each` iterator: Cache-aligned counter loop for sequential collection sweeping
 - [ ] Sets and Tuples
 
 ---
@@ -81,3 +89,79 @@
 ## Stage 8 — Speed / Binary Quality
 - [x] Maintain `< 1 KB` binary size target for compiled output (currently ~500 bytes for basic programs)
 - [ ] Benchmarks and optimizations
+
+---
+
+## Stage 9 — Bare-Metal Built-in Keywords and Operators Blueprint (Pending 🔄)
+
+### I. Extended Type Infrastructure & Metadata Headers
+- [ ] Update `len` keyword:
+    - [ ] `len` on `int` or `float` → Compile-time literal constant (8 bytes).
+    - [ ] `len` on `complex` → Compile-time literal constant (16 bytes).
+    - [ ] `len` on `bool` → Compile-time literal constant (1 byte).
+    - [x] `len` on `str`, `seq` (`@[]`), and `dict` (`{}`) → 1-cycle runtime memory read from hidden 8-byte prefix (`mov rax, [reg - 8]`).
+- [ ] `cap` (Capacity): 1-cycle target read of second 8-byte hidden header (`mov rax, [reg - 16]`).
+
+### II. Memory, Ownership & Context Control
+- [ ] `own` / `move`: Transfer ownership bypassing `ref_count` to eliminate redundant instructions.
+- [ ] `free`: Manually recycle allocation block within pool/arena before scope end.
+- [ ] `align`: CPU cache line alignment constraint (e.g., `align 64`) for memory offsets.
+- [ ] `const`: Compile-time parser constraint blocking mutation assignments.
+- [ ] `volatile`: Force direct memory tracking by disabling Stage 8 register caching.
+
+### III. Concurrency, Control Flow & Selection
+- [ ] `blast` / `pipe`: Vectorized iteration unrolling into `movntdq` / `movdqa` (bypassing CPU cache).
+- [ ] `skip`: Semantic twin to `stop` (break). Emits unconditional `jmp` to loop condition evaluation.
+- [ ] `match`: Structural pattern-matching. Sequential integers map to high-speed O(1) Jump Tables.
+- [ ] `unreachable` / `assert`: Optimizing crash boundary guards emitting `ud2` or linking to `rt_err_blob`.
+
+### IV. Bare-Metal Hardware Atoms & Intrinsics
+- [x] `typeof`: Compile-time reflection returning built-in integer token for `cur_type`.
+- [x] Explicit Type Casting:
+    - [x] `int(float)` → `cvttsd2si r64, xmm`.
+    - [x] `float(int)` → `cvtsi2sd xmm, r64`.
+- [x] `bin`: Base-wrapper primitive (Base 2–16) for bitmasks/byte configs (e.g., `bin10`).
+- [ ] `abs` / `sign` / `clz`: Single-cycle hardware mapping to `lzcnt`/`bsr` and `cmovCC`.
+- [ ] `ceil` / `floor` / `fract`: SSE floating-point rounding (`roundsd`) and truncation.
+- [ ] `real` / `imag` / `conj`: 128-bit XMM parallel component isolators and register bitmasking.
+- [ ] `flip` / `rand`: Hardware boolean flags mapping to bitwise NOT pipelines and entropy ring (`rdrand rax`).
+- [ ] `carry` / `overflow`: Built-in boolean expressions checking EFLAGS via `jc` or `jo`.
+- [ ] `swap`: Instant value exchange using atomic `xchg rax, rbx`.
+- [ ] `hash`: Direct backend SipHash-2-4 tracking loop over targeted memory pointers.
+
+### V. Bare-Metal Hardware Operators
+- [ ] `++` / `--`: Ultra-fast, single-byte hardware increments/decrements (`inc` / `dec`) directly in memory.
+- [ ] `->`: Pipeline Operator. Smart Silicon Router cascading results across SysV ABI registers (`RDI`, `RSI`, `RDX`).
+- [ ] `$`: Direct System Call Intercept. Pull parameters and drop into kernel space via raw `syscall`.
+
+### VI. Operator Precedence Refactor
+- [x] Structure math parsing into strict 5-tier recursive-descent hierarchy inside `parse_expr`:
+    1. Base Atoms & Parentheticals: `(expr)`, literals, variables, type conversions.
+    2. Unary Ops: `-x`, bitwise NOT `~x`.
+    3. Multiplicative Ops: `*`, `/`, `%`, bitwise shifts `<<`, `>>`.
+    4. Additive & Bitwise Ops: `+`, `-`, `&`, `|`, `^`.
+    5. Comparison Ops: Standalone evaluations returning clean byte set (`cmp` + `setCC` + `movzx`).
+
+---
+
+## Stage 10 — Deterministic Hybrid Memory Safety Matrix (Pending 🔄)
+
+### I. Strategy A: Destructive Linear Ownership (Compile-Time)
+- [ ] Implement Affine ownership tracking in symbol table for `str`, `seq`, and `dict`.
+- [ ] Add `is_live` state to collection tokens.
+- [ ] Enforce destructive moves on assignment or protocol passing (`is_live = false`).
+- [ ] Implement parser halt and ownership safety exception on dead variable access.
+
+### II. Strategy B: Hardware Bounds Checking (Runtime Spatial Guard)
+- [ ] Refactor subscription loop (`collection[i]`) for mandatory scale checks.
+- [ ] Emit hardware scale check: load hidden length prefix (`mov rbx, [rax - 8]`).
+- [ ] Emit `cmp index, rbx` + `jae` to route to `rt_err_blob` on violation.
+
+### III. Strategy C: Lexical Region Closure (1-Cycle Reclamation)
+- [ ] Auto-emit reclamation code on `TOK_DEDENT` for `use mm arena` blocks.
+- [ ] Emit single-cycle reset: `mov qword [arena_offset], 0`.
+
+### IV. Strategy D: Zero-Overhead Composite Null Safety
+- [ ] Ban raw uninitialized/nullable pointers in type propagation.
+- [ ] Enforce tri-state boolean gating (`true`/`false`/`unknown`) for optional/unknown variants.
+- [ ] Back unknown variants with hardware processor entropy ring (`rdrand rax`).

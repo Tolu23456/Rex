@@ -75,6 +75,9 @@ TOK_TYPE_SEQ     equ 60
 TOK_PUSH         equ 61
 TOK_POP          equ 62
 TOK_LEN          equ 63
+TOK_TYPEOF       equ 64
+TOK_BIN          equ 65
+TOK_CAP          equ 66
 
 ; --- Value Types ---
 TYPE_INT         equ 1
@@ -84,6 +87,7 @@ TYPE_COMPLEX     equ 4
 TYPE_STR         equ 5
 TYPE_SEQ         equ 6
 TYPE_DICT        equ 7
+TYPE_BIN         equ 8
 
 ; --- Symbol Table ---
 VAR_ENTRY_SIZE   equ 64
