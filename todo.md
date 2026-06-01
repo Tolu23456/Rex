@@ -20,8 +20,8 @@
 - [x] `stop` keyword (loop break) — fully wired to break_base/patch system
 - [x] `while x == N:` loop
 - [x] `if :i == N:` inside loop body (loop var support)
-- [ ] `when` statement: Expressive routing block using optimized Jump Tables for O(1) matching
-- [ ] `pass`: Zero-byte semantic placeholder for empty blocks or unimplemented protocols
+- [x] `when` statement: Expressive routing block (`when x: / is N:` chain with linear cmp/jz); O(1) jump table optimisation pending
+- [x] `pass`: Zero-byte semantic placeholder for empty blocks or unimplemented protocols
 - [ ] Loop-Level `else:`: Executes if parent loop finishes naturally without triggering `stop`
 
 ---
@@ -200,7 +200,7 @@ int-to-string conversion before calling `rt_err`.
     - [ ] `len` on `complex` → Compile-time literal constant (16 bytes).
     - [ ] `len` on `bool` → Compile-time literal constant (1 byte).
     - [x] `len` on `str`, `seq` (`@[]`), and `dict` (`{}`) → 1-cycle runtime memory read from hidden 8-byte prefix (`mov rax, [reg - 8]`).
-- [ ] `cap` (Capacity): 1-cycle target read of second 8-byte hidden header (`mov rax, [reg - 16]`).
+- [x] `cap` (Capacity): 1-cycle read of second 8-byte hidden header (`mov rax, [reg - 16]`) — `codegen_emit_cap_rax` implemented.
 
 ### II. Memory, Ownership & Context Control
 - [ ] `own` / `move`: Transfer ownership bypassing `ref_count` to eliminate redundant instructions.
@@ -211,7 +211,7 @@ int-to-string conversion before calling `rt_err`.
 
 ### III. Concurrency, Control Flow & Selection
 - [ ] `blast` / `pipe`: Vectorized iteration unrolling into `movntdq` / `movdqa` (bypassing CPU cache).
-- [ ] `skip`: Semantic twin to `stop` (break). Emits unconditional `jmp` to loop condition evaluation.
+- [x] `skip`: Multi-level loop break. `codegen_emit_skip` + `codegen_push_cont`/`codegen_pop_cont` implemented. `skip N` breaks N levels.
 - [ ] `match`: Structural pattern-matching. Sequential integers map to high-speed O(1) Jump Tables.
 - [ ] `repeat N:`: Counted loop with no explicit counter variable. Emits a single `dec`+`jnz` hardware loop.
 - [ ] `unreachable` / `assert`: Optimizing crash boundary guards emitting `ud2` or linking to `rt_err_blob`.
@@ -222,16 +222,17 @@ int-to-string conversion before calling `rt_err`.
     - [x] `int(float)` → `cvttsd2si r64, xmm`.
     - [x] `float(int)` → `cvtsi2sd xmm, r64`.
 - [x] `bin`: Base-wrapper primitive (Base 2–16) for bitmasks/byte configs (e.g., `bin10`).
-- [ ] `abs` / `sign` / `clz`: Single-cycle hardware mapping to `lzcnt`/`bsr` and `cmovCC`.
+- [x] `abs`: `codegen_emit_abs_rax` implemented (`cmovns` pattern).
+- [ ] `sign` / `clz`: Single-cycle hardware mapping to `lzcnt`/`bsr` — not yet implemented.
 - [ ] `ceil` / `floor` / `fract`: SSE floating-point rounding (`roundsd`) and truncation.
 - [ ] `real` / `imag` / `conj`: 128-bit XMM parallel component isolators and register bitmasking.
 - [ ] `flip` / `rand`: Hardware boolean flags mapping to bitwise NOT pipelines and entropy ring (`rdrand rax`).
 - [ ] `carry` / `overflow`: Built-in boolean expressions checking EFLAGS via `jc` or `jo`.
-- [ ] `swap`: Instant value exchange using atomic `xchg rax, rbx`.
+- [x] `swap`: Instant value exchange via `xchg rax, rbx` — `codegen_emit_swap_vars` implemented.
 - [ ] `hash`: Direct backend SipHash-2-4 tracking loop over targeted memory pointers.
 
 ### V. Bare-Metal Hardware Operators
-- [ ] `++` / `--`: Ultra-fast, single-byte hardware increments/decrements (`inc` / `dec`) directly in memory.
+- [x] `++` / `--`: Single-byte hardware inc/dec — `codegen_emit_inc_var` / `codegen_emit_dec_var` implemented.
 - [ ] `->`: Pipeline Operator. Smart Silicon Router cascading results across SysV ABI registers (`RDI`, `RSI`, `RDX`).
 - [ ] `$`: Direct System Call Intercept. Pull parameters and drop into kernel space via raw `syscall`.
 
