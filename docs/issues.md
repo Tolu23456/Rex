@@ -99,6 +99,81 @@ emitted as `TOK_SLASH`, scrambling the token stream.
 
 ## High
 
+### 29. `codegen_emit_abs_rax` uses CMOVNS instead of CMOVS — `abs()` always wrong
+
+**File:** `codegen/codegen.asm`, `codegen_emit_abs_rax`.
+
+**Description:** The abs implementation emits `mov rbx, rax; neg rax; cmovns rax, rbx`
+(opcode `0x0F 0x49`).  After `neg rax`, the sign flag reflects the *negated* value:
+- `neg 5` → rax = -5, SF=1.  CMOVNS (SF=0): not taken → result = -5.  **Wrong.**
+- `neg -3` → rax = 3, SF=0.  CMOVNS (SF=0): taken → rax = rbx = -3.  **Wrong.**
+
+Both positive and negative inputs produce the wrong result.  Only `abs(0)` is correct.
+
+The correct opcode is CMOVS (`0x0F 0x48`): move if SF=1, i.e. when the original value
+was positive (neg produced a negative result → keep the original).
+
+**Fixed in this scan:** `mov al, 0x49` changed to `mov al, 0x48` and comment updated.
+
+---
+
+### 30. `for step N` silently ignored — step value always 1
+
+**File:** `codegen/codegen.asm`, `codegen_emit_for_start` and `codegen_emit_for_start_dyn`.
+
+**Description:** The parser calls `codegen_set_for_step(N)` which writes N to the global
+`for_step_val`.  However, `codegen_emit_for_start` and `codegen_emit_for_start_dyn` both
+immediately overwrite it with 1 (`mov qword [for_step_val], 1`) before returning.
+`codegen_emit_for_end` then reads `for_step_val = 1` and always emits `inc` regardless
+of the `step` clause.  `for :i step 3 in 0..30:` loops with step 1, not 3.
+
+`codegen_set_for_step` was therefore dead code.
+
+**Fixed in this scan:** Both premature resets removed from the start functions.  The
+reset in `codegen_emit_for_end` (after reading the value) is retained and correct.
+
+---
+
+### 31. `skip` is "continue" semantics, not "break/exit" semantics
+
+**File:** `codegen/codegen.asm`, `codegen_emit_skip`; `parser/parser.asm`, `.skip`.
+
+**Description:** `codegen_emit_skip` emits `jmp` to `cont_base_stack[top]` — the
+loop-top / condition re-evaluation address.  This is `continue` behaviour (advance to
+the next iteration), not `break` / exit behaviour.  `stop` is already the correct
+break primitive; `skip` as implemented is a second `continue`, not the documented
+"break N levels".
+
+Additionally the depth argument `N` in `skip N` is parsed by the lexer but never
+extracted or passed to `codegen_emit_skip`, which takes no argument — so `skip 2`
+and `skip 99` behave identically to `skip` (always innermost loop continue).
+
+**Fix required:** Decide the intended semantics — either:
+- (a) Make `skip` a proper `continue` and document it as such (rename `stop` documentation
+  to avoid confusion), or
+- (b) Implement `skip N` as a multi-level break by walking `break_base_stack` back N levels
+  and emitting a `jmp` to the corresponding exit address.
+Whichever is chosen, the parser must pass the depth N into `codegen_emit_skip(rdi=N)`.
+
+---
+
+### 32. Nested `when` statements corrupt outer `when_var_idx`
+
+**File:** `parser/parser.asm`, `.when` block.
+
+**Description:** The `when` handler stores the subject variable index in a single global
+qword `when_var_idx` and resets `when_case_count` to 0.  A nested `when` (e.g. a `when`
+inside an `is` body) unconditionally overwrites both globals.  When the inner `when`
+completes, the outer `when`'s subsequent `is` cases read the wrong `when_var_idx`,
+comparing against the inner subject variable instead of the outer one.  Results are
+silently wrong.
+
+**Fix required:** Push `when_var_idx` and `when_case_count` onto a small BSS stack
+(depth ≤ 8 is sufficient) on entry to each `when` block, and pop them on exit —
+the same pattern used for `scope_stack`, `jump_patch_stack`, etc.
+
+---
+
 ### 2. NASM 2.15 segfaults in this Replit environment
 
 **Tool:** `~/.nix-profile/bin/nasm` (version 2.15.05).
@@ -255,6 +330,58 @@ blob and return a pointer to the result.
 
 ---
 
+### 33. `and` / `or` are eager — both operands always evaluated
+
+**File:** `parser/parser.asm`, `parse_expr` (`.land`, `.lor`); `codegen/codegen.asm`,
+`codegen_emit_and_bool_rax_rbx`, `codegen_emit_or_bool_rax_rbx`.
+
+**Description:** `parse_expr` evaluates both sides before calling the bool combine
+function.  `codegen_emit_and_bool_rax_rbx` emits `test rbx,rbx; setnz cl; test rax,rax;
+setnz al; and al,cl` — all four operations happen unconditionally.  `syn.md` documents
+`and`/`or` as short-circuit operators.  They are not: the RHS expression is always
+evaluated even when the LHS already determines the result.  Side effects in the RHS
+(e.g. a function call or `pop`) always execute.
+
+**Fix required:** Emit a `test / jz` (for `and`) or `test / jnz` (for `or`) after
+evaluating the LHS.  If the condition is already resolved, jump past the RHS evaluation
+and the combine instruction.  This requires a forward-jump patch slot, identical to the
+existing `if`/`while` pattern.
+
+---
+
+### 34. String literals truncated at 63 chars with no error or warning
+
+**File:** `lexer/lexer.asm`, `.pstr` / `.strl` string-literal handler.
+
+**Description:** String content is accumulated into `tok_ident` which is `resb 64` (64
+bytes, null-terminated → max 63 content bytes).  The `.strl` loop has no bounds check on
+`rbx`: a string literal of 64 or more characters writes past `tok_ident` into adjacent
+BSS fields (`tok_int`, `lex_src`, `lex_len`, etc.) without any diagnostic.  The lexer
+silently produces a corrupted token and subsequent parsing produces wrong results or a
+segfault.
+
+**Fix required:** Add `cmp rbx, 63; jge .strd` inside the `.strl` loop to cap content
+at 63 bytes.  Optionally emit a compile-time warning to stderr before truncating.
+
+---
+
+### 35. `parse_factor` default (unknown-token) case never advances the lexer
+
+**File:** `parser/parser.asm`, `parse_factor` fall-through default.
+
+**Description:** When `parse_factor` encounters a token that matches none of the
+recognised atoms, it falls through to a default path that emits `xor eax, eax` (zero)
+and jumps to `.done` without calling `lexer_next`.  The same unrecognised token is then
+seen again by whatever called `parse_factor`.  If the caller loops (e.g. `parse_term`'s
+`.loop`, `parse_additive`'s `.loop`, `parse_stmt`'s dispatch loop), the parser spins
+forever on the same token, hanging the compiler.
+
+**Fix required:** Call `lexer_next` before the `jmp .done` in the default case, or emit
+a compile-error message to stderr and halt.  The error path is preferable: silent zero
+substitution hides bugs.
+
+---
+
 ### 25. `err` only accepts a string pointer — integer codes cause a crash
 
 **File:** `parser/parser.asm`, `.err_stmt`.
@@ -298,6 +425,42 @@ returns, so repeated calls accumulate variable entries.  With `VAR_MAX = 128`
 **Fix required:** Track the `var_count` on protocol entry and restore it on
 exit, effectively reclaiming local slots.  This is a partial fix; full
 isolation requires per-call stack frames (issue 18).
+
+---
+
+### 36. `and` / `or` incorrectly marked unimplemented in `todo.md` and `syn.md`
+
+**File:** `todo.md`, `syn.md`.
+
+**Description:** Both files mark `and` and `or` as not yet implemented (`[ ]` in
+`todo.md`, `🔧` or `📋` in `syn.md`).  In reality `parse_expr` has fully wired
+`.land` and `.lor` branches that call `codegen_emit_and_bool_rax_rbx` and
+`codegen_emit_or_bool_rax_rbx`, which emit correct eager boolean machine code.
+The operators work correctly for all common uses; they are missing only
+short-circuit behaviour (issue 33).
+
+**Fix required:** Update `todo.md` to `[x]` for `and`/`or`; update `syn.md` status
+to `✅` with a note "(eager; short-circuit pending issue 33)".
+
+---
+
+### 37. For-loop end variable `<name>_fe` leaks a `var_table` slot per loop
+
+**File:** `parser/parser.asm`, `.for` block; `parser/parser.asm`, `var_add`.
+
+**Description:** The `for` parser adds two variables to `var_table`: the loop variable
+(e.g. `i`) and a synthetic end-bound variable (`i_fe`).  These are never reclaimed
+after the loop body.  `var_add` has no duplicate check, so two `for :i in …:` loops
+at the same scope level each add fresh `i` and `i_fe` entries — consuming 4 slots.
+A program with 64 for-loops using the same variable name will exhaust `VAR_MAX=256`
+(leaving only 128 slots for user-declared variables).  No error is emitted.
+
+The same leak applies to `when`'s `__when__` variable (one per `when` statement,
+never reclaimed unless wrapped in a protocol whose `var_count` is restored on exit).
+
+**Fix required:** After `codegen_emit_for_end`, restore `var_count` to the value it
+had before the two synthetic variables were added (identical pattern to the existing
+`scope_stack` save/restore used for protocol scoping).
 
 ---
 

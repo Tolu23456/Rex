@@ -50,7 +50,7 @@
 - [x] `stop` break system fully wired: `codegen_emit_while_start` called by `for`/`while`
 - [x] `codegen_output_rax_bool` — routes bool output to `rt_prb_blob`
 - [x] `codegen_emit_cmp_rax_rbx_jcc` — generic comparison-then-branch emitter
-- [ ] `and` / `or`: Logical operators with short-circuit code generation
+- [x] `and` / `or`: Logical operators — eager evaluation implemented (short-circuit pending, issue 33)
 - [ ] `not`: Boolean/bitwise inversion mapping to `xor rax, 1` or `not rax`
 - [ ] `is` / `is not`: Semantic identity and type-verification (evaluates to hardware `cmp`)
 

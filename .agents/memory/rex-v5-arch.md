@@ -70,19 +70,39 @@ description: Key decisions, bugs, offsets, and conventions for the Rex V5.0 NASM
    codegen: `codegen_emit_inc_var` / `codegen_emit_dec_var` (inc/dec qword [addr]).
 2. `swap x y` — swaps two int vars via xchg rax,rbx. Lexer: TOK_SWAP=74.
    codegen: `codegen_emit_swap_vars`.
-3. `abs(x)` — absolute value via `cmovns rax,rbx` pattern. Lexer: TOK_ABS=75.
-   codegen: `codegen_emit_abs_rax`. Used as a parse_factor atom.
+3. `abs(x)` — absolute value. Lexer: TOK_ABS=75. codegen: `codegen_emit_abs_rax`.
+   Pattern: `mov rbx,rax; neg rax; cmovs rax,rbx` (0x0F 0x48). CMOVS not CMOVNS.
+   **Why:** After neg, SF=1 means result is negative (original was positive) — move
+   back the positive original. CMOVNS (0x49) was the original wrong opcode; fixed.
 4. `cap x` — capacity of a sequence (loads qword at [ptr+0]). Lexer: TOK_CAP=76.
-   codegen: `codegen_emit_cap_rax`. Used as a parse_factor atom.
+   codegen: `codegen_emit_cap_rax`. Cap is at offset 0, len at offset 8 in seq header.
 5. `when x: is N: body ... else: body` — switch-like statement. Lexer: TOK_IS=77.
-   Parser: `.when` creates temp `__when__` var, uses `when_case_count` (BSS) instead of
-   accessing codegen-internal `jump_patch_depth`/`chain_base_stack` (which are not exported).
-   **Why:** accessing codegen BSS symbols from parser.asm causes "symbol not defined" link errors.
-   Each `is` case: load when_var, cmp with literal, `codegen_emit_test_rax_jz`.
+   Parser: `.when` creates temp `__when__` var (string "\_\_when\_\_"), uses `when_case_count`.
+   **Why:** accessing codegen BSS symbols from parser.asm causes link errors.
+   Known limitation: nested `when` corrupts `when_var_idx` (issue 32).
 
-## Remaining Open Issues (see docs/issues.md)
-- Dict offsets hardcoded — will break if blob sizes change.
-- for-loop range bounds must be integer literals.
-- No sequence bounds check / realloc (fixed cap=8 slots).
-- VAR_MAX=128 — no var table growth.
-- ELF p_memsz is static 0x80000; output buffer guard added but no dynamic growth.
+## `for step N` — FIXED
+`codegen_set_for_step(N)` sets `for_step_val`. Both `codegen_emit_for_start` and
+`codegen_emit_for_start_dyn` used to immediately overwrite it with 1 — making step
+always 1 and `codegen_set_for_step` dead code. Both resets removed. The reset in
+`codegen_emit_for_end` (after reading the value) is the canonical reset point.
+
+## `and` / `or` — IMPLEMENTED (eager, not short-circuit)
+Both are wired in `parse_expr`. `codegen_emit_and_bool_rax_rbx` emits
+`test/setnz/and` — correct but eager. Short-circuit (issue 33) is NOT implemented.
+todo.md and syn.md now correctly mark them as `[x]` / `✅`.
+
+## `skip` semantics
+`codegen_emit_skip` jumps to `cont_base_stack` top (loop condition re-eval).
+This is **continue** semantics. The `N` depth argument is parsed but never passed.
+`skip` and `stop` are both "innermost loop" operations; skip = continue, stop = break.
+See issue 31 for resolution options.
+
+## String literal limit
+`tok_ident` is 64 bytes in lexer BSS; string literals max 63 chars. No bounds check.
+Longer strings corrupt adjacent BSS silently (issue 34).
+
+## Remaining Open Issues (see docs/issues.md — 37 entries)
+Key open high-priority: nested when (32), skip semantics (31), short-circuit and/or (33),
+string >63 chars (34), parse_factor infinite loop on unknown token (35),
+for/when var_table leaks (37), recursive protocols (18), seq push overflow (19).

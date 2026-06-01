@@ -80,8 +80,9 @@ int oct  = 0o17
 --x
 ```
 
-### Logical 🔧
-Tokens are lexed. Parser wiring is pending.
+### Logical ✅
+`and` and `or` are fully wired and emit correct machine code (eager evaluation — both
+operands always evaluated). Short-circuit code generation is pending (issue 33).
 ```rex
 if x > 0 and y > 0:
     output "both positive"

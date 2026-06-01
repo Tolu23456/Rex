@@ -464,7 +464,7 @@ codegen_emit_for_start:
     lea rcx, [break_base_stack]
     mov [rcx+rbx*8], rax
     inc qword [break_base_depth]
-    mov qword [for_step_val], 1
+    ; for_step_val already set by parser via codegen_set_for_step; do not reset here
     ; optimised init: choose smallest encoding for from_val (rsi)
     test rsi, rsi
     jnz .fs_init_nz
@@ -640,7 +640,7 @@ codegen_emit_for_start_dyn:
     push r14
     mov r12, rdi
     mov r13, rsi
-    mov qword [for_step_val], 1
+    ; for_step_val already set by parser via codegen_set_for_step; do not reset here
     mov rax, [break_jump_depth]
     mov r14, [break_base_depth]
     lea rcx, [break_base_stack]
@@ -1738,12 +1738,12 @@ codegen_emit_abs_rax:
     call emit_b
     mov al, 0xD8
     call emit_b
-    ; cmovns rax,rbx : 48 0F 49 C3
+    ; cmovs rax,rbx : 48 0F 48 C3  (if SF=1 after neg, original was positive — keep rbx)
     mov al, 0x48
     call emit_b
     mov al, 0x0F
     call emit_b
-    mov al, 0x49
+    mov al, 0x48
     call emit_b
     mov al, 0xC3
     call emit_b
