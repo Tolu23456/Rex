@@ -31,7 +31,7 @@ extern codegen_emit_shl_rax_by_rbx, codegen_emit_shr_rax_by_rbx
 extern codegen_emit_str_rax
 extern codegen_emit_seq_alloc, codegen_emit_seq_push, codegen_emit_seq_pop_rax
 extern codegen_emit_seq_len_rax
-extern codegen_emit_mov_rdi_rax, codegen_emit_call_rt_err
+extern codegen_emit_mov_rdi_rax, codegen_emit_call_rt_err, codegen_emit_exit1
 extern codegen_emit_for_start_dyn, codegen_emit_arg_pops
 extern codegen_push_cont, codegen_pop_cont, codegen_emit_skip
 extern codegen_emit_b_raw, codegen_emit_d_raw, codegen_get_var_va_proxy
@@ -1647,8 +1647,19 @@ parse_stmt:
 .err_stmt:
     call lexer_next
     call parse_expr
+    ; issue #25: guard against non-string argument — passing an int as a pointer
+    ; to rt_err's strlen loop causes a segfault.  If the expression is not a
+    ; string, print the value via the appropriate printer then exit(1) cleanly.
+    cmp byte [cur_type], TYPE_STR
+    jne .err_not_str
     call codegen_emit_mov_rdi_rax
     call codegen_emit_call_rt_err
+    jmp .done
+.err_not_str:
+    ; emit: output the value using the correct printer for cur_type, then exit(1)
+    movzx edi, byte [cur_type]
+    call codegen_output_rax
+    call codegen_emit_exit1
     jmp .done
 
 ; ── push statement ────────────────────────────────────────────────────────────

@@ -98,11 +98,31 @@ This is **continue** semantics. The `N` depth argument is parsed but never passe
 `skip` and `stop` are both "innermost loop" operations; skip = continue, stop = break.
 See issue 31 for resolution options.
 
-## String literal limit
-`tok_ident` is 64 bytes in lexer BSS; string literals max 63 chars. No bounds check.
-Longer strings corrupt adjacent BSS silently (issue 34).
+## String literal limit (FIXED)
+`tok_ident` is 64 bytes; max 63 content chars. Bounds check `cmp rbx,63; jge .strd` added.
+Overlong strings are truncated silently (issue 34).
 
-## Remaining Open Issues (see docs/issues.md — 37 entries)
-Key open high-priority: nested when (32), skip semantics (31), short-circuit and/or (33),
-string >63 chars (34), parse_factor infinite loop on unknown token (35),
-for/when var_table leaks (37), recursive protocols (18), seq push overflow (19).
+## seq push overflow guard (PARTIAL FIX — issue 19)
+`codegen_emit_seq_push` now emits `cmp rcx,[rbx]; jb +2; ud2` after loading len into rcx.
+Overflow fires SIGILL instead of corrupting heap. No realloc blob yet — sequences capped at
+initial allocation size (default 8 slots).
+
+## err non-string guard (PARTIAL FIX — issue 25)
+`.err_stmt` in parser.asm checks `cur_type` after `parse_expr`. If not TYPE_STR, calls
+`codegen_output_rax` (correct printer for the type) then `codegen_emit_exit1` (exit(1)).
+Prevents segfault from passing int as char* to rt_err strlen loop.
+
+## codegen_emit_exit1 (NEW)
+New function in codegen.asm emits: `mov rax,60; mov rdi,1; syscall` (exit code 1).
+Exposed as global; extern'd in parser.asm. Used by err non-string path and available
+for future error-exit emission.
+
+## Remaining Open Issues (see docs/issues.md)
+High: recursive protocols (18 — per-call stack frames needed), seq realloc (19 partial).
+Medium: stop multi-level break (22), dict variable keys (23), string concat (24),
+err int-to-string (25 partial).
+Low: NASM env (2), dict hardcoded offsets (3), when jump table (27), seq read bounds (28).
+
+## edgecases/ folder
+Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-34, 37.
+Each file has expected-output comments and a README.md with a status table.

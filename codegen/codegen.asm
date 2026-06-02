@@ -39,6 +39,7 @@ global codegen_emit_swap_vars
 global codegen_emit_abs_rax
 global codegen_emit_cap_rax
 global codegen_set_for_step, for_step_val
+global codegen_emit_exit1
 extern elf_header, program_header
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
@@ -1576,6 +1577,24 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x08
     call emit_b
+    ; bounds check: cmp rcx,[rbx]  →  48 3B 0B
+    ; if rcx < cap (CF=1) jump past ud2; else ud2 halts (issue #19)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x3B
+    call emit_b
+    mov al, 0x0B
+    call emit_b
+    ; jb +2  →  72 02  (skip ud2 if len < cap)
+    mov al, 0x72
+    call emit_b
+    mov al, 0x02
+    call emit_b
+    ; ud2  →  0F 0B  (halt on overflow)
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x0B
+    call emit_b
     ; pop rax (restore value)
     mov al, 0x58
     call emit_b
@@ -1861,4 +1880,44 @@ codegen_emit_cap_rax:
     mov al, 0x00
     call emit_b
     pop rdi
+    ret
+
+; ── exit(1) syscall emitter ──────────────────────────────────────────────────
+codegen_emit_exit1:
+    ; emit: mov rax,60; mov rdi,1; syscall  →  exit(1)
+    ; mov rax, 60  :  48 C7 C0 3C 00 00 00
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x3C
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ; mov rdi, 1  :  48 C7 C7 01 00 00 00
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ; syscall  :  0F 05
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x05
+    call emit_b
     ret
