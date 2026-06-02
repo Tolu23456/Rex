@@ -58,7 +58,9 @@ when_case_count: resq 1
 when_var_stack:  resq 8
 when_cnt_stack:  resq 8
 when_stk_depth:  resq 1
-decl_mutable:    resb 1
+decl_mutable:          resb 1
+cur_proto_param_count: resb 1       ; B-1: param count of the protocol being compiled
+cur_proto_param_vars:  resb 6       ; B-1: var indices for each param (up to 6)
 section .data
 err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
@@ -934,6 +936,12 @@ parse_stmt:
     je .swap_stmt
     cmp al, TOK_WHEN
     je .when
+    cmp al, TOK_REPEAT
+    je .repeat
+    cmp al, TOK_UNREACHABLE
+    je .unreachable
+    cmp al, TOK_ASSERT
+    je .assert
     call lexer_next
     jmp .done
 
@@ -1325,13 +1333,45 @@ parse_stmt:
     jmp .prot_pl
 .prot_pd:
     mov [r13+40], r12b
+    ; B-1: save compile-time param count + indices for per-call frame codegen
+    mov [cur_proto_param_count], r12b
+    push r14
+    xor r14, r14
+.prot_pidx:
+    cmp r14, r12
+    jge .prot_pidx_done
+    movzx rax, byte [r13+41+r14]
+    mov [cur_proto_param_vars+r14], al
+    inc r14
+    jmp .prot_pidx
+.prot_pidx_done:
+    pop r14
     cmp byte [tok_type], TOK_RPAREN
     jne .prot_nobody
     call lexer_next
     cmp byte [tok_type], TOK_ARROW
-    jne .prot_se_init
+    jne .prot_push_old
     call lexer_next
     call lexer_next
+.prot_push_old:
+    ; B-1: emit push qword [var_addr] for each param — saves old values to hardware stack
+    xor r14, r14
+.prot_push_lp:
+    cmp r14, r12
+    jge .prot_se_init
+    movzx rbx, byte [r13+41+r14]
+    ; push qword [abs32_addr] = FF 34 25 <addr32>
+    mov al, 0xFF
+    call emit_b_indirect
+    mov al, 0x34
+    call emit_b_indirect
+    mov al, 0x25
+    call emit_b_indirect
+    mov rdi, rbx
+    call get_var_va_indirect
+    call emit_d_indirect
+    inc r14
+    jmp .prot_push_lp
 .prot_se_init:
     xor r14, r14
 .prot_se:
@@ -1405,6 +1445,7 @@ parse_stmt:
     jne .protnd
     call lexer_next
 .protnd:
+    call proto_emit_restore     ; B-1: restore param vars before implicit ret
     call codegen_emit_ret
     dec qword [prot_body_depth]
     ; restore var_count (protocol scoping)
@@ -1433,9 +1474,11 @@ parse_stmt:
     add rbx, rax
     movzx ecx, byte [cur_type]
     mov [rbx+47], cl
+    call proto_emit_restore     ; B-1: restore param vars before ret
     call codegen_emit_ret
     jmp .done
 .ret_bare:
+    call proto_emit_restore     ; B-1: restore param vars before ret
     call codegen_emit_ret
     jmp .done
 
@@ -1459,6 +1502,112 @@ parse_stmt:
     jmp .done
 .pass:
     call lexer_next
+    jmp .done
+
+; ── unreachable — emit ud2 (0F 0B) ───────────────────────────────────────────
+.unreachable:
+    mov al, 0x0F
+    call emit_b_indirect
+    mov al, 0x0B
+    call emit_b_indirect
+    call lexer_next
+    jmp .done
+
+; ── assert expr — eval condition, ud2 if zero ────────────────────────────────
+.assert:
+    call lexer_next             ; skip 'assert'
+    call parse_expr             ; condition → rax at runtime
+    ; emit: test rax, rax
+    mov al, 0x48
+    call emit_b_indirect
+    mov al, 0x85
+    call emit_b_indirect
+    mov al, 0xC0
+    call emit_b_indirect
+    ; emit: jnz +2 (skip ud2 when condition true)
+    mov al, 0x75
+    call emit_b_indirect
+    mov al, 0x02
+    call emit_b_indirect
+    ; emit: ud2 (0F 0B)
+    mov al, 0x0F
+    call emit_b_indirect
+    mov al, 0x0B
+    call emit_b_indirect
+    jmp .done
+
+; ── repeat N: — counted loop, hidden counter var ─────────────────────────────
+.repeat:
+    call lexer_next             ; skip 'repeat'
+    call parse_expr             ; emit N-loading code; result in rax at runtime
+    ; save var_count for scope reclaim
+    mov rbx, [scope_depth]
+    lea rcx, [scope_stack]
+    mov r13, [var_count]
+    mov [rcx+rbx*8], r13
+    inc qword [scope_depth]
+    ; allocate hidden counter var "__rp"
+    sub rsp, 64
+    mov byte [rsp+0], '_'
+    mov byte [rsp+1], '_'
+    mov byte [rsp+2], 'r'
+    mov byte [rsp+3], 'p'
+    mov byte [rsp+4], 0
+    mov rdi, rsp
+    xor rsi, rsi
+    mov dl, 0
+    mov cl, TYPE_INT
+    call var_add
+    add rsp, 64
+    cmp rax, -1
+    je .done
+    mov r14, rax                ; r14 = hidden counter var index
+    ; emit: mov [cnt_addr], rax  (store N into counter)
+    mov rdi, r14
+    call codegen_emit_store_rax_to_var
+    ; save loop-top offset for back-jump
+    mov r15, [out_idx]
+    mov rdi, r15
+    call codegen_push_cont
+    ; emit: mov rax, [cnt_addr]; test rax,rax; jz exit_patch
+    mov rdi, r14
+    call codegen_emit_mov_rax_var
+    call codegen_emit_test_rax_jz
+    call codegen_emit_loop_base
+    ; skip ':', optional newline, optional indent
+    call lexer_next
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .rptl_enter
+    call lexer_next
+.rptl_enter:
+    cmp byte [tok_type], TOK_INDENT
+    jne .rptl
+    call lexer_next
+.rptl:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .rptd
+    cmp al, TOK_DEDENT
+    je .rptd
+    call parse_stmt
+    jmp .rptl
+.rptd:
+    cmp byte [tok_type], TOK_DEDENT
+    jne .rptnd
+    call lexer_next
+.rptnd:
+    ; emit: dec qword [cnt_addr]
+    mov rdi, r14
+    call codegen_emit_dec_var
+    ; emit: jmp loop_top + patch all breaks
+    mov rdi, r15
+    call codegen_emit_while_end
+    ; restore var_count (reclaim hidden counter var)
+    dec qword [scope_depth]
+    mov rax, [scope_depth]
+    lea rcx, [scope_stack]
+    mov rbx, [rcx+rax*8]
+    mov [var_count], rbx
     jmp .done
 
 ; ── @prot call (statement) ────────────────────────────────────────────────────
@@ -1919,3 +2068,35 @@ emit_d_indirect:
 
 get_var_va_indirect:
     jmp codegen_get_var_va_proxy
+
+; ── proto_emit_restore ────────────────────────────────────────────────────────
+; Emit pop qword [var_addr] for each protocol param in REVERSE order.
+; Unwinds the per-call hardware-stack frame installed at protocol entry (B-1).
+; Preserves rbx, r14. Must be called before codegen_emit_ret on every return path.
+proto_emit_restore:
+    push rbx
+    push r14
+    movzx r14, byte [cur_proto_param_count]
+    test r14, r14
+    jz .per_done
+    dec r14
+.per_loop:
+    movzx rbx, byte [cur_proto_param_vars + r14]
+    ; pop qword [abs32_addr] = 8F 04 25 <addr32>
+    mov al, 0x8F
+    call emit_b_indirect
+    mov al, 0x04
+    call emit_b_indirect
+    mov al, 0x25
+    call emit_b_indirect
+    mov rdi, rbx
+    call get_var_va_indirect
+    call emit_d_indirect
+    test r14, r14
+    jz .per_done
+    dec r14
+    jmp .per_loop
+.per_done:
+    pop r14
+    pop rbx
+    ret

@@ -82,6 +82,9 @@ TOK_STEP       equ 79
 TOK_NONE       equ 80
 TOK_KEYWORD    equ 81
 TOK_AS         equ 82
+TOK_REPEAT     equ 83
+TOK_UNREACHABLE equ 84
+TOK_ASSERT     equ 85
 TYPE_INT equ 1
 TYPE_FLOAT equ 2
 TYPE_BOOL equ 3

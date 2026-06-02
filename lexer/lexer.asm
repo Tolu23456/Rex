@@ -699,7 +699,7 @@ lexer_classify:
 .nas:
     ; "as": a,s  dword=0x00007361, byte[2]=0
     cmp eax, 0x00007361
-    jne .kid
+    jne .nkw_rep
     cmp byte [tok_ident+2], 0
     jne .kid
     mov byte [tok_type], TOK_AS
@@ -709,6 +709,52 @@ lexer_classify:
     ret
 .kstep:
     mov byte [tok_type], TOK_STEP
+    ret
+.nkw_rep:
+    ; "repeat": r,e,p,e,a,t → dword=0x65706572, [4]='a',[5]='t',[6]=0
+    cmp eax, 0x65706572
+    jne .nkw_unr
+    cmp byte [tok_ident+4], 'a'
+    jne .kid
+    cmp byte [tok_ident+5], 't'
+    jne .kid
+    cmp byte [tok_ident+6], 0
+    jne .kid
+    mov byte [tok_type], TOK_REPEAT
+    ret
+.nkw_unr:
+    ; "unreachable": u,n,r,e → dword=0x65726E75, then a,c,h,a,b,l,e,\0
+    cmp eax, 0x65726E75
+    jne .nkw_asr
+    cmp byte [tok_ident+4], 'a'
+    jne .kid
+    cmp byte [tok_ident+5], 'c'
+    jne .kid
+    cmp byte [tok_ident+6], 'h'
+    jne .kid
+    cmp byte [tok_ident+7], 'a'
+    jne .kid
+    cmp byte [tok_ident+8], 'b'
+    jne .kid
+    cmp byte [tok_ident+9], 'l'
+    jne .kid
+    cmp byte [tok_ident+10], 'e'
+    jne .kid
+    cmp byte [tok_ident+11], 0
+    jne .kid
+    mov byte [tok_type], TOK_UNREACHABLE
+    ret
+.nkw_asr:
+    ; "assert": a,s,s,e,r,t → dword=0x65737361, [4]='r',[5]='t',[6]=0
+    cmp eax, 0x65737361
+    jne .kid
+    cmp byte [tok_ident+4], 'r'
+    jne .kid
+    cmp byte [tok_ident+5], 't'
+    jne .kid
+    cmp byte [tok_ident+6], 0
+    jne .kid
+    mov byte [tok_type], TOK_ASSERT
     ret
 .kid:
     mov byte [tok_type], TOK_IDENT
