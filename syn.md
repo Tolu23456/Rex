@@ -500,19 +500,200 @@ err "something went wrong"
 
 ---
 
-## Memory Allocator Contexts ✅
+## Memory Allocator Contexts
 
-Block-scoped allocator strategy. Reverts automatically at block end.
+All memory management is **block-scoped**. The chosen strategy is active for the
+duration of the indented body and reverts to the enclosing strategy on exit.
+`mm` (allocator) and `gc` (collector) are independent axes — each can be used
+alone or combined in a single `use` block.
+
+---
+
+### Built-in Allocators — `use mm <mode>:` ✅ / 📋
+
+Five allocator strategies are available:
+
+| Mode | Strategy | Free trigger | Status |
+|------|----------|-------------|--------|
+| `arena` | Bump-pointer; all allocs from one contiguous block | Bulk-free entire block at scope exit | ✅ |
+| `pool` | Fixed-size block reuse; recycled free-list | Per-block or bulk at scope exit | ✅ |
+| `stack` | Sub-allocates directly from the hardware stack | Automatic — zero runtime cost | 📋 |
+| `heap` | Standard independent alloc/free | Each object freed individually | 📋 |
+| `static` | Persistent allocation; survives all scope exits | Never freed; program lifetime | 📋 |
+
 ```rex
-use mm pool gc mypool:
-    seq buf
+use mm arena:
+    seq buf             // bump-allocated; entire region freed at dedent
     push buf 1
     push buf 2
 
-use mm arena gc myarena:
-    dict cache
+use mm pool:
+    dict cache          // pool-allocated; fixed-size blocks recycled
     cache["x"] = 7
+
+use mm stack:
+    seq tmp             // lives on the hardware stack; zero allocator overhead
+
+use mm heap:
+    seq log             // each push/pop is a standalone malloc/free
+
+use mm static:
+    dict config         // config survives forever; never collected
+    config["debug"] = 1
 ```
+
+---
+
+### Built-in Garbage Collectors — `use gc <mode>:` 📋
+
+Five collection strategies are available:
+
+| Mode | Strategy | Pause behaviour |
+|------|----------|----------------|
+| `sweep` | Mark-and-sweep; walk var_table, free unreachable | Stop-the-world at scope exit |
+| `ref` | Reference counting; decrement on overwrite/exit | Per-assignment, no pause |
+| `gen` | Generational; young objects collected often, old rarely | Short frequent pauses |
+| `inc` | Incremental sweep; work spread across small slices | Many tiny pauses, no long ones |
+| `region` | Region-based; all objects in scope freed together | One bulk-free at scope exit |
+
+```rex
+use gc sweep:
+    seq items           // collected by mark-and-sweep when block exits
+
+use gc ref:
+    dict counts         // reference-counted; freed when count reaches zero
+
+use gc gen:
+    seq events          // generational; short-lived objects collected first
+
+use gc inc:
+    seq stream          // incremental; no long pauses during collection
+
+use gc region:
+    seq batch           // entire region freed as one unit at scope exit
+```
+
+---
+
+### Combined — `use mm <mode> gc <mode>:` 📋
+
+Allocator and collector can be paired in a single block:
+
+```rex
+use mm pool gc ref:
+    seq buf
+    dict index
+
+use mm arena gc region:
+    seq scratch
+    push scratch 42
+
+use mm heap gc sweep:
+    dict live_objects
+```
+
+The allocator controls **how** memory is handed out; the collector controls **when**
+unreachable memory is reclaimed. Not all combinations are meaningful — `mm static`
+with any GC is valid (GC simply never fires since nothing is freed). `mm stack`
+with `gc ref` is redundant (stack already frees on exit) but not an error.
+
+---
+
+### User-Defined Allocators — `mm <name>:` 📋
+
+Define a custom allocator with `mm`:
+
+```rex
+mm myalloc:
+    alloc(size):
+        // size is in rax at entry
+        // return heap pointer in rax
+        // custom logic here
+        ...
+    free(ptr):
+        // ptr is in rax at entry
+        // release the block
+        ...
+    reset:
+        // called at scope exit to bulk-free everything
+        ...
+```
+
+Use it identically to a built-in mode:
+
+```rex
+use mm myalloc:
+    seq data
+    push data 99
+```
+
+Pair with any GC:
+
+```rex
+use mm myalloc gc sweep:
+    dict live
+```
+
+---
+
+### User-Defined Garbage Collectors — `gc <name>:` 📋
+
+Define a custom collector with `gc`:
+
+```rex
+gc mygc:
+    mark(ptr):
+        // called for each reachable root in var_table
+        // mark ptr and all objects reachable from it
+        ...
+    collect:
+        // called at scope exit
+        // sweep all unmarked objects; reset mark bits
+        ...
+    trigger:
+        // optional: called after every N allocations
+        // return true (1) to run a collection cycle early
+        ...
+```
+
+Use it identically to a built-in mode:
+
+```rex
+use gc mygc:
+    seq managed
+
+use mm pool gc mygc:
+    dict tracked
+```
+
+---
+
+### Custom Keyword Registration — `use keyword <word> as mm <name>:` 📋
+
+A user-defined allocator or collector can be bound to a **custom keyword**, making
+it indistinguishable from a built-in mode at the call site:
+
+```rex
+use keyword slab as mm myalloc
+use keyword trace as gc mygc
+```
+
+After registration, the new keywords work everywhere:
+
+```rex
+use mm slab:
+    seq items
+
+use gc trace:
+    dict objects
+
+use mm slab gc trace:
+    seq hot
+```
+
+Custom keywords are resolved at parse time. A keyword that shadows a built-in
+(`arena`, `pool`, `stack`, `heap`, `static`, `sweep`, `ref`, `gen`, `inc`, `region`)
+is a compile-time error.
 
 ---
 
