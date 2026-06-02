@@ -1,0 +1,152 @@
+; rex_bootstrap.rx — Phase-2 self-hosting skeleton: Rex lexer written in Rex.
+; This is the starting point for a Rex compiler written in Rex.
+; See docs/self_hosting.md for the full roadmap.
+;
+; CURRENT STATUS: skeleton — runs but only tokenises a hardcoded demo string.
+; Requires: recursive protocols (#18), str_at, seq realloc (#19), file I/O.
+
+; ── Token type constants ──────────────────────────────────────────────────────
+int TOK_INT     = 1
+int TOK_FLOAT   = 2
+int TOK_STR     = 3
+int TOK_IDENT   = 4
+int TOK_PLUS    = 10
+int TOK_MINUS   = 11
+int TOK_STAR    = 12
+int TOK_SLASH   = 13
+int TOK_EQ      = 14
+int TOK_EQEQ    = 15
+int TOK_LT      = 16
+int TOK_GT      = 17
+int TOK_LPAREN  = 20
+int TOK_RPAREN  = 21
+int TOK_COLON   = 22
+int TOK_NEWLINE = 23
+int TOK_INDENT  = 24
+int TOK_DEDENT  = 25
+int TOK_EOF     = 0
+
+; ── Source buffer (placeholder — will come from file_read once I/O is ready) ──
+str src = "x = 1 + 2"
+
+; ── Token storage: flat seq of [type, start, len] triples ────────────────────
+; Each record: tok_types[i], tok_starts[i], tok_lens[i]
+seq:int tok_types
+seq:int tok_starts
+seq:int tok_lens
+int     tok_count = 0
+
+; ── Lexer state ───────────────────────────────────────────────────────────────
+int lex_pos = 0
+int lex_len = 0   ; will be set to len(src) when str_len is available
+
+; ── Helpers (stubs — will expand once builtins are ready) ─────────────────────
+
+; is_digit: returns 1 if ch (int) is '0'..'9'
+prot is_digit(ch: int) -> int:
+    if ch >= 48:           ; ord('0') = 48
+        if ch <= 57:       ; ord('9') = 57
+            ret 1
+    ret 0
+
+; is_alpha: returns 1 if ch is a letter or underscore
+prot is_alpha(ch: int) -> int:
+    if ch >= 65:
+        if ch <= 90:
+            ret 1
+    if ch >= 97:
+        if ch <= 122:
+            ret 1
+    if ch == 95:           ; '_'
+        ret 1
+    ret 0
+
+; is_alnum: letter, digit, or underscore
+prot is_alnum(ch: int) -> int:
+    int d = @is_digit(ch)
+    int a = @is_alpha(ch)
+    if d or a:
+        ret 1
+    ret 0
+
+; emit_tok: record a token at (tp, start, length)
+prot emit_tok(tp: int, start: int, length: int):
+    push tok_types  tp
+    push tok_starts start
+    push tok_lens   length
+    tok_count = tok_count + 1
+
+; ── Main tokenise loop ────────────────────────────────────────────────────────
+; NOTE: str_at(s, i) and str_len(s) are not yet built-in.
+; The loop below is structurally correct; str_at is stubbed as returning 0.
+
+prot tokenise():
+    lex_pos = 0
+    ; lex_len = str_len(src)     ; TODO: enable when str_len is built-in
+    lex_len = 9                  ; hardcoded for "x = 1 + 2"
+
+    while lex_pos < lex_len:
+        ; ch = str_at(src, lex_pos)
+        int ch = 0               ; TODO: ch = str_at(src, lex_pos)
+
+        ; skip whitespace (space=32, tab=9)
+        if ch == 32 or ch == 9:
+            lex_pos = lex_pos + 1
+            skip
+
+        ; newline
+        if ch == 10:
+            @emit_tok(TOK_NEWLINE, lex_pos, 1)
+            lex_pos = lex_pos + 1
+            skip
+
+        ; digits → integer literal
+        int d = @is_digit(ch)
+        if d:
+            int num_start = lex_pos
+            while lex_pos < lex_len:
+                ; int nc = str_at(src, lex_pos)  ; TODO
+                int nc = 0
+                int nd = @is_digit(nc)
+                if nd == 0:
+                    stop
+                lex_pos = lex_pos + 1
+            @emit_tok(TOK_INT, num_start, lex_pos - num_start)
+            skip
+
+        ; identifiers / keywords
+        int a = @is_alpha(ch)
+        if a:
+            int id_start = lex_pos
+            while lex_pos < lex_len:
+                ; int ic = str_at(src, lex_pos)  ; TODO
+                int ic = 0
+                int ia = @is_alnum(ic)
+                if ia == 0:
+                    stop
+                lex_pos = lex_pos + 1
+            @emit_tok(TOK_IDENT, id_start, lex_pos - id_start)
+            skip
+
+        ; single-char punctuation
+        if ch == 43: @emit_tok(TOK_PLUS,   lex_pos, 1) ; '+'
+        if ch == 45: @emit_tok(TOK_MINUS,  lex_pos, 1) ; '-'
+        if ch == 42: @emit_tok(TOK_STAR,   lex_pos, 1) ; '*'
+        if ch == 47: @emit_tok(TOK_SLASH,  lex_pos, 1) ; '/'
+        if ch == 40: @emit_tok(TOK_LPAREN, lex_pos, 1) ; '('
+        if ch == 41: @emit_tok(TOK_RPAREN, lex_pos, 1) ; ')'
+        if ch == 58: @emit_tok(TOK_COLON,  lex_pos, 1) ; ':'
+
+        ; '=' or '=='
+        if ch == 61:
+            ; TODO: check next char for '=='
+            @emit_tok(TOK_EQ, lex_pos, 1)
+
+        lex_pos = lex_pos + 1
+
+    @emit_tok(TOK_EOF, lex_pos, 0)
+
+; ── Entry point ───────────────────────────────────────────────────────────────
+@tokenise()
+
+out tok_count   ; print number of tokens produced

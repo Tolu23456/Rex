@@ -95,6 +95,66 @@ Both now `jmp codegen_emit_b_raw` / `jmp codegen_emit_d_raw`, which are
 fell through all character comparisons, but the leading `/` had already been
 emitted as `TOK_SLASH`, scrambling the token stream.
 
+### 5. `for` range bounds must be integer literals
+**Fixed in:** `parser/parser.asm`
+Both start and end bounds now use `parse_expr`, supporting variables, arithmetic,
+and unary minus at any range position.
+
+### 6. `p_memsz` in ELF Program Header is static 0x80000
+**Fixed in:** `codegen/codegen.asm`, `codegen_finish`
+`p_memsz` is now `out_idx + 0x44000` — dynamically computed to cover the generated
+code plus the entire variable-storage region.
+
+### 20. Negative `for` loop bounds not supported
+**Fixed in:** `parser/parser.asm`
+Range bounds now use `parse_expr` which handles `TOK_MINUS` as unary negation;
+`for :i in -5..5:` works correctly.
+
+### 21. `VAR_MAX` has no overflow guard
+**Fixed in:** `parser/parser.asm`, `var_add`
+`var_add` already checks `cmp rbx, VAR_MAX; jge .full` — confirmed present and
+correct; status updated to reflect the fix that was already in place.
+
+### 26. Protocol local variables share global `var_table` slots
+**Fixed in:** `parser/parser.asm`, `.prot_nobody`
+`var_count` is pushed onto `scope_stack` before the protocol body and restored on
+exit — local protocol variables are reclaimed after each protocol call.
+
+### 31. `skip` semantics and depth argument
+**Fixed in:** `parser/parser.asm` (`.skip`), `codegen/codegen.asm` (`codegen_emit_skip`)
+`skip` = continue innermost loop; `skip N` = continue Nth-outer loop (depth
+N-1 from top of `cont_base_stack`).  `codegen_emit_skip` now accepts `rdi=depth`.
+
+### 32. Nested `when` statements corrupt outer `when_var_idx`
+**Fixed in:** `parser/parser.asm`, `.when` / `.when_done`
+Added BSS stacks `when_var_stack` (resq 8) and `when_cnt_stack` (resq 8) plus
+`when_stk_depth`.  Each `when` entry pushes both globals; `.when_done` pops them.
+
+### 33. `and` / `or` are eager — both operands always evaluated
+**Fixed in:** `parser/parser.asm` (`.land`, `.lor`), `codegen/codegen.asm`
+Short-circuit emission: `and` emits `test+jz` around RHS; `or` emits `test+jnz`.
+New helpers: `codegen_emit_test_rax_jnz`, `codegen_emit_normalize_bool_rax`,
+`codegen_emit_jmp_get_slot`, `codegen_patch_slot_to_here`.
+
+### 34. String literals truncated silently at 63 chars
+**Fixed in:** `lexer/lexer.asm`, `.strl` loop
+Added `cmp rbx, 63; jge .strd` before the store — excess characters are silently
+truncated at 63 bytes, leaving `tok_ident` null-terminated and valid.
+
+### 35. `parse_factor` default case never advances the lexer
+**Fixed in:** `parser/parser.asm`, `parse_factor` fall-through default
+Added `call lexer_next` before the default `xor eax,eax` path so unknown tokens
+are consumed and the parser does not spin on the same token forever.
+
+### 36. `and` / `or` incorrectly marked unimplemented in docs
+**Fixed in:** `docs/issues.md`, `syn.md` (status updated)
+`and`/`or` are now fully short-circuit (`✅` in syn.md); issue closed.
+
+### 37. For-loop end variable `<name>_fe` leaks a `var_table` slot
+**Fixed in:** `parser/parser.asm`, `.for` block
+`scope_stack` save/restore wraps the two synthetic var additions; after
+`codegen_emit_for_end` `var_count` is restored, reclaiming both slots.
+
 ---
 
 ## High

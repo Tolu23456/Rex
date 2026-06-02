@@ -9,7 +9,9 @@ global codegen_emit_while_start, codegen_emit_while_end
 global codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
 global codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
 global codegen_emit_assign_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
-global codegen_emit_mm_switch
+global codegen_emit_mm_switch, codegen_emit_gc_switch
+global codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
+global codegen_emit_jmp_get_slot, codegen_patch_slot_to_here
 global codegen_emit_push_rax, codegen_emit_pop_rbx
 global codegen_emit_mov_rax_var, codegen_emit_store_rax_to_var
 global codegen_emit_rdrand_rax, codegen_emit_neg_rax, codegen_emit_not_rax
@@ -188,7 +190,9 @@ codegen_finish:
     mov rax, [out_idx]
     lea rcx, [out_buffer]
     mov [rcx+64+32], rax
-    mov qword [rcx+64+40], 0x80000
+    mov rax, [out_idx]
+    add rax, 0x44000
+    mov [rcx+64+40], rax
     ret
 
 ; ── output helpers ────────────────────────────────────────────────────────────
@@ -767,16 +771,25 @@ codegen_pop_cont:
     ret
 
 codegen_emit_skip:
-    ; emit jmp to cont_base_stack top (loop continue target)
+    ; rdi = depth: 0 = innermost continue, 1 = next outer, etc.
+    push rbx
+    push r12
+    mov r12, rdi
     mov rax, [cont_base_depth]
     test rax, rax
     jz .done
-    dec rax
+    dec rax             ; rax = top index (0-based)
+    sub rax, r12        ; rax = target index
+    jl .clamp
+    jmp .emit
+.clamp:
+    xor rax, rax
+.emit:
     lea rcx, [cont_base_stack]
-    mov rdi, [rcx+rax*8]
+    mov rbx, [rcx+rax*8]
     mov al, 0xE9
     call emit_b
-    mov rax, rdi
+    mov rax, rbx
     add rax, LOAD_BASE
     mov rdx, [out_idx]
     add rdx, 4
@@ -784,6 +797,8 @@ codegen_emit_skip:
     sub rax, rdx
     call emit_d
 .done:
+    pop r12
+    pop rbx
     ret
 
 ; ── protocol helpers ──────────────────────────────────────────────────────────
@@ -887,6 +902,11 @@ codegen_emit_mm_switch:
     call emit_d
     mov eax, edi
     call emit_d
+    ret
+
+codegen_emit_gc_switch:
+    ; rdi = gc mode (0=sweep,1=ref,2=gen,3=inc,4=region)
+    ; stub: GC runtime not yet implemented — no code emitted
     ret
 
 ; ── expression emit helpers ───────────────────────────────────────────────────
@@ -1120,6 +1140,73 @@ codegen_emit_test_rax_jz:
     inc qword [jump_patch_depth]
     xor eax, eax
     call emit_d
+    ret
+
+codegen_emit_test_rax_jnz:
+    ; emit: test rax,rax; jnz <placeholder>  — pushes patch slot on jump_patch_stack
+    mov al, 0x48
+    call emit_b
+    mov al, 0x85
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x85
+    call emit_b
+    mov rax, [out_idx]
+    mov rbx, [jump_patch_depth]
+    lea rcx, [jump_patch_stack]
+    mov [rcx+rbx*8], rax
+    inc qword [jump_patch_depth]
+    xor eax, eax
+    call emit_d
+    ret
+
+codegen_emit_normalize_bool_rax:
+    ; emit: test rax,rax; setnz al; movzx rax,al
+    mov al, 0x48
+    call emit_b
+    mov al, 0x85
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x95
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xB6
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    ret
+
+codegen_emit_jmp_get_slot:
+    ; emit: jmp 0x00000000; return patch-slot offset in rax (for caller to patch later)
+    push rbx
+    mov al, 0xE9
+    call emit_b
+    mov rbx, [out_idx]  ; offset of placeholder dword
+    xor eax, eax
+    call emit_d
+    mov rax, rbx
+    pop rbx
+    ret
+
+codegen_patch_slot_to_here:
+    ; rdi = patch-slot offset in out_buffer
+    ; patches rel32 at [out_buffer+rdi] to reach current out_idx
+    mov rax, [out_idx]
+    sub rax, rdi
+    sub rax, 4
+    lea rcx, [out_buffer]
+    mov [rcx+rdi], eax
     ret
 
 ; ── float emit ────────────────────────────────────────────────────────────────

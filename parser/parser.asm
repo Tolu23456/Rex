@@ -10,7 +10,9 @@ extern codegen_emit_while_start, codegen_emit_while_end
 extern codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
 extern codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
 extern codegen_emit_assign_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
-extern codegen_emit_mm_switch, out_idx
+extern codegen_emit_mm_switch, codegen_emit_gc_switch, out_idx
+extern codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
+extern codegen_emit_jmp_get_slot, codegen_patch_slot_to_here
 extern codegen_emit_push_rax, codegen_emit_pop_rbx
 extern codegen_emit_mov_rax_var, codegen_emit_store_rax_to_var
 extern codegen_emit_rdrand_rax, codegen_emit_neg_rax, codegen_emit_not_rax
@@ -53,6 +55,9 @@ cur_proto_idx:   resq 1
 proto_ret_type:  resb 1
 when_var_idx:    resq 1
 when_case_count: resq 1
+when_var_stack:  resq 8
+when_cnt_stack:  resq 8
+when_stk_depth:  resq 1
 decl_mutable:    resb 1
 section .data
 err_id:    db "error: expected identifier",10
@@ -265,7 +270,8 @@ parse_factor:
     je .absx
     cmp al, TOK_CAP
     je .capx
-    ; default: zero
+    ; default: zero + advance past unknown token (#35)
+    call lexer_next
     mov rdi, 0
     call codegen_emit_mov_eax_imm32
     mov byte [cur_type], TYPE_INT
@@ -781,19 +787,33 @@ parse_expr:
     je .lor
     jmp .done
 .land:
+    ; short-circuit and (#33): if LHS false → skip RHS, result = false
+    call codegen_emit_test_rax_jz   ; emit test+jz; push J1 on jump_patch_stack
     call lexer_next
-    call codegen_emit_push_rax
-    call parse_comparison
-    call codegen_emit_pop_rbx
-    call codegen_emit_and_bool_rax_rbx
+    call parse_comparison           ; RHS → rax
+    call codegen_emit_normalize_bool_rax
+    call codegen_emit_jmp_get_slot  ; emit jmp .end_and; rax = J2 patch slot
+    mov r12, rax                    ; save J2 slot
+    call codegen_patch_jump         ; patch J1 (jz) → here (.false_path)
+    mov rdi, 0
+    call codegen_emit_mov_eax_imm32 ; false path: xor eax,eax
+    mov rdi, r12
+    call codegen_patch_slot_to_here ; patch J2 → here (.end_and)
     mov byte [cur_type], TYPE_BOOL
     jmp .loop
 .lor:
+    ; short-circuit or (#33): if LHS true → skip RHS, result = true
+    call codegen_emit_test_rax_jnz  ; emit test+jnz; push J1 on jump_patch_stack
     call lexer_next
-    call codegen_emit_push_rax
-    call parse_comparison
-    call codegen_emit_pop_rbx
-    call codegen_emit_or_bool_rax_rbx
+    call parse_comparison           ; RHS → rax
+    call codegen_emit_normalize_bool_rax
+    call codegen_emit_jmp_get_slot  ; emit jmp .end_or; rax = J2 patch slot
+    mov r12, rax                    ; save J2 slot
+    call codegen_patch_jump         ; patch J1 (jnz) → here (.true_path)
+    mov rdi, 1
+    call codegen_emit_mov_eax_imm32 ; true path: mov eax,1
+    mov rdi, r12
+    call codegen_patch_slot_to_here ; patch J2 → here (.end_or)
     mov byte [cur_type], TYPE_BOOL
     jmp .loop
 .done:
@@ -1127,6 +1147,12 @@ parse_stmt:
     call lexer_next             ; skip varname → 'in'
     call lexer_next             ; skip 'in' → start expr
     call parse_expr             ; parse start, tok = '..'
+    ; save var_count before synthetic loop vars (#37)
+    mov rbx, [scope_depth]
+    lea rcx, [scope_stack]
+    mov rax, [var_count]
+    mov [rcx+rbx*8], rax
+    inc qword [scope_depth]
     lea rdi, [saved_name]
     xor rsi, rsi
     mov dl, 0
@@ -1195,6 +1221,12 @@ parse_stmt:
     mov rdi, r15
     mov rsi, r14
     call codegen_emit_for_end
+    ; restore var_count — reclaim synthetic loop vars (#37)
+    dec qword [scope_depth]
+    mov rax, [scope_depth]
+    lea rcx, [scope_stack]
+    mov rbx, [rcx+rax*8]
+    mov [var_count], rbx
     jmp .done
 
 ; ── while loop ────────────────────────────────────────────────────────────────
@@ -1413,8 +1445,17 @@ parse_stmt:
     call lexer_next
     jmp .done
 .skip:
-    call codegen_emit_skip
+    call lexer_next             ; skip 'skip' keyword
+    xor rdi, rdi                ; default depth=0 (innermost continue, #31)
+    cmp byte [tok_type], TOK_INT_LIT
+    jne .skip_emit
+    mov rdi, [tok_int]
+    test rdi, rdi
+    jz .skip_emit               ; skip 0 == skip 1 == innermost
+    dec rdi                     ; skip 1→depth 0, skip 2→depth 1, etc.
     call lexer_next
+.skip_emit:
+    call codegen_emit_skip
     jmp .done
 .pass:
     call lexer_next
@@ -1460,22 +1501,115 @@ parse_stmt:
     call codegen_emit_call_prot
     jmp .done
 
-; ── use mm pool/arena ─────────────────────────────────────────────────────────
+; ── use mm/gc block ────────────────────────────────────────────────────────────
+; Syntax: use mm <mode> [gc <mode>]:  OR  use gc <mode>:
+; MM modes: arena=0, pool=1, stack=2, heap=3, static=4
+; GC modes: sweep=0, ref=1, gen=2, inc=3, region=4
 .use:
-    call lexer_next             ; skip 'use' → 'mm'
-    call lexer_next             ; skip 'mm' → 'pool'/'arena'
-    call lexer_next             ; skip 'pool'/'arena' → ':'; tok_ident = 'pool'/'arena'
+    call lexer_next             ; skip 'use' → 'mm'/'gc'/other
+    xor r14d, r14d              ; mm_mode = 0 (arena default)
+    mov r15, -1                 ; gc_mode = -1 (none specified)
+
+    cmp byte [tok_type], TOK_MM
+    jne .use_chk_gc
+
+    ; ── parse mm mode ─────────────────────────────────────────────────────────
+    call lexer_next             ; skip 'mm' → mode ident (tok_ident set)
+    ; arena: a,r,e,n → dword 0x6E657261, then 'a'
+    cmp dword [tok_ident], 0x6E657261
+    jne .use_mm_pool
+    cmp byte [tok_ident+4], 'a'
+    jne .use_mm_pool
+    xor r14d, r14d
+    jmp .use_mm_done
+.use_mm_pool:
+    ; pool: p,o,o,l → dword 0x6C6F6F70, then null
     cmp dword [tok_ident], 0x6C6F6F70
-    jne .use_arena
+    jne .use_mm_stack
     cmp byte [tok_ident+4], 0
-    je .use_pool
-.use_arena:
-    xor edi, edi
+    jne .use_mm_stack
+    mov r14d, 1
+    jmp .use_mm_done
+.use_mm_stack:
+    ; stack: s,t,a,c → dword 0x63617473, then 'k'
+    cmp dword [tok_ident], 0x63617473
+    jne .use_mm_heap
+    cmp byte [tok_ident+4], 'k'
+    jne .use_mm_heap
+    mov r14d, 2
+    jmp .use_mm_done
+.use_mm_heap:
+    ; heap: h,e,a,p → dword 0x70616568, then null
+    cmp dword [tok_ident], 0x70616568
+    jne .use_mm_static
+    cmp byte [tok_ident+4], 0
+    jne .use_mm_static
+    mov r14d, 3
+    jmp .use_mm_done
+.use_mm_static:
+    ; static: s,t,a,t → dword 0x74617473, then 'i','c'
+    cmp dword [tok_ident], 0x74617473
+    jne .use_mm_done
+    cmp byte [tok_ident+4], 'i'
+    jne .use_mm_done
+    cmp byte [tok_ident+5], 'c'
+    jne .use_mm_done
+    mov r14d, 4
+.use_mm_done:
+    call lexer_next             ; advance past mode name
+
+    ; ── optional gc clause after mm mode ──────────────────────────────────────
+.use_chk_gc:
+    cmp byte [tok_type], TOK_GC
+    jne .use_emit
+
+    call lexer_next             ; skip 'gc' → gc mode ident
+    xor r15d, r15d
+    ; sweep: s,w,e,e → dword 0x65657773, then 'p'
+    cmp dword [tok_ident], 0x65657773
+    jne .use_gc_ref
+    cmp byte [tok_ident+4], 'p'
+    jne .use_gc_ref
+    xor r15d, r15d
+    jmp .use_gc_done
+.use_gc_ref:
+    ; ref: r,e,f → dword 0x00666572
+    cmp dword [tok_ident], 0x00666572
+    jne .use_gc_gen
+    mov r15d, 1
+    jmp .use_gc_done
+.use_gc_gen:
+    ; gen: g,e,n → dword 0x006E6567
+    cmp dword [tok_ident], 0x006E6567
+    jne .use_gc_inc
+    mov r15d, 2
+    jmp .use_gc_done
+.use_gc_inc:
+    ; inc: i,n,c → dword 0x00636E69
+    cmp dword [tok_ident], 0x00636E69
+    jne .use_gc_region
+    mov r15d, 3
+    jmp .use_gc_done
+.use_gc_region:
+    ; region: r,e,g,i → dword 0x69676572, then 'o','n'
+    cmp dword [tok_ident], 0x69676572
+    jne .use_gc_done
+    cmp byte [tok_ident+4], 'o'
+    jne .use_gc_done
+    cmp byte [tok_ident+5], 'n'
+    jne .use_gc_done
+    mov r15d, 4
+.use_gc_done:
+    call lexer_next             ; advance past gc mode name
+
+.use_emit:
+    mov rdi, r14
     call codegen_emit_mm_switch
-    jmp .use_body
-.use_pool:
-    mov edi, 1
-    call codegen_emit_mm_switch
+    cmp r15, -1
+    je .use_body
+    mov rdi, r15
+    call codegen_emit_gc_switch
+
 .use_body:
     call lexer_next             ; skip ':'
     cmp byte [tok_type], TOK_NEWLINE
@@ -1602,6 +1736,15 @@ parse_stmt:
 
 ; ── when x: is N: body ... ─────────────────────────────────────────────────────
 .when:
+    ; push outer when state for nesting (#32)
+    mov rax, [when_stk_depth]
+    lea rcx, [when_var_stack]
+    mov rbx, [when_var_idx]
+    mov [rcx+rax*8], rbx
+    lea rcx, [when_cnt_stack]
+    mov rbx, [when_case_count]
+    mov [rcx+rax*8], rbx
+    inc qword [when_stk_depth]
     call lexer_next
     call parse_expr
     ; store when value in __when__ temp var
@@ -1736,6 +1879,15 @@ parse_stmt:
     call codegen_patch_chain_end
     ; clean up __when__ temp var
     dec qword [var_count]
+    ; pop outer when state (#32)
+    dec qword [when_stk_depth]
+    mov rax, [when_stk_depth]
+    lea rcx, [when_var_stack]
+    mov rbx, [rcx+rax*8]
+    mov [when_var_idx], rbx
+    lea rcx, [when_cnt_stack]
+    mov rbx, [rcx+rax*8]
+    mov [when_case_count], rbx
     jmp .done
 
 .done:

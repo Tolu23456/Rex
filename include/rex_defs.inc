@@ -80,6 +80,8 @@ TOK_IS         equ 77
 TOK_ARROW      equ 78
 TOK_STEP       equ 79
 TOK_NONE       equ 80
+TOK_KEYWORD    equ 81
+TOK_AS         equ 82
 TYPE_INT equ 1
 TYPE_FLOAT equ 2
 TYPE_BOOL equ 3

@@ -351,6 +351,8 @@ lexer_next:
     movzx eax, byte [rdi+rcx]
     cmp al, '"'
     je .strq
+    cmp rbx, 63
+    jge .strd
     mov [rsi+rbx], al
     inc rbx
     inc rcx
@@ -677,9 +679,32 @@ lexer_classify:
     je .kstep
 .nstep:
     cmp eax, 0x656E6F4E
-    jne .kid
+    jne .nkeyword
     cmp byte [tok_ident+4], 0
+    je .knone
+.nkeyword:
+    ; "keyword": k,e,y,w,o,r,d  dword[0]=0x7779656B
+    cmp eax, 0x7779656B
+    jne .nas
+    cmp byte [tok_ident+4], 'o'
+    jne .nas
+    cmp byte [tok_ident+5], 'r'
+    jne .nas
+    cmp byte [tok_ident+6], 'd'
+    jne .nas
+    cmp byte [tok_ident+7], 0
+    jne .nas
+    mov byte [tok_type], TOK_KEYWORD
+    ret
+.nas:
+    ; "as": a,s  dword=0x00007361, byte[2]=0
+    cmp eax, 0x00007361
     jne .kid
+    cmp byte [tok_ident+2], 0
+    jne .kid
+    mov byte [tok_type], TOK_AS
+    ret
+.knone:
     mov byte [tok_type], TOK_NONE
     ret
 .kstep:
