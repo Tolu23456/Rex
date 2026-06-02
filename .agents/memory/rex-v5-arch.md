@@ -102,10 +102,11 @@ See issue 31 for resolution options.
 `tok_ident` is 64 bytes; max 63 content chars. Bounds check `cmp rbx,63; jge .strd` added.
 Overlong strings are truncated silently (issue 34).
 
-## seq push overflow guard (PARTIAL FIX — issue 19)
-`codegen_emit_seq_push` now emits `cmp rcx,[rbx]; jb +2; ud2` after loading len into rcx.
-Overflow fires SIGILL instead of corrupting heap. No realloc blob yet — sequences capped at
-initial allocation size (default 8 slots).
+## seq push inline grow (FULL FIX — issue 19)
+`codegen_emit_seq_push` emits `cmp rcx,[rbx]; jb +57` then a 57-byte inline grow block.
+Grow: push rcx; compute new_size=16+old_cap*16; call rt_alc; pop rcx; write new_cap/len;
+rep movsq copies elements; pop rbx (new ptr); mov [var_addr],rbx; reload rcx. Unbounded growth.
+**Why jb +57:** grow block is exactly 57 bytes (verified). If byte count changes, rel8 must match.
 
 ## err non-string guard (PARTIAL FIX — issue 25)
 `.err_stmt` in parser.asm checks `cur_type` after `parse_expr`. If not TYPE_STR, calls

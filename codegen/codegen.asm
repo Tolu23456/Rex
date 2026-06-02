@@ -1578,23 +1578,148 @@ codegen_emit_seq_push:
     mov al, 0x08
     call emit_b
     ; bounds check: cmp rcx,[rbx]  →  48 3B 0B
-    ; if rcx < cap (CF=1) jump past ud2; else ud2 halts (issue #19)
+    ; if rcx < cap (CF=1) skip 57-byte grow block; else double-and-realloc (#19)
     mov al, 0x48
     call emit_b
     mov al, 0x3B
     call emit_b
     mov al, 0x0B
     call emit_b
-    ; jb +2  →  72 02  (skip ud2 if len < cap)
+    ; jb +57  →  72 39  (skip grow code when len < cap)
     mov al, 0x72
     call emit_b
-    mov al, 0x02
+    mov al, 0x39
     call emit_b
-    ; ud2  →  0F 0B  (halt on overflow)
-    mov al, 0x0F
+    ; ── inline grow (57 bytes) ───────────────────────────────────────────────
+    ; Strategy: new_cap = old_cap*2; new_size = 16 + new_cap*8;
+    ;           rt_alc(new_size) → rax (new ptr);
+    ;           copy header+elements; update var slot; restore rbx/rcx.
+    ; At entry: rbx=old_ptr rcx=old_len(=old_cap at overflow) stack=[value]
+    ; push rcx          →  51        (save old cap across rt_alc call)
+    mov al, 0x51
     call emit_b
-    mov al, 0x0B
+    ; mov rdi,[rbx]     →  48 8B 3B  (rdi = old cap)
+    mov al, 0x48
     call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x3B
+    call emit_b
+    ; shl rdi,4         →  48 C1 E7 10  (rdi = old_cap*16 = new_size-16)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0xE7
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; add rdi,16        →  48 83 C7 10  (rdi = new_size = 16 + old_cap*16)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; call rt_alc       →  E8 <rel32>   (rax = new buffer ptr)
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE+RT_ALC_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ; pop rcx           →  59           (rcx = old cap; syscall clobbered it)
+    mov al, 0x59
+    call emit_b
+    ; push rax          →  50           (save new ptr)
+    mov al, 0x50
+    call emit_b
+    ; mov r11,rcx       →  49 89 CB     (r11 = old cap)
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xCB
+    call emit_b
+    ; shl r11,1         →  49 D1 E3     (r11 = new cap = old_cap*2)
+    mov al, 0x49
+    call emit_b
+    mov al, 0xD1
+    call emit_b
+    mov al, 0xE3
+    call emit_b
+    ; mov [rax],r11     →  4C 89 18     ([new_ptr+0] = new cap)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x18
+    call emit_b
+    ; mov [rax+8],rcx   →  48 89 48 08  ([new_ptr+8] = len)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; lea rdi,[rax+16]  →  48 8D 78 10  (dst for rep movsq)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x78
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; lea rsi,[rbx+16]  →  48 8D 73 10  (src = old ptr + 16)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x73
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; rep movsq         →  F3 48 A5     (copy rcx qwords old→new)
+    mov al, 0xF3
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0xA5
+    call emit_b
+    ; pop rbx           →  5B           (rbx = new ptr)
+    mov al, 0x5B
+    call emit_b
+    ; mov [var_addr],rbx → 48 89 1C 25 <addr32>  (update var slot with new ptr)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi              ; peek var_idx (left on stack at function entry)
+    push rdi
+    call get_var_va
+    call emit_d
+    ; mov rcx,[rbx+8]   →  48 8B 4B 08  (reload len; rbx is now new ptr)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; ── end grow block ──────────────────────────────────────────────────────
+    ; fall through: rbx=new_ptr rcx=len stack=[value]  → store proceeds
     ; pop rax (restore value)
     mov al, 0x58
     call emit_b

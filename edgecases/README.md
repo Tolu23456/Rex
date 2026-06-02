@@ -9,7 +9,7 @@ Run a test by compiling the `.rex` file with `rexc` and executing the output.
 | `test_for_step.rex` | #30 — for step N | ✅ Fixed — should pass |
 | `test_skip.rex` | #31 — skip/continue depth | ✅ Fixed — should pass |
 | `test_nested_when.rex` | #32 — nested when stack | ✅ Fixed — should pass |
-| `test_seq_push_overflow.rex` | #19 — seq push overflow | ⚠️ Partial — push 9+ triggers SIGILL (guard present; no realloc yet) |
+| `test_seq_push_overflow.rex` | #19 — seq push overflow | ✅ Fixed — capacity doubles on overflow via inline grow + rt_alc |
 | `test_and_or_short_circuit.rex` | #33 — short-circuit and/or | ✅ Fixed — should pass |
 | `test_string_literal_length.rex` | #34 — string truncation | ✅ Fixed — 64+ char strings truncated, no corruption |
 | `test_err_types.rex` | #25 — err with non-string | ✅ Fixed — int/bool args print cleanly, no segfault |

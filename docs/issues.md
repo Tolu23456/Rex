@@ -178,19 +178,23 @@ Affects `.protocol` preamble and `.prot_store_params` in `parser/parser.asm`.
 
 ---
 
-### 19. `seq push` beyond initial capacity halts with SIGILL
+### 19. `seq push` beyond initial capacity — FULLY FIXED ✅
 
 **File:** `codegen/codegen.asm`, `codegen_emit_seq_push`.
 
-**Description:** The initial allocation is 80 bytes (8-slot capacity, 16-byte
-header).  A 9th `push` previously wrote 8 bytes past the end of the allocation
-into whatever `rt_alc` placed there — silently corrupting heap state.
+**Description:** Previously, a 9th `push` silently wrote past the 8-slot
+allocation, corrupting the heap.
 
-**Partial fix applied:** A `cmp rcx,[rbx]` + `jb`/`ud2` guard now halts the
-generated program with SIGILL on overflow instead of silently corrupting memory.
+**Fix applied:** `codegen_emit_seq_push` now emits a 57-byte inline grow block
+guarded by `cmp rcx,[rbx]; jb .ok`.  On overflow the generated code:
+1. Saves old cap (= old len) across an `rt_alc` call.
+2. Calls `rt_alc(16 + old_cap*16)` — allocates a 2× buffer.
+3. Writes `new_cap = old_cap*2` and `len` into the new header.
+4. Copies all existing elements with `rep movsq`.
+5. Updates the seq variable's pointer slot to the new buffer.
+6. Reloads `rcx = len` and falls through to the normal element store.
 
-**Remaining work:** Implement a realloc blob that doubles the allocation and
-copies existing elements so programs can grow sequences past 8 elements.
+Growth is unbounded — each overflow doubles capacity again.
 
 ---
 
