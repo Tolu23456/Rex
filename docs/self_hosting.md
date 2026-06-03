@@ -11,7 +11,7 @@ and milestone criteria.
 A self-hosting compiler can compile its own source code and produce a binary that,
 when run on the same source, produces an identical binary. For Rex this means:
 
-1. `rex_compiler.rx` (Rex source) compiled by the C-bootstrap Rex compiler
+1. `rex_compiler.rx` (Rex source) compiled by the NASM-bootstrap Rex compiler
    produces `rex2` binary.
 2. `rex2` compiles `rex_compiler.rx` and produces `rex3` binary.
 3. `rex2` and `rex3` are byte-for-byte identical (modulo timestamps).
@@ -25,35 +25,35 @@ be written:
 
 | # | Feature | Status |
 |---|---------|--------|
-| 1 | Recursive protocols (`@recurse` or indirect call) | #18 open |
-| 2 | String operations (concat, char-index, compare, slice) | partial |
-| 3 | Dynamic sequences (realloc on overflow, #19) | planned |
+| 1 | Recursive protocols (`@recurse` or indirect call) | open — issue #18 |
+| 2 | String operations (concat, char-index, compare, slice) | partial — issues #24, #11 |
+| 3 | Dynamic sequences (realloc on overflow) | **done** — issue #19 fixed |
 | 4 | File I/O syscall wrappers (read, write, open, close) | planned |
-| 5 | Dict / hash-map for symbol tables | planned |
-| 6 | Bitwise byte operations (shr 8, and 0xFF) | done |
+| 5 | Dict / hash-map for symbol tables | **done** — Stage 4 complete |
+| 6 | Bitwise byte operations (shr 8, and 0xFF) | **done** — Stage 3b complete |
 | 7 | Module / include system | planned |
 
-The minimum viable subset for a one-file bootstrap lexer+parser is (1)+(2)+(3).
+The minimum viable subset for a one-file bootstrap lexer+parser is (1)+(2).
+Prerequisite (3) is now satisfied; sequences grow automatically on overflow.
 
 ---
 
 ## Phase Plan
 
 ### Phase 0 — Current (V5.0)
-Hand-written NASM ELF64 compiler.  All language features are complete enough to
-write real programs. Known limitations: no recursion in protocols (stack-frame
-per call needed), no file I/O.
+Hand-written NASM ELF64 compiler.  All language features through Stage 7 are
+complete.  Known blocking limitations: no recursion in protocols (per-call stack
+frames needed — issue #18), no file I/O syscall wrappers.
 
 ### Phase 1 — Language Completion
 Fix the prerequisites above.  Key milestones:
 
-- Recursive protocol calls with proper per-call stack frames.
+- Recursive protocol calls with proper per-call stack frames (issue #18).
 - `file_open(path, flags) → fd`, `file_read(fd, buf, n) → n`,
   `file_write(fd, buf, n) → n`, `file_close(fd)` as built-in calls
   (via direct `syscall` emission in codegen).
-- `seq` realloc on push-beyond-capacity (double cap strategy, #19).
-- Dict literal `{k: v, ...}` and subscript `d[k]`.
-- `str_cat`, `str_cmp`, `str_len`, `str_at` built-ins.
+- `str_cat`, `str_cmp`, `str_len`, `str_at` built-ins (issue #24).
+- Dict literal `{k: v, ...}` and variable-key subscript `d[x]` (issue #23).
 
 ### Phase 2 — Bootstrap Lexer in Rex (`rex_bootstrap.rx`)
 Write the Rex lexer in Rex.  Input: null-terminated source string.
@@ -117,7 +117,7 @@ docs/rex_ir.md          ← IR specification
 
 | Phase | Done When |
 |-------|-----------|
-| Phase 0 | All issues #1-#37 closed, use block fully expanded |
+| Phase 0 | All open issues resolved; `use` block fully expanded |
 | Phase 1 | `rex_bootstrap.rx` compiles without errors; recursion + file I/O work |
 | Phase 2 | Lexer-in-Rex tokenises `hello.rx` identically to NASM lexer |
 | Phase 3 | Parser+codegen in Rex compiles `hello.rx` to a working ELF |

@@ -79,9 +79,9 @@ The runtime payload can be reduced with a future strip-unused-blobs pass.
 Test workload: sum integers 1..1 000 000 using a `for` loop, output result.
 
 ```rex
-int total = 0
-for i in 0..1000000:
-    : total = total + i
+int :total = 0
+for :i in 0..1000000:
+    :total = total + i
 output total
 ```
 
@@ -128,7 +128,7 @@ No dynamic linker, no `__libc_start_main`, no TLS setup.
 
 ## Output Binary Execution Speed — Integer Arithmetic
 
-Rex V5.0 now emits code for all arithmetic operators (`+`, `-`, `*`, `/`, `%`)
+Rex V5.0 emits code for all arithmetic operators (`+`, `-`, `*`, `/`, `%`)
 and all bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`).  The generated
 instruction sequences are:
 
@@ -151,19 +151,20 @@ These map directly to single x86-64 instructions with no abstraction overhead.
 |---|---|---|
 | **Compiler written in** | NASM x86-64 ASM | Zero abstraction overhead in the toolchain itself |
 | **Compilation model** | Single-pass, no IR | No parse tree, no SSA, no register allocation passes |
-| **External dependencies** | `nasm` only | No LLVM, no GCC, no libc headers |
+| **External dependencies** | `nasm` only (build time) | No LLVM, no GCC, no libc headers |
 | **Output format** | Raw ELF64 (hand-crafted) | Static 120-byte header (64 ELF + 56 PH) |
 | **Target ABI** | Linux x86-64 SysV | Direct kernel interface via `syscall` instruction |
-| **Linker required** | No | `rexc` writes the complete ELF directly |
+| **Linker required at build** | `ld` (assembler output only) | Output binaries need no linker themselves |
 
 ---
 
-## Key Tradeoffs (V5.0 Bootstrap Stage)
+## Key Tradeoffs (V5.0 Current Stage)
 
 | Limitation | Impact | Planned fix |
 |---|---|---|
-| Float arithmetic opcodes not emitted (semicolon bug) | Floats print wrong results | Fix multi-instruction lines in `codegen_emit_float_op` |
-| No optimiser pass | Generated code unoptimised (~C `-O0`) | Optional peephole pass post-V5 |
-| Conditions support only `var == literal` | No arbitrary boolean expressions in `if`/`while` | Expression-based conditions (V6) |
-| Variable table is flat linear scan | O(n) lookup, max 128 vars | Open-addressing hash map (V6) |
-| Single-file compilation only | No module system | Multi-file support (V7) |
+| No optimiser pass | Generated code unoptimised (~C `-O0`) | Optional peephole pass (see `docs/rex_ir.md`) |
+| Variable table is flat linear scan | O(n) lookup, hard ceiling at 128 vars | Open-addressing hash map (Stage 9) |
+| Single-file compilation only | No module system | Multi-file support (Stage 7) |
+| Recursive protocols use global var slots | Recursive calls corrupt caller's params | Per-call stack frames (Stage 5 — open issue #18) |
+| Dict keys must be string literals | No `d[var]` subscript with variable key | Variable key support (open issue #23) |
+| No string concatenation | Cannot join strings at runtime | `rt_str_cat` blob + `str(expr)` cast (Stage 9) |

@@ -81,18 +81,33 @@ int oct  = 0o17
 ```
 
 ### Logical ✅
-`and` and `or` are fully wired and emit correct machine code (eager evaluation — both
-operands always evaluated). Short-circuit code generation is pending (issue 33).
+
+`and` and `or` emit short-circuit machine code: `and` skips the RHS if the LHS is false;
+`or` skips the RHS if the LHS is true.
+
 ```rex
 if x > 0 and y > 0:
     output "both positive"
 
 if a == 1 or b == 1:
     output "at least one"
+```
+
+### `not` operator 📋
+
+Boolean inversion. Will map to `xor rax, 1` for `bool` operands and `not rax`
+for integer bitwise inversion. Not yet implemented in codegen.
+
+```rex
+bool flag = true
 
 if not flag:
     output "off"
 ```
+
+**Planned emission:**
+- `bool` operand: `xor rax, 1` (flips 0↔1)
+- `int` operand: `not rax` (bitwise complement)
 
 ### Comparison ✅
 All six operators are supported in `if`, `elif`, and `while` conditions:
@@ -101,7 +116,11 @@ All six operators are supported in `if`, `elif`, and `while` conditions:
 ```
 
 ### Identity — `is` / `is not` 📋
-Semantic identity check. Evaluates to a hardware `cmp`.
+
+Semantic identity check. Evaluates to a hardware `cmp` followed by `sete`/`setne`.
+Distinguished from `==` / `!=` in that it will also support runtime type comparison
+and null/sentinel checks without triggering arithmetic promotion.
+
 ```rex
 if x is 0:
     output "zero"
@@ -109,6 +128,16 @@ if x is 0:
 if ptr is not null:
     output "valid"
 ```
+
+**Planned semantics:**
+- `a is b` → `cmp rax, rbx; sete al; movzx rax, al` → yields `1` (true) or `0` (false)
+- `a is not b` → `cmp rax, rbx; setne al; movzx rax, al`
+- `ptr is not null` → comparison against the integer `0` (null pointer sentinel)
+- Result type: `bool`
+
+Differs from `==` in that `is` will participate in the ownership/type-safety
+system (Stage 10): `a is b` checks value identity without implying structural
+equality for collection types.
 
 ### Membership — `in` 📋
 Check whether a value is present in a `seq`, `dict`, or `str`.
@@ -308,12 +337,16 @@ else:
 ## Loops
 
 ### For loop ✅
-Range-based. Optional `step`.
+Range-based. Optional `step`. Both bounds accept full expressions (variables,
+arithmetic, unary negation).
 ```rex
 for :i in 0..10:
     output i
 
 for :i in 0..20 step 2:
+    output i
+
+for :i in -5..5:
     output i
 ```
 
@@ -333,31 +366,109 @@ for :i in 0..100:
     output i
 ```
 
-### `skip N` ✅
-Skip N levels of nested loops (break outer loops). `skip 1` is equivalent to `stop`.
+### `stop N` 📋
+
+Multi-level break. `stop N` breaks out of `N` nested loops at once.
+`stop 1` is identical to bare `stop` (break the innermost loop).
+
 ```rex
 for :i in 0..10:
     for :j in 0..10:
         if i == j:
-            skip 2    // break both loops
+            stop 2    // break both loops simultaneously
+    output i          // never reached if i == j fires
+```
+
+**Planned semantics:**
+- The break-patch stack is extended with a depth counter alongside each JMP slot.
+- `stop N` walks `N` levels deep in the break-patch stack and emits a JMP to the
+  Nth outer loop's exit address.
+- `stop 1` is equivalent to the current `stop` (innermost loop exit).
+- A depth that exceeds the current nesting level is a compile-time error.
+
+**Distinction from `skip N`:**
+- `skip N` is a *continue* (jump back to the Nth outer loop's condition check).
+- `stop N` is a *break* (jump past the Nth outer loop's exit entirely).
+
+### `skip N` ✅
+Continue the Nth enclosing loop (jump back to its condition check).
+`skip 1` is a continue of the innermost loop.
+```rex
+for :i in 0..10:
+    for :j in 0..10:
+        if i == j:
+            skip 2    // re-evaluate outer loop condition
 ```
 
 ### Loop `else:` 📋
-Executes only if the loop completes naturally without a `stop`.
+
+An `else:` block attached directly to a `for` or `while` loop executes **only if**
+the loop completes naturally — i.e., it was never interrupted by a `stop`.
+
 ```rex
 for :i in 0..10:
     if i == 5:
         stop
 else:
-    output "completed"
+    output "completed without stop"
 ```
 
+```rex
+int :target = 7
+for :i in 0..10:
+    if i == target:
+        stop
+else:
+    output "target not found in range"
+```
+
+**Planned semantics:**
+- At the start of the loop a `bool` flag is initialised to `false` (no-break).
+- Every `stop` site inside the loop sets the flag to `true` before jumping out.
+- After the loop's exit label, an `if flag == false:` guards the `else:` block.
+- The flag variable consumes one `var_table` slot (reclaimed via `scope_stack` on
+  loop exit, same strategy as the `for` end-variable `_fe`).
+- An `else:` block is optional; omitting it has zero overhead.
+
+**Interaction with `stop N`:**
+- `stop N` where `N > 1` bypasses the `else:` of all loops it exits (the flag
+  is set in each bypassed loop before the outer JMP is taken).
+
 ### `repeat N:` 📋
-Counted loop with no explicit counter variable. Emits a single `dec`/`jnz` hardware loop — faster than `for` when the index is not needed.
+
+Counted loop with no explicit counter variable. Emits a single hardware
+`dec` + `jnz` loop — faster than a `for` loop when the iteration index is
+not needed inside the body.
+
 ```rex
 repeat 8:
     output "tick"
 ```
+
+```rex
+int :sum = 0
+repeat 100:
+    :sum = sum + 1
+output sum
+```
+
+**Planned emission:**
+
+```
+mov rcx, N          ; load count into rcx (or r15 to avoid clobber)
+.top:
+    <body>
+dec rcx
+jnz .top
+```
+
+- `N` must be an integer literal or a compile-time constant expression.
+- The counter register (`rcx`) is not exposed as a variable inside the body.
+  Use a `for` loop if you need the index.
+- Nesting is supported; each `repeat` uses a fresh register (spill to stack
+  if all candidate registers are occupied).
+- `stop` inside `repeat` emits the standard break-JMP and is patched at
+  `repeat` exit, identical to `for`/`while`.
 
 ### `each` 🔧
 Cache-aligned iterator for sequential collection sweeping. Token is lexed; parser pending.
@@ -388,6 +499,10 @@ int v
 output v
 ```
 
+Sequences grow automatically: if a `push` would exceed capacity, the runtime
+doubles the allocation via `rt_alc` and copies existing elements before storing
+the new value. Growth is unbounded.
+
 ---
 
 ## Dictionaries ✅
@@ -401,6 +516,9 @@ int v
 :v = d["hello"]
 output v
 ```
+
+Keys must be string literals in the current implementation. Variable keys
+(`d[x]` where `x` is a `str`) are planned (see `docs/issues.md` issue #23).
 
 ---
 
@@ -497,6 +615,10 @@ Emit a runtime error message to stderr and halt:
 ```rex
 err "something went wrong"
 ```
+
+Passing a non-string argument to `err` is handled gracefully: the value is
+printed using its type's printer, then the process exits with code 1. Full
+`int → str` conversion in error messages requires the `str(expr)` cast (planned).
 
 ---
 

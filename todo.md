@@ -50,8 +50,8 @@
 - [x] `stop` break system fully wired: `codegen_emit_while_start` called by `for`/`while`
 - [x] `codegen_output_rax_bool` — routes bool output to `rt_prb_blob`
 - [x] `codegen_emit_cmp_rax_rbx_jcc` — generic comparison-then-branch emitter
-- [x] `and` / `or`: Logical operators — eager evaluation implemented (short-circuit pending, issue 33)
-- [ ] `not`: Boolean/bitwise inversion mapping to `xor rax, 1` or `not rax`
+- [x] `and` / `or`: Logical operators — short-circuit evaluation implemented
+- [ ] `not`: Boolean/bitwise inversion mapping to `xor rax, 1` (bool) or `not rax` (int)
 - [ ] `is` / `is not`: Semantic identity and type-verification (evaluates to hardware `cmp`)
 
 ---
@@ -59,6 +59,7 @@
 ## Stage 4 — Native Collections (In Progress 🔄)
 - [x] Dictionaries (SipHash + open addressing) — codegen and runtime implemented
 - [x] Dynamic sequences — `seq x`, `push x v`, `pop x` (expr), `len x` (expr)
+- [x] `seq push` grow-on-overflow — inline 57-byte grow block doubles capacity automatically
 - [ ] `in` operator: Membership check via SipHash linear probing (dict) or iteration sweeps (seq/str)
 - [ ] `each` iterator: Cache-aligned counter loop for sequential collection sweeping
 - [ ] Sets and Tuples
@@ -67,8 +68,11 @@
 
 ## Stage 5 — Advanced Protocols (Complete ✅)
 - [x] Parameterized protocols — `prot name(a, b):` with `@name(expr1, expr2)`
-- [ ] Local variable stack frames (callee-saved regs, not yet implemented)
+- [x] Up to 6 parameters — r8/r9 emission added for params 4 and 5
 - [x] Protocol return to variables — `@name(args)` usable as expression atom in `parse_factor`
+- [x] Float return type preserved through protocol call — `proto_ret_type` BSS mirrors `[entry+47]`
+- [x] Protocol local variables reclaimed via `scope_stack` save/restore
+- [ ] Per-call stack frames for recursive protocols (callee-saved regs, not yet implemented)
 
 ---
 
@@ -80,109 +84,93 @@
 
 ## Stage 7 — Runtime Hardening (Partial ✅)
 - [x] Error output to stderr — `err "msg"` statement + `rt_err_blob`
-- [ ] Variable table growth (currently fixed at VAR_MAX=128)
-- [ ] Multi-file compilation
+- [x] `err` non-string guard — `cur_type` checked after `parse_expr`; non-string types routed through correct printer then `exit(1)`
+- [x] Variable table growth guard — `var_add` checks `cmp rbx, VAR_MAX; jge .full`
+- [x] `out_buffer` overflow guard — `emit_b` halts with error if `out_idx >= 131071`; buffer is 128 KiB
 - [x] Expression type propagation — `cur_type` tracked through `+`, `-`, `*`, `/` chains
+- [x] `codegen_emit_exit1` — new global; emits `mov rax,60; mov rdi,1; syscall`
+- [ ] Multi-file compilation
 
 ---
 
-## Known Bugs and Hard Limitations
+## Known Open Issues
 
-These are confirmed defects in the current implementation, identified by static analysis.
-Each must be fixed before the affected feature can be considered complete.
+These are confirmed defects in the current implementation that are not yet resolved.
+See `docs/issues.md` for full descriptions.
 
-### B-1: Recursive protocols produce wrong results
+### High
+
+#### B-1: Recursive protocols produce wrong results
 Protocol parameters are stored in global `var_table` slots (at `VAR_STORAGE_BASE + idx*64`).
 A recursive call overwrites the caller's copy of those slots before the caller resumes.
 `fib(n)` calling `fib(n-1)` destroys `n` in the caller's frame.
 **Fix required:** Per-call stack frames — push/pop param vars onto the hardware stack.
 **Affects:** `parser/parser.asm` `.protocol` + `.prot_store_params`
+**Tracker:** `docs/issues.md` #18
 
-### B-2: `seq` push beyond capacity silently corrupts heap
-`push x v` emits `mov [rbx+rcx*8+16], rax` with no bounds check. Initial capacity is 8
-slots (80-byte alloc). A 9th `push` writes 8 bytes past the end of the allocation, into
-whatever the `rt_alc` allocator placed there.
-**Fix required:** Emit a cap check before the store; call a realloc blob if `len == cap`.
-**Affects:** `.push_stmt` in `parser/parser.asm`
+---
 
-### B-3: `for` loop bounds must be integer literals
-`codegen_emit_for_start` receives `rdi=from`, `rsi=to` as immediate integers parsed directly
-from `tok_int`. The syntax `for :i in 0..n:` where `n` is a variable does not work — the
-parser reads `n` as an identifier and the codegen never receives an integer value.
-**Fix required:** Replace bounds parsing with `parse_expr`; store result before emitting loop.
-**Affects:** `.for` handler in `parser/parser.asm`
+### Medium
 
-### B-4: Protocol parameters capped at 4 — 5th and 6th ignored at call site
-`.prot_store_params` emits `mov [var_addr], rdi/rsi/rdx/rcx` for params 0–3 only. Params 4
-and 5 are stored in `proto_table[entry+45]` and `[entry+46]` but the emit loop stops at
-index 3 (no `r8`/`r9` emission). Protocols declared with 5 or 6 params silently drop them.
-**Fix required:** Add `r8` (ModRM 0x04) and `r9` (ModRM 0x0C with REX.R) cases in the
-store loop.
-**Affects:** `.prot_store_params` in `parser/parser.asm`
-
-### B-5: VAR_MAX = 128 is a hard ceiling with no overflow guard
-`var_add` increments `[var_count]` without checking against `VAR_MAX`. Adding a 129th
-variable writes past the end of `var_table` into adjacent BSS, silently corrupting
-`proto_table` or other globals.
-**Fix required:** Add `cmp [var_count], VAR_MAX; jge .var_full` guard in `var_add`; emit
-compile-error diagnostic and halt.
-**Affects:** `var_add` in `parser/parser.asm`
-
-### B-6: `stop` only breaks the innermost loop — no outer-loop break
+#### B-6: `stop` only breaks the innermost loop — no outer-loop break
 `codegen_emit_break` emits a `JMP` into the current loop's patch stack. When loops are
 nested, `stop` inside the inner loop always patches to the inner loop's exit. There is no
 syntax or mechanism to break an outer loop.
-**Fix required:** `skip N` or labelled breaks (Stage 9 `skip`).
+**Fix required:** `stop N` labelled-break syntax (Stage 9). The break patch stack needs a
+depth counter; `stop N` walks N levels and emits a JMP to the Nth outer loop's exit.
 **Affects:** `codegen_emit_break` in `codegen/codegen.asm`
+**Tracker:** `docs/issues.md` #22
 
-### B-7: `out_buffer` has no overflow guard
-The emit buffer is `resb 65536`. `emit_b` writes `[out_buffer + out_idx]` and increments
-`out_idx` with no bounds check. A program that generates more than 65536 bytes of code
-silently overwrites BSS past the buffer.
-**Fix required:** Add `cmp [out_idx], 65535; jge .emit_overflow` in `emit_b`; halt with
-error.
-**Affects:** `emit_b` in `codegen/codegen.asm`
-
-### B-8: `float` type lost through protocol return
-When `@prot()` is used as an expression atom (`.at_in_expr` in `parse_factor`), the
-handler hard-codes `mov byte [cur_type], TYPE_INT` after `codegen_emit_call_prot`.
-A protocol that computes and returns a float value will cause the calling scope to route
-the result through `rt_pri` (integer printer) instead of `rt_prf`.
-**Fix required:** Store return type in `proto_table` entry; restore `cur_type` from it
-after the call.
-**Affects:** `.at_in_expr` and `.at_call` in `parser/parser.asm`
-
-### B-9: Negative for-loop bounds not supported
-`tok_int` is stored as `uint64`. The lexer does not emit a unary-minus token before an
-integer literal when it appears in a range context. `for :i in -5..5:` lexes as
-`TOK_MINUS`, `TOK_INT_LIT(5)`, `TOK_DOTDOT`, `TOK_INT_LIT(5)` — the minus is never
-applied to the start bound, and the parser discards it.
-**Fix required:** Handle `TOK_MINUS` before range start in `.for` handler, or switch bounds
-to `parse_expr`.
-**Affects:** `.for` handler in `parser/parser.asm` (linked to B-3)
-
-### B-10: Dict keys must be string literals — variable keys not supported
+#### B-10: Dict keys must be string literals — variable keys not supported
 The dict handler emits a `call rt_sip(key_va, key_len)` with the key bytes embedded inline
 in the code stream. There is no path for `d[x]` where `x` is a variable holding a runtime
 string pointer.
 **Fix required:** When the key token is `TOK_IDENT`, resolve the variable's runtime address
 and pass it to the SipHash call instead of an inline literal.
 **Affects:** Dict get/set handlers in `parser/parser.asm`
+**Tracker:** `docs/issues.md` #23
 
-### B-11: No string concatenation and no `int → str` conversion
+#### B-11: No string concatenation and no `int → str` conversion
 `output` routes `TYPE_STR` correctly, but there is no operator or builtin that joins two
 strings or converts an integer to a string at runtime. `str s; :s = x + "px"` does not
 work.
 **Fix required:** Add `rt_str_cat` blob (Stage 9); add `str(expr)` cast syntax.
 **Affects:** Expression parser, runtime
+**Tracker:** `docs/issues.md` #24
 
-### B-12: `err` only accepts a string pointer — integer codes not supported
-`.err_stmt` calls `parse_expr` and assumes the result in `rax` is a null-terminated string
-pointer. `err 42` or `err code` where `code` is an `int` will pass a small integer to
-`rt_err_blob`'s strlen loop, which will spin or segfault.
-**Fix required:** Check `cur_type` after `parse_expr`; if `TYPE_INT`, route through an
-int-to-string conversion before calling `rt_err`.
+#### B-12: `err` only accepts a string pointer — integer codes produce print + exit
+`.err_stmt` calls `parse_expr` and checks `cur_type`. If not `TYPE_STR`, it routes through
+the correct printer for the type and then calls `codegen_emit_exit1` (exit code 1). This
+prevents the segfault but does not produce a formatted error message with the value.
+**Fix required:** Proper int-to-string conversion so `err 42` emits the number as text in
+the error output. Requires `str(expr)` cast (B-11 / issue #24).
 **Affects:** `.err_stmt` in `parser/parser.asm`
+**Tracker:** `docs/issues.md` #25
+
+---
+
+### Low
+
+#### B-13: Dict runtime offsets are hardcoded constants
+`RT_DICT_NEW_OFFSET`, `RT_DICT_SET_OFFSET`, and `RT_DICT_GET_OFFSET` in
+`include/rex_defs.inc` are manually measured byte offsets into `rt_prq_blob`. Any
+change to a preceding blob that shifts sizes will silently break dict operations.
+**Fix required:** Compute offsets via a linker-resolved symbol difference.
+**Affects:** `include/rex_defs.inc`
+**Tracker:** `docs/issues.md` #3
+
+#### B-14: `when` statement uses linear case search instead of jump table
+Each `is N:` case emits a `mov`/`cmp`/`jz` sequence, making `when` with K cases O(K).
+**Fix required:** Detect dense-integer ranges after collecting all case values and emit
+an indirect jump table (`jmp [table + rax*8]`) instead of the linear chain.
+**Affects:** `.when` in `parser/parser.asm`
+**Tracker:** `docs/issues.md` #27
+
+#### B-15: No sequence bounds check on element reads
+Reading `seq[i]` emits `mov rax, [rbx + rcx*8 + 16]` with no check that `rcx < len`.
+**Fix required:** Emit `cmp rcx, [rbx+8]; jae .oob_err` before the load.
+**Affects:** Sequence subscript handler in `parser/parser.asm`
+**Tracker:** `docs/issues.md` #28
 
 ---
 
@@ -211,9 +199,11 @@ int-to-string conversion before calling `rt_err`.
 
 ### III. Concurrency, Control Flow & Selection
 - [ ] `blast` / `pipe`: Vectorized iteration unrolling into `movntdq` / `movdqa` (bypassing CPU cache).
-- [x] `skip`: Multi-level loop break. `codegen_emit_skip` + `codegen_push_cont`/`codegen_pop_cont` implemented. `skip N` breaks N levels.
-- [ ] `match`: Structural pattern-matching. Sequential integers map to high-speed O(1) Jump Tables.
+- [x] `skip N`: Multi-level loop continue. `codegen_emit_skip` + `codegen_push_cont`/`codegen_pop_cont` implemented. `skip N` continues the Nth enclosing loop's condition check.
+- [ ] `stop N`: Multi-level loop break. `stop N` breaks N levels of nested loops simultaneously. Requires depth counter in the break-patch stack.
+- [ ] Loop `else:`: Executes if parent loop finishes naturally without triggering `stop`. Requires a per-loop boolean flag variable.
 - [ ] `repeat N:`: Counted loop with no explicit counter variable. Emits a single `dec`+`jnz` hardware loop.
+- [ ] `match`: Structural pattern-matching. Sequential integers map to high-speed O(1) Jump Tables.
 - [ ] `unreachable` / `assert`: Optimizing crash boundary guards emitting `ud2` or linking to `rt_err_blob`.
 
 ### IV. Bare-Metal Hardware Atoms & Intrinsics
@@ -222,10 +212,12 @@ int-to-string conversion before calling `rt_err`.
     - [x] `int(float)` → `cvttsd2si r64, xmm`.
     - [x] `float(int)` → `cvtsi2sd xmm, r64`.
 - [x] `bin`: Base-wrapper primitive (Base 2–16) for bitmasks/byte configs (e.g., `bin10`).
-- [x] `abs`: `codegen_emit_abs_rax` implemented (`cmovns` pattern).
+- [x] `abs`: `codegen_emit_abs_rax` implemented (`cmovs` pattern).
 - [ ] `sign` / `clz`: Single-cycle hardware mapping to `lzcnt`/`bsr` — not yet implemented.
 - [ ] `ceil` / `floor` / `fract`: SSE floating-point rounding (`roundsd`) and truncation.
 - [ ] `real` / `imag` / `conj`: 128-bit XMM parallel component isolators and register bitmasking.
+- [ ] `not`: Boolean/bitwise inversion — `xor rax, 1` for `bool`, `not rax` for `int`.
+- [ ] `is` / `is not`: Semantic identity check — `cmp` + `sete`/`setne` + `movzx`.
 - [ ] `flip` / `rand`: Hardware boolean flags mapping to bitwise NOT pipelines and entropy ring (`rdrand rax`).
 - [ ] `carry` / `overflow`: Built-in boolean expressions checking EFLAGS via `jc` or `jo`.
 - [x] `swap`: Instant value exchange via `xchg rax, rbx` — `codegen_emit_swap_vars` implemented.

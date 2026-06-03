@@ -1,1 +1,2 @@
 - [Rex V5.0 compiler architecture](rex-v5-arch.md) — modular NASM ELF64 compiler; key bugs, offsets, and conventions to preserve across sessions.
+- [Rex V5.0 markdown doc conventions](doc-conventions.md) — status markers, cross-doc consistency rules, and 5-feature doc spec implemented in this session.

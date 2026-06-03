@@ -7,7 +7,7 @@
 | Feature              | Rex V5.0             | C                   | C++                  | Rust                | Python              |
 |----------------------|----------------------|---------------------|----------------------|---------------------|---------------------|
 | Compilation target   | Direct ELF64 binary  | Machine code (gcc)  | Machine code (g++)   | Machine code (LLVM) | CPython bytecode    |
-| Linker required      | **No**               | Yes                 | Yes                  | Yes                 | N/A                 |
+| Linker required      | Build: `ld` (NASM obj files) / Output: **No** | Yes | Yes | Yes | N/A |
 | Runtime dependencies | **None**             | libc (glibc)        | libc + libstdc++     | libc or musl        | CPython interpreter |
 | Optimiser passes     | None (single-pass)   | GCC -O0..3          | G++ -O0..3           | LLVM -O0..3         | N/A                 |
 | Binary size (min)    | **~500 bytes**       | ~15 KB (dyn.)       | ~15 KB (dyn.)        | ~8 KB (stripped)    | N/A                 |
@@ -15,6 +15,9 @@
 
 Rex emits a hand-crafted 120-byte ELF header directly — no `.plt`, `.got`, `_start`,
 or dynamic-linker segment. The binary's first 5 bytes are `JMP CODE_START`.
+The `ld` linker is used at *compiler build time* to link the NASM object files that
+make up `rexc` itself. The **output** ELF binaries that `rexc` produces require no
+linker — they are complete, self-contained executables written directly to disk.
 
 ---
 
@@ -25,7 +28,7 @@ or dynamic-linker segment. The binary's first 5 bytes are `JMP CODE_START`.
 | Default allocator         | Custom pool/arena (rt_alc_blob)   | glibc malloc     | glibc malloc      | System/jemalloc   | CPython obmalloc  |
 | Allocation cost           | **O(1) bump pointer (pool)**      | O(log n)         | O(log n)          | O(log n)          | O(1) (obmalloc)   |
 | Deallocation cost         | **O(1) pool reset**               | O(log n)         | O(log n)          | O(1)–O(log n)     | Ref-count + cycle |
-| GC strategy               | Hot-swappable at runtime          | None             | None (RAII)       | Ownership/borrow  | Ref-count + GC    |
+| GC strategy               | Hot-swappable at compile time     | None             | None (RAII)       | Ownership/borrow  | Ref-count + GC    |
 | Allocator context switch  | `use mm pool gc X:` / `arena gc X:` | Manual         | Allocator traits  | Custom allocators | None              |
 | Fragmentation             | **Zero (arena/pool)**             | Possible         | Possible          | Possible          | Managed           |
 
@@ -73,10 +76,10 @@ GCC applies loop-induction-variable elimination and register renaming that Rex s
 | C         | **444**   | GCC -O2                                |
 | C++       | 447       | G++ -O2                                |
 | Rust      | ~450      | rustc -O                               |
-| Rex       | ~680†     | †Stack frames pending (Stage 5)        |
+| Rex       | ~680†     | †Stack frames pending (issue #18)      |
 
-† Rex protocol parameters are currently stored in global `var_table` slots. Stack-local
-frames (one of the Stage 5 items) will bring Rex closer to C -O0 speed (~550 ms).
+† Rex protocol parameters are currently stored in global `var_table` slots. Per-call
+stack frames (issue #18) will bring Rex closer to C -O0 speed (~550 ms).
 
 ### Bubble Sort — 20,000 integers
 

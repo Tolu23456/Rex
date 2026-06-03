@@ -95,6 +95,24 @@ Both now `jmp codegen_emit_b_raw` / `jmp codegen_emit_d_raw`, which are
 fell through all character comparisons, but the leading `/` had already been
 emitted as `TOK_SLASH`, scrambling the token stream.
 
+### 19. `seq push` beyond initial capacity — FULLY FIXED ✅
+
+**File:** `codegen/codegen.asm`, `codegen_emit_seq_push`.
+
+**Description:** Previously, a 9th `push` silently wrote past the 8-slot
+allocation, corrupting the heap.
+
+**Fix applied:** `codegen_emit_seq_push` now emits a 57-byte inline grow block
+guarded by `cmp rcx,[rbx]; jb .ok`.  On overflow the generated code:
+1. Saves old cap (= old len) across an `rt_alc` call.
+2. Calls `rt_alc(16 + old_cap*16)` — allocates a 2× buffer.
+3. Writes `new_cap = old_cap*2` and `len` into the new header.
+4. Copies all existing elements with `rep movsq`.
+5. Updates the seq variable's pointer slot to the new buffer.
+6. Reloads `rcx = len` and falls through to the normal element store.
+
+Growth is unbounded — each overflow doubles capacity again.
+
 ### 20. Negative `for` loop bounds not supported
 **Fixed in:** `parser/parser.asm`
 Range bounds now use `parse_expr` which handles `TOK_MINUS` as unary negation;
@@ -178,26 +196,6 @@ Affects `.protocol` preamble and `.prot_store_params` in `parser/parser.asm`.
 
 ---
 
-### 19. `seq push` beyond initial capacity — FULLY FIXED ✅
-
-**File:** `codegen/codegen.asm`, `codegen_emit_seq_push`.
-
-**Description:** Previously, a 9th `push` silently wrote past the 8-slot
-allocation, corrupting the heap.
-
-**Fix applied:** `codegen_emit_seq_push` now emits a 57-byte inline grow block
-guarded by `cmp rcx,[rbx]; jb .ok`.  On overflow the generated code:
-1. Saves old cap (= old len) across an `rt_alc` call.
-2. Calls `rt_alc(16 + old_cap*16)` — allocates a 2× buffer.
-3. Writes `new_cap = old_cap*2` and `len` into the new header.
-4. Copies all existing elements with `rep movsq`.
-5. Updates the seq variable's pointer slot to the new buffer.
-6. Reloads `rcx = len` and falls through to the normal element store.
-
-Growth is unbounded — each overflow doubles capacity again.
-
----
-
 ## Medium
 
 ### 22. `stop` only breaks the innermost loop — no outer-loop exit
@@ -211,7 +209,8 @@ break out of an outer loop from inside an inner one.
 
 **Fix required:** Introduce `stop N` labelled-break syntax.
 `stop 1` = break inner (current `stop`), `stop 2` = break outer, etc.
-The break patch stack would need a depth counter threaded through it.
+The break patch stack needs a depth counter threaded through it.
+`stop N` where `N` exceeds the current nesting depth is a compile-time error.
 
 ---
 
