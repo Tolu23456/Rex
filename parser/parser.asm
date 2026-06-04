@@ -29,6 +29,9 @@ extern codegen_emit_bitwise_and_rax_rbx, codegen_emit_bitwise_or_rax_rbx
 extern codegen_emit_bitwise_xor_rax_rbx
 extern codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
 extern codegen_emit_shl_rax_by_rbx, codegen_emit_shr_rax_by_rbx
+extern codegen_set_frame, codegen_clear_frame
+extern codegen_emit_frame_prologue, codegen_emit_leave
+extern codegen_emit_jmp_prot
 extern codegen_emit_str_rax
 extern codegen_emit_seq_alloc, codegen_emit_seq_push, codegen_emit_seq_pop_rax
 extern codegen_emit_seq_len_rax
@@ -64,6 +67,9 @@ when_stk_depth:  resq 1
 decl_mutable:          resb 1
 cur_proto_param_count: resb 1       ; B-1: param count of the protocol being compiled
 cur_proto_param_vars:  resb 6       ; B-1: var indices for each param (up to 6)
+tco_return_active:     resb 1       ; O4: 1 if we are inside a .ret that may be TCO
+tco_was_emitted:       resb 1       ; O4: 1 if TCO jmp was emitted for this return
+tco_body_entry:        resq 1       ; O4: out_idx of current protocol body start (after prologue)
 section .data
 err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
@@ -402,6 +408,30 @@ parse_factor:
     jne .prt_do
     call lexer_next
 .prt_do:
+    ; O4: tail-call optimisation — if this call is the tail of a .ret expression
+    ; and is a self-recursive call to the current protocol, emit leave+jmp
+    cmp byte [tco_return_active], 1
+    jne .prt_do_normal
+    ; check that the next token is end-of-statement (newline/EOF/dedent)
+    movzx eax, byte [tok_type]
+    cmp al, TOK_NEWLINE
+    je .prt_tco_check
+    cmp al, TOK_EOF
+    je .prt_tco_check
+    cmp al, TOK_DEDENT
+    je .prt_tco_check
+    jmp .prt_do_normal
+.prt_tco_check:
+    ; check it's the same protocol (r12 = proto_idx of this call)
+    cmp r12, [cur_proto_idx]
+    jne .prt_do_normal
+    ; TCO: emit leave + jmp to protocol body start (past prologue+param-stores)
+    call codegen_emit_leave
+    mov rdi, [tco_body_entry]  ; out_idx saved at .prot_nobody entry
+    call codegen_emit_jmp_prot
+    mov byte [tco_was_emitted], 1
+    jmp .done
+.prt_do_normal:
     ; ── Gap-1 fix: caller-save all in-scope vars before call ─────────────────
     xor r13, r13                ; loop counter i = 0
 .prt_cs:
@@ -622,6 +652,7 @@ parse_term:
     jmp .done
 .mul:
     movzx r12d, byte [cur_type]
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_unary
@@ -637,6 +668,7 @@ parse_term:
     jmp .loop
 .div:
     movzx r12d, byte [cur_type]
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_unary
@@ -651,6 +683,7 @@ parse_term:
     mov byte [cur_type], TYPE_FLOAT
     jmp .loop
 .mod:
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_unary
@@ -659,6 +692,7 @@ parse_term:
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .shl:
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_unary
@@ -667,6 +701,7 @@ parse_term:
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .shr:
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_unary
@@ -701,6 +736,7 @@ parse_additive:
     jmp .done
 .add:
     movzx r12d, byte [cur_type]
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_term
@@ -716,6 +752,7 @@ parse_additive:
     jmp .loop
 .sub:
     movzx r12d, byte [cur_type]
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_term
@@ -730,6 +767,7 @@ parse_additive:
     mov byte [cur_type], TYPE_FLOAT
     jmp .loop
 .band:
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_term
@@ -738,6 +776,7 @@ parse_additive:
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .bor:
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_term
@@ -746,6 +785,7 @@ parse_additive:
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .bxor:
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_term
@@ -797,6 +837,7 @@ parse_comparison:
 .ge:
     mov r12b, 0x9D
 .op:
+    mov byte [tco_return_active], 0
     call lexer_next
     call codegen_emit_push_rax
     call parse_additive
@@ -825,6 +866,7 @@ parse_expr:
     jmp .done
 .land:
     ; short-circuit and (#33): if LHS false → skip RHS, result = false
+    mov byte [tco_return_active], 0
     call codegen_emit_test_rax_jz   ; emit test+jz; push J1 on jump_patch_stack
     call lexer_next
     call parse_comparison           ; RHS → rax
@@ -840,6 +882,7 @@ parse_expr:
     jmp .loop
 .lor:
     ; short-circuit or (#33): if LHS true → skip RHS, result = true
+    mov byte [tco_return_active], 0
     call codegen_emit_test_rax_jnz  ; emit test+jnz; push J1 on jump_patch_stack
     call lexer_next
     call parse_comparison           ; RHS → rax
@@ -1520,67 +1563,55 @@ parse_stmt:
     call lexer_next
     call lexer_next
 .prot_push_old:
-    ; B-1: emit push qword [var_addr] for each param — saves old values to hardware stack
+    ; O1: stack-frame optimisation — emit push rbp/mov rbp,rsp/sub rsp,N*8
+    ; then store each param register to [rbp-(K+1)*8], no global spill
+    ; register params with codegen frame tracking
+    push r12
+    push r13
+    mov rdi, r12
+    lea rsi, [r13+41]
+    call codegen_set_frame
+    ; emit frame prologue
+    mov rdi, r12
+    call codegen_emit_frame_prologue
+    pop r13
+    pop r12
+    ; emit frame-relative param stores: REX 89 ModRM disp8
     xor r14, r14
-.prot_push_lp:
-    cmp r14, r12
-    jge .prot_se_init
-    movzx rbx, byte [r13+41+r14]
-    ; push qword [abs32_addr] = FF 34 25 <addr32>
-    mov al, 0xFF
-    call emit_b_indirect
-    mov al, 0x34
-    call emit_b_indirect
-    mov al, 0x25
-    call emit_b_indirect
-    mov rdi, rbx
-    call get_var_va_indirect
-    call emit_d_indirect
-    inc r14
-    jmp .prot_push_lp
-.prot_se_init:
-    xor r14, r14
-.prot_se:
+.prot_fs:
     cmp r14, r12
     jge .prot_nobody
     cmp r14, 6
     jge .prot_nobody
-    movzx rbx, byte [r13+41+r14]
-    lea rax, [rel .prot_mrm]
-    movzx ecx, byte [rax+r14]
-    ; choose REX prefix: 0x4C for r8/r9 (params 4,5), 0x48 for rdi/rsi/rdx/rcx
-    push rbx
-    push rcx
-    push r14
     cmp r14, 4
-    jge .prot_rex_r
+    jge .prot_fs_rex_r
     mov al, 0x48
-    jmp .prot_rex_emit
-.prot_rex_r:
+    jmp .prot_fs_emit
+.prot_fs_rex_r:
     mov al, 0x4C
-.prot_rex_emit:
+.prot_fs_emit:
     call emit_b_indirect
     mov al, 0x89
     call emit_b_indirect
-    pop r14
-    pop rcx
-    pop rbx
-    push rbx
-    push r14
+    ; ModRM byte for [rbp+disp8] destination
+    lea rax, [rel .prot_fs_mrm]
+    movzx ecx, byte [rax+r14]
     mov al, cl
     call emit_b_indirect
-    mov al, 0x25
+    ; disp8 = -(K+1)*8
+    mov al, r14b
+    inc al
+    shl al, 3
+    neg al
     call emit_b_indirect
-    mov rdi, rbx
-    call get_var_va_indirect
-    call emit_d_indirect
-    pop r14
-    pop rbx
     inc r14
-    jmp .prot_se
-.prot_mrm: db 0x3C, 0x34, 0x14, 0x0C, 0x04, 0x0C
+    jmp .prot_fs
+.prot_fs_mrm: db 0x7D, 0x75, 0x55, 0x4D, 0x45, 0x4D
 
 .prot_nobody:
+    ; O4: capture body-start out_idx (after any prologue+param-stores) for TCO jmp
+    mov rax, [out_idx]
+    mov [tco_body_entry], rax
     ; save var_count for protocol-level scoping
     mov rax, [scope_depth]
     lea rcx, [scope_stack]
@@ -1611,8 +1642,9 @@ parse_stmt:
     jne .protnd
     call lexer_next
 .protnd:
-    call proto_emit_restore     ; B-1: restore param vars before implicit ret
+    call proto_emit_restore     ; O1: emit leave (frame teardown)
     call codegen_emit_ret
+    call codegen_clear_frame
     dec qword [prot_body_depth]
     ; restore var_count (protocol scoping)
     dec qword [scope_depth]
@@ -1632,6 +1664,12 @@ parse_stmt:
     je .ret_bare
     cmp al, TOK_DEDENT
     je .ret_bare
+    ; O4: enable TCO detection for this return expression
+    cmp qword [prot_body_depth], 0
+    jle .ret_notco
+    mov byte [tco_return_active], 1
+    mov byte [tco_was_emitted], 0
+.ret_notco:
     call parse_expr
     ; store return type into current proto entry (B-8 fix)
     mov rax, [cur_proto_idx]
@@ -1640,12 +1678,19 @@ parse_stmt:
     add rbx, rax
     movzx ecx, byte [cur_type]
     mov [rbx+47], cl
-    call proto_emit_restore     ; B-1: restore param vars before ret
+    ; O4: if TCO jmp was emitted by parse_expr → skip leave+ret
+    cmp byte [tco_was_emitted], 1
+    je .ret_tco_done
+    call proto_emit_restore     ; O1: emit leave
     call codegen_emit_ret
+.ret_tco_done:
+    mov byte [tco_return_active], 0
+    ; DO NOT call codegen_clear_frame here — body parsing continues after return
     jmp .done
 .ret_bare:
-    call proto_emit_restore     ; B-1: restore param vars before ret
+    call proto_emit_restore     ; O1: emit leave
     call codegen_emit_ret
+    ; DO NOT call codegen_clear_frame here
     jmp .done
 
 ; ── stop / skip / pass ────────────────────────────────────────────────────────
@@ -2479,29 +2524,6 @@ get_var_va_indirect:
 ; Unwinds the per-call hardware-stack frame installed at protocol entry (B-1).
 ; Preserves rbx, r14. Must be called before codegen_emit_ret on every return path.
 proto_emit_restore:
-    push rbx
-    push r14
-    movzx r14, byte [cur_proto_param_count]
-    test r14, r14
-    jz .per_done
-    dec r14
-.per_loop:
-    movzx rbx, byte [cur_proto_param_vars + r14]
-    ; pop qword [abs32_addr] = 8F 04 25 <addr32>
-    mov al, 0x8F
-    call emit_b_indirect
-    mov al, 0x04
-    call emit_b_indirect
-    mov al, 0x25
-    call emit_b_indirect
-    mov rdi, rbx
-    call get_var_va_indirect
-    call emit_d_indirect
-    test r14, r14
-    jz .per_done
-    dec r14
-    jmp .per_loop
-.per_done:
-    pop r14
-    pop rbx
+    ; O1: emit leave (C9) instead of pop sequence — frame-relative params
+    call codegen_emit_leave
     ret

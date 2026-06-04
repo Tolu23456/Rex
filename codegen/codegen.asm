@@ -28,6 +28,9 @@ global codegen_emit_bitwise_and_rax_rbx, codegen_emit_bitwise_or_rax_rbx
 global codegen_emit_bitwise_xor_rax_rbx
 global codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
 global codegen_emit_shl_rax_by_rbx, codegen_emit_shr_rax_by_rbx
+global codegen_set_frame, codegen_clear_frame, codegen_find_frame_slot
+global codegen_emit_frame_prologue, codegen_emit_leave, codegen_emit_jmp_prot
+global codegen_peephole
 global codegen_emit_str_rax
 global codegen_emit_seq_alloc, codegen_emit_seq_push, codegen_emit_seq_pop_rax
 global codegen_emit_seq_len_rax
@@ -43,6 +46,10 @@ global codegen_set_for_step, for_step_val
 global codegen_emit_exit1
 global codegen_push_loop_else_flag, codegen_pop_loop_else_flag, codegen_peek_loop_else_flag
 global codegen_emit_each_start, codegen_emit_each_end
+; O1: stack frames  O2: loop pin  O3: peephole  O4: TCO
+global codegen_set_frame, codegen_clear_frame
+global codegen_emit_frame_prologue, codegen_emit_leave
+global codegen_emit_jmp_prot
 extern elf_header, program_header
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
@@ -66,6 +73,14 @@ prot_jmp_live:    resb 1
 for_step_val:     resq 1
 loop_else_flag_stack: resq 32
 loop_else_flag_depth: resq 1
+; O1: stack frame for protocol params
+frame_active:     resb 1
+frame_param_cnt:  resb 1
+frame_param_vars: resb 6
+; O2: loop counter register pin (r15)
+loop_pin_active:  resb 1
+loop_pin_var_idx: resq 1
+loop_pin_depth:   resq 1
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -200,6 +215,8 @@ codegen_finish:
     mov rax, [out_idx]
     add rax, 0x44000
     mov [rcx+64+40], rax
+    ; O3: peephole optimise the output buffer
+    call codegen_peephole
     ret
 
 ; ── output helpers ────────────────────────────────────────────────────────────
@@ -220,9 +237,29 @@ codegen_output_const:
     ret
 
 codegen_output_typed:
-    ; rdi=var_idx rsi=type: emit mov rdi,[var_addr]; call rt_pXX
+    ; rdi=var_idx rsi=type: emit mov rdi,[var_addr]; call rt_pXX  (O1: frame-aware)
     push rsi
     push rdi
+    call codegen_find_frame_slot  ; rdi preserved; rax=slot or -1
+    cmp rax, -1
+    je .ot_global
+    ; frame param: emit mov rdi,[rbp-(K+1)*8] = 48 8B 7D <disp8>
+    mov rcx, rax
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x7D
+    call emit_b
+    inc rcx
+    shl rcx, 3
+    neg rcx
+    mov al, cl
+    call emit_b
+    pop rdi
+    pop rsi
+    jmp .ot_call
+.ot_global:
     mov al, 0x48
     call emit_b
     mov al, 0x8B
@@ -237,6 +274,7 @@ codegen_output_typed:
     call emit_d
     pop rdi
     pop rsi
+.ot_call:
     mov al, 0xE8
     call emit_b
     mov rax, RT_PRI_OFFSET
@@ -530,8 +568,39 @@ codegen_emit_for_start:
     call get_var_va
     call emit_d
 .fs_cond:
+    ; O2: pin outermost loop counter to r15
+    cmp qword [loop_pin_depth], 0
+    jne .fs_cond_global
+    ; outermost loop: set pin, load r15 from just-stored [i_addr]
+    mov [loop_pin_var_idx], r12
+    mov byte [loop_pin_active], 1
+    inc qword [loop_pin_depth]
+    ; emit mov r15,[i_addr] = 4D 8B 3C 25 <addr32>
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x3C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r12
+    call get_var_va
+    call emit_d
+    mov rbx, [out_idx]       ; loop cond start (after the init load)
+    ; emit cmp r15,end_val = 49 81 FF <imm32>
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov rax, r13             ; end_val
+    call emit_d
+    jmp .fs_patch
+.fs_cond_global:
+    inc qword [loop_pin_depth]
     mov rbx, [out_idx]
-    ; optimised condition: cmp qword [var_addr], end_val (no load into register)
     ; cmp qword [addr], imm32 = 48 81 3C 25 <addr32> <imm32>
     mov al, 0x48
     call emit_b
@@ -546,6 +615,7 @@ codegen_emit_for_start:
     call emit_d
     mov rax, r13
     call emit_d
+.fs_patch:
     mov al, 0x0F
     call emit_b
     mov al, 0x8D
@@ -574,6 +644,47 @@ codegen_emit_for_end:
     mov r13, rsi             ; loop_var_idx
     mov r14, [for_step_val]  ; step value
     mov qword [for_step_val], 1
+    ; O2: use r15 increment when loop is pinned
+    cmp byte [loop_pin_active], 0
+    je .fe_global_inc
+    cmp r13, [loop_pin_var_idx]
+    jne .fe_global_inc
+    ; pinned: increment r15
+    cmp r14, 1
+    jne .fe_pin_step
+    ; inc r15 = 49 FF C7
+    mov al, 0x49
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    jmp .fe_jmp
+.fe_pin_step:
+    cmp r14, 127
+    jg .fe_pin_imm32
+    ; add r15, imm8 = 49 83 C7 <imm8>
+    mov al, 0x49
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, r14b
+    call emit_b
+    jmp .fe_jmp
+.fe_pin_imm32:
+    ; add r15, imm32 = 49 81 C7 <imm32>
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov eax, r14d
+    call emit_d
+    jmp .fe_jmp
+.fe_global_inc:
     cmp r14, 1
     jne .fe_step
     ; inc qword [loop_var_addr]  (7 bytes: 48 FF 04 25 <addr32>)
@@ -636,6 +747,26 @@ codegen_emit_for_end:
     call codegen_patch_jump
     call codegen_patch_breaks
     call codegen_pop_cont
+    ; O2: if pinned loop exited, flush r15 → [i_addr] and clear pin
+    cmp byte [loop_pin_active], 0
+    je .fe_done
+    cmp r13, [loop_pin_var_idx]
+    jne .fe_done
+    ; emit mov [i_addr], r15 = 4D 89 3C 25 <addr32>
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x3C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r13
+    call get_var_va
+    call emit_d
+    mov byte [loop_pin_active], 0
+.fe_done:
+    dec qword [loop_pin_depth]
     pop r14
     pop r13
     pop r12
@@ -651,6 +782,8 @@ codegen_emit_for_start_dyn:
     push r14
     mov r12, rdi
     mov r13, rsi
+    ; O2: track nesting depth (no pin for dynamic loops)
+    inc qword [loop_pin_depth]
     ; for_step_val already set by parser via codegen_set_for_step; do not reset here
     mov rax, [break_jump_depth]
     mov r14, [break_base_depth]
@@ -965,7 +1098,41 @@ codegen_emit_pop_rbx:
     ret
 
 codegen_emit_mov_rax_var:
-    ; rdi=var_idx: emit mov rax,[var_addr]
+    ; rdi=var_idx: emit mov rax,[var_addr]  (O2: r15 if pinned; O1: rbp-rel if frame param)
+    ; O2: loop pin check — emit mov rax,r15 = 4C 89 F8
+    cmp byte [loop_pin_active], 0
+    je .mrv_no_pin
+    cmp rdi, [loop_pin_var_idx]
+    jne .mrv_no_pin
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    ret
+.mrv_no_pin:
+    ; O1: frame param check
+    push rdi
+    call codegen_find_frame_slot
+    pop rdi
+    cmp rax, -1
+    je .mrv_global
+    ; frame param at slot K: emit mov rax,[rbp-(K+1)*8] = 48 8B 45 <disp8>
+    mov rcx, rax
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x45
+    call emit_b
+    inc rcx
+    shl rcx, 3
+    neg rcx
+    mov al, cl
+    call emit_b
+    ret
+.mrv_global:
     push rdi
     mov al, 0x48
     call emit_b
@@ -981,7 +1148,41 @@ codegen_emit_mov_rax_var:
     ret
 
 codegen_emit_store_rax_to_var:
-    ; rdi=var_idx: emit mov [var_addr],rax
+    ; rdi=var_idx: emit mov [var_addr],rax  (O2: r15 if pinned; O1: rbp-rel if frame param)
+    ; O2: loop pin check — emit mov r15,rax = 49 89 C7
+    cmp byte [loop_pin_active], 0
+    je .srv_no_pin
+    cmp rdi, [loop_pin_var_idx]
+    jne .srv_no_pin
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    ret
+.srv_no_pin:
+    ; O1: frame param check
+    push rdi
+    call codegen_find_frame_slot
+    pop rdi
+    cmp rax, -1
+    je .srv_global
+    ; frame param at slot K: emit mov [rbp-(K+1)*8],rax = 48 89 45 <disp8>
+    mov rcx, rax
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x45
+    call emit_b
+    inc rcx
+    shl rcx, 3
+    neg rcx
+    mov al, cl
+    call emit_b
+    ret
+.srv_global:
     push rdi
     mov al, 0x48
     call emit_b
@@ -1898,9 +2099,27 @@ codegen_get_var_va_proxy:
     jmp get_var_va
 
 ; ── in-place inc/dec ──────────────────────────────────────────────────────────
-; ── caller-save / caller-restore primitives (Gap-1 fix) ──────────────────────
+; ── caller-save / caller-restore primitives (O1+O2 aware) ────────────────────
 codegen_emit_push_var_slot:
-    ; rdi=var_idx: emit push qword [var_addr] = FF 34 25 <addr32>
+    ; rdi=var_idx: push qword [var_addr]
+    ; O1: frame params protected by hardware frame — skip
+    ; O2: pinned var → push r15 = 41 57
+    push rdi
+    call codegen_find_frame_slot   ; rdi preserved; rax=slot or -1
+    pop rdi
+    cmp rax, -1
+    jne .pvs_skip                  ; frame param: hardware frame protects it
+    cmp byte [loop_pin_active], 0
+    je .pvs_global
+    cmp rdi, [loop_pin_var_idx]
+    jne .pvs_global
+    ; pinned: push r15 = 41 57
+    mov al, 0x41
+    call emit_b
+    mov al, 0x57
+    call emit_b
+    ret
+.pvs_global:
     push rdi
     mov al, 0xFF
     call emit_b
@@ -1912,9 +2131,29 @@ codegen_emit_push_var_slot:
     call get_var_va
     call emit_d
     ret
+.pvs_skip:
+    ret
 
 codegen_emit_pop_var_slot:
-    ; rdi=var_idx: emit pop qword [var_addr] = 8F 04 25 <addr32>
+    ; rdi=var_idx: pop qword [var_addr]
+    ; O1: frame params — skip
+    ; O2: pinned var → pop r15 = 41 5F
+    push rdi
+    call codegen_find_frame_slot
+    pop rdi
+    cmp rax, -1
+    jne .ppv_skip
+    cmp byte [loop_pin_active], 0
+    je .ppv_global
+    cmp rdi, [loop_pin_var_idx]
+    jne .ppv_global
+    ; pinned: pop r15 = 41 5F
+    mov al, 0x41
+    call emit_b
+    mov al, 0x5F
+    call emit_b
+    ret
+.ppv_global:
     push rdi
     mov al, 0x8F
     call emit_b
@@ -1926,9 +2165,30 @@ codegen_emit_pop_var_slot:
     call get_var_va
     call emit_d
     ret
+.ppv_skip:
+    ret
 
 codegen_emit_inc_var:
-    ; rdi=var_idx: emit inc qword [var_addr]; mov rax,[var_addr]
+    ; rdi=var_idx: emit inc [var_addr]; mov rax,[var_addr]  (O2: use r15 if pinned)
+    cmp byte [loop_pin_active], 0
+    je .eiv_global
+    cmp rdi, [loop_pin_var_idx]
+    jne .eiv_global
+    ; pinned: inc r15 = 49 FF C7; mov rax,r15 = 4C 89 F8
+    mov al, 0x49
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    ret
+.eiv_global:
     push rdi
     mov al, 0x48
     call emit_b
@@ -2320,6 +2580,183 @@ codegen_emit_each_end:
     call codegen_patch_breaks
     ; pop cont (registered for skip)
     call codegen_pop_cont
+    ; O2: decrement depth for dynamic loops (no pin flush needed since no pin was set)
+    dec qword [loop_pin_depth]
     pop r12
     pop rbx
+    ret
+
+; ══════════════════════════════════════════════════════════════════════════════
+; O1 / O2 / O4 new helpers
+; ══════════════════════════════════════════════════════════════════════════════
+
+; ── O1: internal helper – find frame slot for a var_idx ───────────────────────
+; rdi=var_idx → rax=slot K (0-based) or -1 (not a frame param)
+; Preserves rdi; clobbers rax, rcx, rdx only.
+codegen_find_frame_slot:
+    cmp byte [frame_active], 0
+    je .not_frame
+    xor ecx, ecx
+    movzx rdx, byte [frame_param_cnt]
+.scan:
+    cmp rcx, rdx
+    jge .not_frame
+    movzx eax, byte [frame_param_vars + rcx]
+    cmp rdi, rax
+    je .found
+    inc rcx
+    jmp .scan
+.found:
+    mov rax, rcx
+    ret
+.not_frame:
+    mov rax, -1
+    ret
+
+; ── O1: set current frame params (called from parser at protocol entry) ────────
+; rdi=param_cnt  rsi=ptr to byte array of param var indices
+codegen_set_frame:
+    push rbx
+    push rcx
+    movzx rbx, dil           ; param_cnt (byte)
+    mov byte [frame_active], 1
+    mov [frame_param_cnt], bh ; wrong — use byte store
+    ; fix: byte-store param_cnt from dil
+    mov [frame_param_cnt], dil
+    xor ecx, ecx
+.sf_copy:
+    cmp cl, bl
+    jge .sf_done
+    movzx eax, byte [rsi+rcx]
+    mov [frame_param_vars+rcx], al
+    inc cl
+    jmp .sf_copy
+.sf_done:
+    pop rcx
+    pop rbx
+    ret
+
+; ── O1: clear frame state (called at protocol exit) ──────────────────────────
+codegen_clear_frame:
+    mov byte [frame_active], 0
+    ret
+
+; ── O1: emit frame prologue: push rbp; mov rbp,rsp; sub rsp,N*8 ───────────────
+; rdi = param_count
+codegen_emit_frame_prologue:
+    push rdi
+    ; push rbp = 55
+    mov al, 0x55
+    call emit_b
+    ; mov rbp,rsp = 48 89 E5
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xE5
+    call emit_b
+    pop rdi
+    ; sub rsp, N*8
+    shl rdi, 3              ; N*8
+    cmp rdi, 127
+    jg .fp_imm32
+    ; sub rsp, imm8 = 48 83 EC <imm8>
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xEC
+    call emit_b
+    mov al, dil
+    call emit_b
+    ret
+.fp_imm32:
+    ; sub rsp, imm32 = 48 81 EC <imm32>
+    mov al, 0x48
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xEC
+    call emit_b
+    mov eax, edi
+    call emit_d
+    ret
+
+; ── O1: emit leave = C9 ───────────────────────────────────────────────────────
+codegen_emit_leave:
+    mov al, 0xC9
+    call emit_b
+    ret
+
+; ── O4: emit jmp rel32 to a protocol out_idx (like call_prot but jmp) ─────────
+; rdi = proto out_idx
+codegen_emit_jmp_prot:
+    mov al, 0xE9
+    call emit_b
+    mov rax, rdi
+    add rax, LOAD_BASE
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ret
+
+; ── O3: peephole optimiser ─────────────────────────────────────────────────────
+; Scans out_buffer[0..out_idx-1] for hot patterns and eliminates them.
+; Pattern A: 48 8B 04 25 <a4> 48 89 C7  → 48 8B 3C 25 <a4> 90 90 90
+;   (load [abs32] into rax then mov rax,rdi  →  direct load into rdi + 3 NOPs)
+; Pattern B: 50 58  (push rax; pop rax)  → 90 90
+codegen_peephole:
+    lea rsi, [out_buffer]
+    mov rcx, [out_idx]
+    xor rbx, rbx              ; scan index
+.ph_loop:
+    cmp rbx, rcx
+    jge .ph_done
+    ; ── Pattern A (11 bytes) ─────────────────────────────────────────────────
+    mov rdx, rcx
+    sub rdx, rbx
+    cmp rdx, 11
+    jl .ph_b
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi],   0x48
+    jne .ph_b
+    cmp byte [rdi+1], 0x8B
+    jne .ph_b
+    cmp byte [rdi+2], 0x04
+    jne .ph_b
+    cmp byte [rdi+3], 0x25
+    jne .ph_b
+    ; bytes 4..7 are the address — skip check
+    cmp byte [rdi+8],  0x48
+    jne .ph_b
+    cmp byte [rdi+9],  0x89
+    jne .ph_b
+    cmp byte [rdi+10], 0xC7
+    jne .ph_b
+    ; match: change ModRM 04→3C; NOP last 3 bytes
+    mov byte [rdi+2],  0x3C
+    mov byte [rdi+8],  0x90
+    mov byte [rdi+9],  0x90
+    mov byte [rdi+10], 0x90
+    add rbx, 8
+    jmp .ph_loop
+.ph_b:
+    ; ── Pattern B (2 bytes) ──────────────────────────────────────────────────
+    cmp rdx, 2
+    jl .ph_next
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi],   0x50
+    jne .ph_next
+    cmp byte [rdi+1], 0x58
+    jne .ph_next
+    mov byte [rdi],   0x90
+    mov byte [rdi+1], 0x90
+    add rbx, 2
+    jmp .ph_loop
+.ph_next:
+    inc rbx
+    jmp .ph_loop
+.ph_done:
     ret
