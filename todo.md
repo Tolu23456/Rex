@@ -164,7 +164,48 @@ Reading `seq[i]` emits `mov rax, [rbx + rcx*8 + 16]` with no check that `rcx < l
 
 ## Stage 8 — Speed / Binary Quality
 - [x] Maintain `< 1 KB` binary size target for compiled output (currently ~500 bytes for basic programs)
-- [ ] Benchmarks and optimizations
+- [x] **O2**: Loop counter pinned to `r15` — eliminates all memory reads/writes for the induction variable
+- [x] **O6**: Expression spill to `r10`/`r11` — replaces `push`/`pop` in expression evaluation with register moves
+- [x] **O13**: Accumulator promotion to `r14` with retroactive-patch for read-before-write patterns
+- [x] **O14**: Strength-reduction add fusion — `:accum = accum + pin` → `add r14, r15` (single instruction; hot path 6→2)
+
+### Pending Optimisations
+
+#### O15 — Strength-reduction fusion for `-`, `*`, `/` operators
+Extend O14 to cover all four arithmetic operators on the `accum`+`pin` register pair:
+
+| Pattern | Fused instruction | Encoding | Notes |
+|---|---|---|---|
+| `:a = a - i` | `sub r14, r15` | `4D 29 FE` | 3 bytes, direct |
+| `:a = a * i` | `imul r14, r15` | `4D 0F AF F7` | 4 bytes, direct |
+| `:a = a / i` | `mov rax,r14` + `cqo` + `idiv r15` + `mov r14,rax` | ~11 bytes | 4 instructions; idiv has no register-only 2-operand form |
+
+All three share the same detection machinery as O14 (`sr_add_candidate`, `sr_add_rhs_is_pin`, `sr_add_patch_pos`). The only change is in `codegen_emit_sub_rax_rbx` / `codegen_emit_imul_rax_rbx` / `codegen_emit_div_rax_rbx`: check the same flags and emit the corresponding fused sequence instead of the generic `rax`/`rbx` form.
+
+Subtraction needs care: Rex currently computes `rbx - rax` → `rax` (negate-then-add pattern). The fused `sub r14, r15` is `r14 -= r15`, which is `accum - pin`. Verify parser operand order matches before wiring.
+
+**Expected gain:** same 6→2 (or 6→4 for division) on any tight accumulate-loop.
+
+---
+
+#### P1 — rbp-relative stack frames for protocol locals (fib fix)
+**The fib benchmark is 3–6× slower than C** (measured: 1261ms vs 382ms, ~3.3×; varies with VM load).
+The root cause is the push/pop global-memory emulation for recursive protocol parameters: every
+call to `fib(n)` emits `push qword [param_addr]` at entry and `pop qword [param_addr]` at every
+`ret` path. At ~267 million recursive calls, this is ~534 million extra memory round-trips on top
+of the `call`/`ret` overhead.
+
+**Fix:** Allocate protocol locals on the real hardware stack via `rbp`-relative addressing:
+- On protocol entry: `push rbp; mov rbp, rsp; sub rsp, N*8` (N = param count + local count).
+- Map each param/local var to `[rbp - K*8]` instead of a `var_table` global slot.
+- Load params from ABI registers (`rdi`, `rsi`, …) directly into `[rbp-8]`, `[rbp-16]`, etc.
+- On `ret`: `mov rsp, rbp; pop rbp; ret` — single epilogue, no per-param pop loop.
+
+This eliminates O(params × call-depth) global-memory accesses and replaces them with a single
+`push rbp` / `pop rbp` pair, giving the CPU's stack engine a chance to optimise the frame.
+
+**Estimated gain:** 3–4× on recursive workloads; fib(42) should approach 400–500ms.
+**Affects:** `codegen_emit_prot_start`, `proto_emit_restore`, `codegen_find_frame_slot`, `parser.asm` prot_se loop.
 
 ---
 
