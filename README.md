@@ -1,6 +1,6 @@
-# Rex Bootstrap Compiler — V5.0
+# Rex Bootstrap Compiler — V0.1
 
-A hand-written, self-contained x86-64 ELF compiler for the **Rex V5.0** language,
+A hand-written, self-contained x86-64 ELF compiler for the **Rex V0.1** language,
 built entirely in NASM assembly with **zero external dependencies** in the output binary.
 
 ---
@@ -76,7 +76,7 @@ built entirely in NASM assembly with **zero external dependencies** in the outpu
 
 ---
 
-## Rex V5.0 language — implemented feature set
+## Rex V0.1 language — implemented feature set
 
 ### Types
 

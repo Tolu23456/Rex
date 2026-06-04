@@ -1,4 +1,4 @@
-# Rex V5.0 — Project Rules
+# Rex V0.1 — Project Rules
 
 ## Testing
 

@@ -1,11 +1,11 @@
-# Rex V5.0 Compiler — Changelog
+# Rex V0.1 Compiler — Changelog
 
 All notable changes to the Rex bootstrap compiler are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [0.1] — 2026-06-04
 
 ### Added
 - `docs/grammar.md` — formal EBNF grammar covering all 35 productions: every

@@ -1,4 +1,4 @@
-# Rex V5.0 — Language Syntax Reference
+# Rex V0.1 — Language Syntax Reference
 
 **Status markers used in this document:**
 - ✅ Implemented and tested

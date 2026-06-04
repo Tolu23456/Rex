@@ -1,4 +1,4 @@
-# Rex V5.0 Compiler — Implementation Todo
+# Rex V0.1 Compiler — Implementation Todo
 
 ## Stage 0 — Core Infrastructure (Complete ✅)
 - [x] Modular 6-folder architecture: `main/`, `lexer/`, `parser/`, `codegen/`, `headers/`, `runtime/`
