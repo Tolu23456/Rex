@@ -27,5 +27,16 @@ description: Status markers, cross-doc consistency rules, and the 5-feature doc 
 ## grammar.md
 35 numbered EBNF sections. All statement forms, 5-tier expression hierarchy,
 literal syntax, operator precedence table, reserved keyword list, variable
-table layout (64-byte), protocol table layout (48-byte). Planned productions
-included and marked 📋.
+table layout (64-byte, VAR_MAX=256), protocol table layout (48-byte). Planned
+productions included and marked 📋.
+**Correction to watch**: VAR_MAX = 256 (from rex_defs.inc), not 128. Already
+fixed in grammar.md section 34.
+
+## opcodes.md
+29 sections. Derived entirely from codegen/codegen.asm + include/rex_defs.inc.
+Covers: address model, all var loads/stores, all integer/float/bitwise/boolean
+ops, comparisons (setCC table), all control flow jumps (jz/jnz/jge/jmp),
+for/while/break/continue byte patterns, protocol call/ret, output dispatch,
+string inline layout, sequence alloc/push/pop/len/cap with grow block,
+++/--, swap, abs (cmovs), err, mm_switch, jump patch stacks, quick lookup
+table. All RT_*_OFFSET constants confirmed from rex_defs.inc.

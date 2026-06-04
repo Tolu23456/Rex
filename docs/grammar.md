@@ -578,7 +578,7 @@ offset  size  field
 49      15    (reserved / padding to 64 bytes)
 ```
 
-Maximum 128 entries (`VAR_MAX`). `var_add` halts with a compile-time error if
+Maximum 256 entries (`VAR_MAX`). `var_add` halts with a compile-time error if
 this ceiling is exceeded.
 
 ---

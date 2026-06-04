@@ -10,8 +10,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - `docs/grammar.md` — formal EBNF grammar covering all 35 productions: every
   statement, expression tier, literal form, operator precedence table, reserved
-  keyword list, variable table layout (64-byte entries), and protocol table
-  layout (48-byte entries). Planned productions marked 📋 for completeness.
+  keyword list, variable table layout (64-byte entries, VAR_MAX=256), and
+  protocol table layout (48-byte entries). Planned productions marked 📋.
+- `docs/opcodes.md` — machine-code emit reference: every byte sequence Rex
+  emits keyed by language construct. Covers address model, all arithmetic,
+  bitwise, boolean, comparison, control-flow, loop, protocol, string,
+  sequence, abs, swap, inc/dec, memory-manager, and exit patterns. Derived
+  directly from `codegen/codegen.asm` and `include/rex_defs.inc`.
 
 ### Planned
 - `not` operator — `xor rax, 1` for `bool`, `not rax` for `int`
