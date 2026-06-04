@@ -9,6 +9,7 @@ extern codegen_emit_for_start, codegen_emit_for_end
 extern codegen_emit_while_start, codegen_emit_while_end
 extern codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
 extern codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
+extern codegen_emit_push_var_slot, codegen_emit_pop_var_slot
 extern codegen_emit_assign_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
 extern codegen_emit_mm_switch, codegen_emit_gc_switch, out_idx
 extern codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
@@ -366,6 +367,7 @@ parse_factor:
     je .prt_skip
     mov r12, rax
     call lexer_next
+    mov rbx, [var_count]        ; snapshot var_count for caller-save (Gap-1)
     cmp byte [tok_type], TOK_LPAREN
     jne .prt_call
     call lexer_next
@@ -400,8 +402,28 @@ parse_factor:
     jne .prt_do
     call lexer_next
 .prt_do:
+    ; ── Gap-1 fix: caller-save all in-scope vars before call ─────────────────
+    xor r13, r13                ; loop counter i = 0
+.prt_cs:
+    cmp r13, rbx                ; i < var_count snapshot?
+    jge .prt_cs_done
+    mov rdi, r13
+    call codegen_emit_push_var_slot
+    inc r13
+    jmp .prt_cs
+.prt_cs_done:
+    ; ── emit the actual call ──────────────────────────────────────────────────
     mov rdi, r12
     call codegen_emit_call_prot
+    ; ── caller-restore all in-scope vars in reverse order ─────────────────────
+.prt_cr:
+    test rbx, rbx
+    jz .prt_cr_done
+    dec rbx
+    mov rdi, rbx
+    call codegen_emit_pop_var_slot
+    jmp .prt_cr
+.prt_cr_done:
     movzx ecx, byte [proto_ret_type]
     test cl, cl
     jz .prt_default_type

@@ -253,27 +253,61 @@ rt_sip:
     ret
     times RT_SIP_SIZE - ($ - rt_sip) db 0x90
 
-; ── rt_alc: mmap allocator — rdi=size → rax=ptr ─────────────────────────────
+; ── rt_alc: mmap / bump-pool allocator — rdi=size → rax=ptr ─────────────────
+; Layout (4096 bytes total):
+;   [0..code]  allocator code
+;   [4072]     pool_base  dq  (absolute addr 0x401D65)
+;   [4080]     pool_bump  dq  (absolute addr 0x401D6D)
+;   [4088]     mode       dq  (absolute addr 0x401D75, written by codegen_emit_mm_switch)
+;
+; mode == 0 → arena: one mmap per alloc (default)
+; mode != 0 → pool:  bump-pointer from a lazy-inited 64 MB slab
 rt_alc:
     push rbx
-    mov rbx, rdi            ; save requested size
-    ; align size to page boundary if needed (minimum 4096)
+    mov rbx, rdi            ; rbx = requested size
+    add rbx, 7              ; align to 8 bytes
+    and rbx, -8
+    cmp qword [0x401D75], 0 ; mode == 0 (arena)?
+    jne .pool               ; non-zero → pool mode
+.mmap:
     test rbx, rbx
-    jnz .sz_ok
+    jnz .mmap_sz
     mov rbx, 4096
-.sz_ok:
+.mmap_sz:
     mov rax, 9              ; sys_mmap
-    xor rdi, rdi            ; addr = NULL (kernel chooses)
+    xor rdi, rdi            ; addr = NULL
     mov rsi, rbx            ; length
     mov rdx, 3              ; PROT_READ | PROT_WRITE
-    mov r10, 0x22           ; MAP_PRIVATE | MAP_ANONYMOUS
+    mov r10d, 0x22          ; MAP_PRIVATE | MAP_ANONYMOUS
     mov r8, -1              ; fd = -1
-    xor r9, r9              ; offset = 0
+    xor r9d, r9d            ; offset = 0
     syscall
     pop rbx
     ret
-    ; .mode variable must be at offset 4088 within rt_alc (last 8 bytes of 4096)
-    times 4088 - ($ - rt_alc) db 0x90
+.pool:
+    cmp qword [0x401D65], 0 ; pool_base == 0 (first use)?
+    jne .pool_alloc
+    ; lazy init: mmap a 64 MB pool once
+    push rbx                ; save aligned size across mmap
+    mov rax, 9
+    xor rdi, rdi
+    mov esi, 67108864       ; 64 MB
+    mov rdx, 3
+    mov r10d, 0x22
+    mov r8, -1
+    xor r9d, r9d
+    syscall                 ; rax = pool base ptr
+    pop rbx
+    mov qword [0x401D65], rax   ; pool_base = ptr
+    mov qword [0x401D6D], rax   ; pool_bump = ptr
+.pool_alloc:
+    mov rax, qword [0x401D6D]   ; rax = current bump (= allocation address)
+    add qword [0x401D6D], rbx   ; advance bump by aligned size
+    pop rbx
+    ret
+    times 4072 - ($ - rt_alc) db 0x90
+.pool_base: dq 0
+.pool_bump: dq 0
 .mode: dq 0
 
 ; ── rt_prq: print error string (rdi=ptr) to stderr + exit(1) ─────────────────

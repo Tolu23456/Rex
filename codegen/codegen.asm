@@ -8,6 +8,7 @@ global codegen_emit_for_start, codegen_emit_for_end
 global codegen_emit_while_start, codegen_emit_while_end
 global codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
 global codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
+global codegen_emit_push_var_slot, codegen_emit_pop_var_slot
 global codegen_emit_assign_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
 global codegen_emit_mm_switch, codegen_emit_gc_switch
 global codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
@@ -1897,6 +1898,35 @@ codegen_get_var_va_proxy:
     jmp get_var_va
 
 ; ── in-place inc/dec ──────────────────────────────────────────────────────────
+; ── caller-save / caller-restore primitives (Gap-1 fix) ──────────────────────
+codegen_emit_push_var_slot:
+    ; rdi=var_idx: emit push qword [var_addr] = FF 34 25 <addr32>
+    push rdi
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x34
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
+    ret
+
+codegen_emit_pop_var_slot:
+    ; rdi=var_idx: emit pop qword [var_addr] = 8F 04 25 <addr32>
+    push rdi
+    mov al, 0x8F
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
+    ret
+
 codegen_emit_inc_var:
     ; rdi=var_idx: emit inc qword [var_addr]; mov rax,[var_addr]
     push rdi
