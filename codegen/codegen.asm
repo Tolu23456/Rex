@@ -2589,6 +2589,8 @@ codegen_emit_each_start:
     mov r12, rdi            ; seq_var_idx
     mov r13, rsi            ; elem_var_idx
     mov r14, rdx            ; ctr_var_idx
+    ; O2: track nesting depth (matches dec in each_end)
+    inc qword [loop_pin_depth]
     ; push break base (same as codegen_emit_loop_base)
     mov rax, [break_jump_depth]
     mov rbx, [break_base_depth]
@@ -2787,8 +2789,6 @@ codegen_set_frame:
     push rcx
     movzx rbx, dil           ; param_cnt (byte)
     mov byte [frame_active], 1
-    mov [frame_param_cnt], bh ; wrong — use byte store
-    ; fix: byte-store param_cnt from dil
     mov [frame_param_cnt], dil
     mov byte [frame_local_cnt], 0   ; O5: reset locals on each protocol entry
     xor ecx, ecx
