@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `docs/grammar.md` — formal EBNF grammar covering all 35 productions: every
+  statement, expression tier, literal form, operator precedence table, reserved
+  keyword list, variable table layout (64-byte entries), and protocol table
+  layout (48-byte entries). Planned productions marked 📋 for completeness.
+
 ### Planned
 - `not` operator — `xor rax, 1` for `bool`, `not rax` for `int`
 - `is` / `is not` — semantic identity check via `cmp` + `sete`/`setne`

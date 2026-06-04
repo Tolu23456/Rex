@@ -32,6 +32,7 @@ built entirely in NASM assembly with **zero external dependencies** in the outpu
 │                         #   rt_prq (dict/SipHash), rt_alc, rt_err
 │
 ├── docs/
+│   ├── grammar.md               # Formal EBNF grammar (all productions, precedence, layouts)
 │   ├── language_comparison.md   # Rex vs C / C++ / Rust / Python feature matrix
 │   ├── speed_comparison.md      # Compilation and runtime speed benchmarks
 │   ├── rex_ir.md                # IR design spec for future optimisation passes
@@ -264,6 +265,7 @@ offset 263:  E8 xx xx xx xx       call rt_pri        ← prints 4
 | `todo.md` | Stage-by-stage implementation checklist |
 | `rules.md` | Testing rules, code style rules, architecture rules |
 | `CHANGELOG.md` | Version history |
+| `docs/grammar.md` | Formal EBNF grammar — all productions, precedence, type and table layouts |
 | `docs/language_comparison.md` | Rex vs C / C++ / Rust / Python feature matrix |
 | `docs/speed_comparison.md` | Compilation and runtime speed benchmarks |
 | `docs/rex_ir.md` | IR specification for the planned optimisation layer |
