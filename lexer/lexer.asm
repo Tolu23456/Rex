@@ -612,7 +612,10 @@ lexer_classify:
     je .kr
 .nr:
     cmp eax, 0x706F7473
+    jne .nso
+    cmp byte [tok_ident+4], 0
     je .kso
+.nso:
     cmp eax, 0x65736C65
     je .kel
     cmp eax, 0x66696C65
@@ -633,19 +636,34 @@ lexer_classify:
     cmp eax, 0x00716573
     je .kseq
     cmp eax, 0x68737570
+    jne .npush
+    cmp byte [tok_ident+4], 0
     je .kpush
+.npush:
     cmp eax, 0x00706f70
     je .kpop
     cmp eax, 0x006e656c
     je .klen
     cmp eax, 0x70696b73
+    jne .nskip
+    cmp byte [tok_ident+4], 0
     je .kskip
+.nskip:
     cmp eax, 0x73736170
+    jne .npass
+    cmp byte [tok_ident+4], 0
     je .kpass
+.npass:
     cmp eax, 0x68636165
+    jne .neach
+    cmp byte [tok_ident+4], 0
     je .keach
+.neach:
     cmp eax, 0x6e656877
+    jne .nwhen
+    cmp byte [tok_ident+4], 0
     je .kwhen
+.nwhen:
     cmp eax, 0x65707974
     jne .ntype
     cmp dword [tok_ident+4], 0x666f

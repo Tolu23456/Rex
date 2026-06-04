@@ -115,3 +115,4 @@ RT_SIP_OFFSET equ 2429
 RT_ALC_OFFSET equ 3453
 RT_PRQ_OFFSET equ 7549
 CODE_START equ 8573
+GC_MODE_ADDR equ VAR_STORAGE_BASE - 8  ; runtime gc-mode word (written by use gc)

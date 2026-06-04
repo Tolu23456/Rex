@@ -22,7 +22,7 @@
 - [x] `if :i == N:` inside loop body (loop var support)
 - [x] `when` statement: Expressive routing block (`when x: / is N:` chain with linear cmp/jz); O(1) jump table optimisation pending
 - [x] `pass`: Zero-byte semantic placeholder for empty blocks or unimplemented protocols
-- [ ] Loop-Level `else:`: Executes if parent loop finishes naturally without triggering `stop`
+- [x] Loop-Level `else:`: Executes if parent loop finishes naturally without triggering `stop` (for / while / repeat / each — hidden `__le` flag var + flag stack in codegen)
 
 ---
 
@@ -51,7 +51,7 @@
 - [x] `codegen_output_rax_bool` — routes bool output to `rt_prb_blob`
 - [x] `codegen_emit_cmp_rax_rbx_jcc` — generic comparison-then-branch emitter
 - [x] `and` / `or`: Logical operators — short-circuit evaluation implemented
-- [ ] `not`: Boolean/bitwise inversion mapping to `xor rax, 1` (bool) or `not rax` (int)
+- [x] `not`: Boolean/bitwise inversion — `not rax` (int) or `xor rax,1` (bool) — type-dispatched in parse_factor + parse_unary
 - [ ] `is` / `is not`: Semantic identity and type-verification (evaluates to hardware `cmp`)
 
 ---
@@ -61,7 +61,7 @@
 - [x] Dynamic sequences — `seq x`, `push x v`, `pop x` (expr), `len x` (expr)
 - [x] `seq push` grow-on-overflow — inline 57-byte grow block doubles capacity automatically
 - [ ] `in` operator: Membership check via SipHash linear probing (dict) or iteration sweeps (seq/str)
-- [ ] `each` iterator: Cache-aligned counter loop for sequential collection sweeping
+- [x] `each` iterator: `each :i in s:` — counter var `__ec`, hidden init before loop top, `mov rax,[rbx+rax*8+16]` element load, else: support
 - [ ] Sets and Tuples
 
 ---
@@ -72,13 +72,13 @@
 - [x] Protocol return to variables — `@name(args)` usable as expression atom in `parse_factor`
 - [x] Float return type preserved through protocol call — `proto_ret_type` BSS mirrors `[entry+47]`
 - [x] Protocol local variables reclaimed via `scope_stack` save/restore
-- [ ] Per-call stack frames for recursive protocols (callee-saved regs, not yet implemented)
+- [x] Per-call stack frames for recursive protocols — `.prot_push_lp` pushes params, `.prot_se` loads from ABI regs, `proto_emit_restore` pops in reverse order
 
 ---
 
 ## Stage 6 — Memory Allocator Contexts
 - [x] `use mm pool gc X:` / `use mm arena gc X:` — full string comparison
-- [ ] Dynamic switching of garbage collectors
+- [x] Dynamic switching of garbage collectors — `codegen_emit_gc_switch(rdi=mode)` emits `mov [GC_MODE_ADDR], rdi`; GC_MODE_ADDR = VAR_STORAGE_BASE-8
 
 ---
 
@@ -97,18 +97,6 @@
 
 These are confirmed defects in the current implementation that are not yet resolved.
 See `docs/issues.md` for full descriptions.
-
-### High
-
-#### B-1: Recursive protocols produce wrong results
-Protocol parameters are stored in global `var_table` slots (at `VAR_STORAGE_BASE + idx*64`).
-A recursive call overwrites the caller's copy of those slots before the caller resumes.
-`fib(n)` calling `fib(n-1)` destroys `n` in the caller's frame.
-**Fix required:** Per-call stack frames — push/pop param vars onto the hardware stack.
-**Affects:** `parser/parser.asm` `.protocol` + `.prot_store_params`
-**Tracker:** `docs/issues.md` #18
-
----
 
 ### Medium
 
@@ -201,10 +189,10 @@ Reading `seq[i]` emits `mov rax, [rbx + rcx*8 + 16]` with no check that `rcx < l
 - [ ] `blast` / `pipe`: Vectorized iteration unrolling into `movntdq` / `movdqa` (bypassing CPU cache).
 - [x] `skip N`: Multi-level loop continue. `codegen_emit_skip` + `codegen_push_cont`/`codegen_pop_cont` implemented. `skip N` continues the Nth enclosing loop's condition check.
 - [ ] `stop N`: Multi-level loop break. `stop N` breaks N levels of nested loops simultaneously. Requires depth counter in the break-patch stack.
-- [ ] Loop `else:`: Executes if parent loop finishes naturally without triggering `stop`. Requires a per-loop boolean flag variable.
-- [ ] `repeat N:`: Counted loop with no explicit counter variable. Emits a single `dec`+`jnz` hardware loop.
+- [x] Loop `else:`: Implemented — `for`, `while`, `repeat`, `each` all support `else:` via `__le` flag + `loop_else_flag_stack` in codegen.
+- [x] `repeat N:`: Counted loop — hidden `__rp` counter var, `dec`+`jnz` at end, else: support.
 - [ ] `match`: Structural pattern-matching. Sequential integers map to high-speed O(1) Jump Tables.
-- [ ] `unreachable` / `assert`: Optimizing crash boundary guards emitting `ud2` or linking to `rt_err_blob`.
+- [x] `unreachable` / `assert`: Crash boundary guards — `unreachable` emits `ud2`; `assert` emits `test`+`ud2` on false.
 
 ### IV. Bare-Metal Hardware Atoms & Intrinsics
 - [x] `typeof`: Compile-time reflection returning built-in integer token for `cur_type`.

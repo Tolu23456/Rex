@@ -40,6 +40,8 @@ global codegen_emit_abs_rax
 global codegen_emit_cap_rax
 global codegen_set_for_step, for_step_val
 global codegen_emit_exit1
+global codegen_push_loop_else_flag, codegen_pop_loop_else_flag, codegen_peek_loop_else_flag
+global codegen_emit_each_start, codegen_emit_each_end
 extern elf_header, program_header
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
@@ -61,6 +63,8 @@ cont_base_depth:  resq 1
 prot_jmp_idx:     resq 1
 prot_jmp_live:    resb 1
 for_step_val:     resq 1
+loop_else_flag_stack: resq 32
+loop_else_flag_depth: resq 1
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -137,6 +141,7 @@ codegen_write_headers:
     ret
 
 codegen_init:
+    mov qword [for_step_val], 1
     mov al, 0xE9
     call emit_b
     mov eax, RT_TOTAL_SIZE
@@ -725,6 +730,32 @@ codegen_emit_loop_base:
 
 ; ── break / continue ──────────────────────────────────────────────────────────
 codegen_emit_break:
+    push rbx
+    ; if there is an active loop-else flag, mark the loop as broken (set flag=1)
+    cmp qword [loop_else_flag_depth], 0
+    je .do_break
+    mov rax, [loop_else_flag_depth]
+    dec rax
+    lea rcx, [loop_else_flag_stack]
+    mov rdi, [rcx+rax*8]          ; peek top: flag_var_idx
+    cmp rdi, -1
+    je .do_break
+    ; emit: mov qword [flag_addr], 1  (48 C7 04 25 <addr32> 01 00 00 00)
+    call get_var_va                ; rdi=var_idx → rax=var_addr
+    mov rbx, rax                   ; save addr (get_var_va only uses rdi/rax)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rax, rbx
+    call emit_d                    ; emit flag_addr as imm32
+    mov eax, 1
+    call emit_d                    ; emit immediate value 1
+.do_break:
     mov al, 0xE9
     call emit_b
     mov rax, [out_idx]
@@ -734,6 +765,7 @@ codegen_emit_break:
     inc qword [break_jump_depth]
     xor eax, eax
     call emit_d
+    pop rbx
     ret
 
 codegen_patch_breaks:
@@ -907,7 +939,17 @@ codegen_emit_mm_switch:
 
 codegen_emit_gc_switch:
     ; rdi = gc mode (0=sweep,1=ref,2=gen,3=inc,4=region)
-    ; stub: GC runtime not yet implemented — no code emitted
+    ; emit: mov qword [GC_MODE_ADDR], rdi   (48 89 3C 25 <addr32>)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x3C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov eax, GC_MODE_ADDR
+    call emit_d
     ret
 
 ; ── expression emit helpers ───────────────────────────────────────────────────
@@ -2045,4 +2087,209 @@ codegen_emit_exit1:
     call emit_b
     mov al, 0x05
     call emit_b
+    ret
+
+; ── loop-else flag stack ───────────────────────────────────────────────────────
+; Each loop pushes its __le flag variable's var_idx (or -1 for no flag).
+; codegen_emit_break peeks the top and emits flag-set code before the JMP.
+
+codegen_push_loop_else_flag:
+    ; rdi = flag_var_idx  (-1 = sentinel / no flag for this loop)
+    mov rax, [loop_else_flag_depth]
+    lea rcx, [loop_else_flag_stack]
+    mov [rcx+rax*8], rdi
+    inc qword [loop_else_flag_depth]
+    ret
+
+codegen_pop_loop_else_flag:
+    ; Returns flag_var_idx in rax  (-1 if stack empty)
+    cmp qword [loop_else_flag_depth], 0
+    je .empty
+    dec qword [loop_else_flag_depth]
+    mov rax, [loop_else_flag_depth]
+    lea rcx, [loop_else_flag_stack]
+    mov rax, [rcx+rax*8]
+    ret
+.empty:
+    mov rax, -1
+    ret
+
+codegen_peek_loop_else_flag:
+    ; Returns top of stack in rax  (-1 if empty or sentinel)
+    cmp qword [loop_else_flag_depth], 0
+    je .empty
+    mov rax, [loop_else_flag_depth]
+    dec rax
+    lea rcx, [loop_else_flag_stack]
+    mov rax, [rcx+rax*8]
+    ret
+.empty:
+    mov rax, -1
+    ret
+
+; ── each iterator codegen ──────────────────────────────────────────────────────
+; codegen_emit_each_start(rdi=seq_var_idx, rsi=elem_var_idx, rdx=ctr_var_idx)
+;   Emits (in generated binary):
+;     ctr = 0                            (once, before loop top — init only)
+;   [loop top]:
+;     rbx = *seq_ptr                     (load heap sequence pointer)
+;     rax = ctr                          (load counter)
+;     cmp rax, [rbx+8]                   (compare vs length)
+;     jge exit                           (exit when counter >= length)
+;     rax = [rbx + rax*8 + 16]          (load element[ctr])
+;     *elem = rax                        (write to user variable)
+;   Returns loop_top_pc (offset in out_buffer) in rax.
+
+codegen_emit_each_start:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi            ; seq_var_idx
+    mov r13, rsi            ; elem_var_idx
+    mov r14, rdx            ; ctr_var_idx
+    ; push break base (same as codegen_emit_loop_base)
+    mov rax, [break_jump_depth]
+    mov rbx, [break_base_depth]
+    lea rcx, [break_base_stack]
+    mov [rcx+rbx*8], rax
+    inc qword [break_base_depth]
+    ; emit: mov qword [ctr_addr], 0  (48 C7 04 25 addr 00 00 00 00)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r14
+    call get_var_va
+    call emit_d
+    xor eax, eax
+    call emit_d
+    ; save loop top (condition-check start, AFTER the one-time init)
+    mov r15, [out_idx]
+    ; push cont target (for skip)
+    mov rdi, r15
+    call codegen_push_cont
+    ; emit: mov rbx, [seq_ptr_addr]  (48 8B 1C 25 addr)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r12
+    call get_var_va
+    call emit_d
+    ; emit: mov rax, [ctr_addr]  (48 8B 04 25 addr)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r14
+    call get_var_va
+    call emit_d
+    ; emit: cmp rax, [rbx+8]  (48 3B 43 08)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x3B
+    call emit_b
+    mov al, 0x43
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; emit: jge exit  (0F 8D + placeholder rel32)
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov rax, [out_idx]
+    mov rbx, [jump_patch_depth]
+    lea rcx, [jump_patch_stack]
+    mov [rcx+rbx*8], rax
+    inc qword [jump_patch_depth]
+    xor eax, eax
+    call emit_d
+    ; emit: mov rax, [rbx+rax*8+16]  (48 8B 44 C3 10)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; emit: mov [elem_addr], rax  (48 89 04 25 addr)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, r13
+    call get_var_va
+    call emit_d
+    ; return loop_top_pc
+    mov rax, r15
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; codegen_emit_each_end(rdi=loop_top_pc, rsi=ctr_var_idx)
+;   Emits (in generated binary):
+;     inc qword [ctr_addr]
+;     jmp loop_top
+;   Then patches the jge exit and all break jumps.
+
+codegen_emit_each_end:
+    push rbx
+    push r12
+    mov r12, rsi            ; ctr_var_idx
+    ; emit: inc qword [ctr_addr]  (48 FF 04 25 addr)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    push rdi                ; save loop_top_pc
+    mov rdi, r12
+    call get_var_va
+    call emit_d             ; emit ctr_addr
+    pop rdi                 ; restore loop_top_pc
+    ; emit: jmp loop_top  (E9 rel32)
+    ; rel32 = loop_top_pc - (out_idx_after_E9 + 4)
+    mov al, 0xE9
+    call emit_b
+    mov rax, rdi            ; loop_top_pc (offset in out_buffer)
+    mov rdx, [out_idx]      ; position of the rel32 field
+    add rdx, 4              ; position of next instruction
+    sub rax, rdx            ; rel32 = target - next_instr (LOAD_BASE cancels)
+    call emit_d
+    ; patch the jge exit jump
+    call codegen_patch_jump
+    ; patch all break jumps
+    call codegen_patch_breaks
+    ; pop cont (registered for skip)
+    call codegen_pop_cont
+    pop r12
+    pop rbx
     ret
