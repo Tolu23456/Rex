@@ -138,12 +138,35 @@ Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
 ## Benchmark — Measured Numbers (June 2026, latest run)
-- Rex sum (1B): 605ms best (3.2× FASTER than C 1947ms — C uses volatile)
-- Rex fib(42): 1238ms best (3.3× slower than C 377ms)
-- Rex seq-push (500k): 9ms best (6.4× faster than C malloc/free 58ms)
+- Rex sum (1B): **804ms** correct output `499999999500000000` (2.4× faster than C 1947ms — C uses volatile)
+- Rex fib(42): 2222ms (5.9× slower than C 377ms — VM load varies; earlier 1238ms also measured)
+- Rex seq-push (500k): 12ms (4.8× faster than C malloc/free 58ms)
 - Rex binary size ~8595 bytes (minimal) vs C ~15800 bytes (1.8× smaller)
 - Rex startup ~3ms vs C ~8ms (~2.7× faster)
-- NOTE: sum reversal (Rex faster) is because C bench uses `volatile` which kills optimization.
+
+## For-loop Init Address Corruption Bug (FIXED)
+In `codegen_emit_for_start`, the zero-path and 32-bit non-zero path both call
+`get_var_va` (returns VA in rax), then immediately emit `mov al, 0x89` / `0x04` / `0x25`
+for the `mov [i_addr],eax` encoding. Each `mov al,*` clobbers the low byte of rax,
+corrupting the VA before `emit_d` uses it (e.g. 0x440040 → 0x440025).
+**Fix:** `mov rbx, rax` after `get_var_va`; `mov rax, rbx` before `emit_d`.
+**Rule:** Whenever instruction-byte emissions (`mov al,*; call emit_b`) must be
+followed by `call emit_d` using a previously-loaded address, save rax to rbx first.
+The `.fs_init64` path (which calls `emit_d` immediately after `get_var_va`) is the
+correct pattern to follow.
+
+## O13 Accumulator — Retroactive-Patch for Read-Before-Write (FIXED)
+O13 promotes a loop variable to r14 on its first STORE. For `:sum = sum + i` the
+variable is LOADED first — that load was emitted as `mov rax,[mem]` (8 bytes, baked
+into the loop body machine code). Every iteration then read stale memory, ignoring r14.
+**Fix:** `loop_accum_read_first` + `loop_accum_load_patch_pos` BSS fields.
+1. In `.mrv_global`: if in outermost pinned loop and accum not yet active, set
+   `loop_accum_read_first=1` and record `out_idx` as `loop_accum_load_patch_pos`.
+2. In `.srv_first_check`: if `loop_accum_read_first==1`, overwrite the 8 bytes at
+   `loop_accum_load_patch_pos` with `4C 89 F0 90 90 90 90 90` (mov rax,r14 + 5 NOPs),
+   clear the flag, then proceed with normal promotion.
+**Why:** the standard write-before-read path still works unchanged; only the
+read-before-write path needs the retroactive patch. Reset both fields at loop start.
 
 ## edgecases/ folder
 Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-34, 37.

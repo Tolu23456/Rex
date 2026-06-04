@@ -99,6 +99,10 @@ loop_pin_depth:   resq 1
 loop_accum_patch_pos: resq 1      ; offset in out_buffer of the 8-byte pre-load placeholder
 loop_body_start_idx:  resq 1      ; offset in out_buffer where loop body begins
 loop_accum_addr_tmp:  resq 1      ; discovered accumulator VA (scratch during rewrite)
+loop_accum_active:    resb 1      ; 1 = accumulator (r14) is live for this loop
+loop_accum_var_idx:   resq 1      ; var_idx of the variable promoted to r14
+loop_accum_read_first: resb 1     ; 1 = candidate var was LOADED before its first store
+loop_accum_load_patch_pos: resq 1 ; out_buffer offset of that first global load (8 bytes)
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -576,12 +580,14 @@ codegen_emit_for_start:
     call emit_b
     mov rdi, r12
     call get_var_va
+    mov rbx, rax               ; save VA — subsequent mov al,* would clobber rax
     mov al, 0x89
     call emit_b
     mov al, 0x04
     call emit_b
     mov al, 0x25
     call emit_b
+    mov rax, rbx               ; restore VA for emit_d
     call emit_d
     jmp .fs_cond
 .fs_init_nz:
@@ -594,12 +600,14 @@ codegen_emit_for_start:
     call emit_d
     mov rdi, r12
     call get_var_va
+    mov rbx, rax               ; save VA — subsequent mov al,* would clobber rax
     mov al, 0x89
     call emit_b
     mov al, 0x04
     call emit_b
     mov al, 0x25
     call emit_b
+    mov rax, rbx               ; restore VA for emit_d
     call emit_d
     jmp .fs_cond
 .fs_init64:
@@ -646,6 +654,8 @@ codegen_emit_for_start:
     mov [loop_accum_patch_pos], rax
     mov byte [loop_accum_active], 0
     mov qword [loop_accum_var_idx], -1
+    mov byte [loop_accum_read_first], 0
+    mov qword [loop_accum_load_patch_pos], 0
     mov al, 0x4C
     call emit_b
     mov al, 0x8B
@@ -1392,6 +1402,18 @@ codegen_emit_mov_rax_var:
     call emit_b
     ret
 .mrv_global:
+    ; O13 read-first detection: if accum not yet active and in outermost pinned loop,
+    ; record the start of this 8-byte global load so it can be retroactively patched later
+    cmp byte [loop_accum_active], 0
+    jne .mrv_global_emit
+    cmp byte [loop_pin_active], 0
+    je .mrv_global_emit
+    cmp qword [loop_pin_depth], 1
+    jne .mrv_global_emit
+    mov byte [loop_accum_read_first], 1
+    mov rax, [out_idx]
+    mov [loop_accum_load_patch_pos], rax   ; start of the 8-byte mov rax,[abs32] we're about to emit
+.mrv_global_emit:
     push rdi
     mov al, 0x48
     call emit_b
@@ -1463,6 +1485,24 @@ codegen_emit_store_rax_to_var:
     jne .srv_global            ; nested loop: only pin in outermost
     cmp rdi, [loop_pin_var_idx]
     je .srv_global             ; this IS the loop counter
+    ; If this var was globally loaded before its first store, retroactively rewrite
+    ; the emitted  48 8B 04 25 <addr32>  (mov rax,[mem], 8 bytes)
+    ; to            4C 89 F0 90 90 90 90 90  (mov rax,r14 + 5 NOPs)
+    ; so every loop iteration reads the accumulator register instead of stale memory.
+    cmp byte [loop_accum_read_first], 1
+    jne .srv_do_promote
+    lea rcx, [out_buffer]
+    mov rdx, [loop_accum_load_patch_pos]
+    mov byte [rcx+rdx],   0x4C   ; REX.WR
+    mov byte [rcx+rdx+1], 0x89   ; MOV r/m64,r64
+    mov byte [rcx+rdx+2], 0xF0   ; ModRM: mod=11 reg=r14(6) rm=rax(0)
+    mov byte [rcx+rdx+3], 0x90   ; NOP
+    mov byte [rcx+rdx+4], 0x90
+    mov byte [rcx+rdx+5], 0x90
+    mov byte [rcx+rdx+6], 0x90
+    mov byte [rcx+rdx+7], 0x90
+    mov byte [loop_accum_read_first], 0
+.srv_do_promote:
     ; Promote: set accumulator, patch the placeholder address, store to r14
     mov [loop_accum_var_idx], rdi
     mov byte [loop_accum_active], 1

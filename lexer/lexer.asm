@@ -508,6 +508,13 @@ lexer_next:
 .in_f:
     cmp al, '.'
     jne .in_c
+    ; peek: if next char is also '.', this is '..' range — emit integer, don't enter float mode
+    lea rax, [rcx+1]
+    cmp rax, [lex_len]
+    jge .in_float_start
+    cmp byte [rdi+rcx+1], '.'
+    je .in_d
+.in_float_start:
     cvtsi2sd xmm0, rbx
     inc rcx
     mov r8, 10
