@@ -15,6 +15,8 @@ extern codegen_emit_mm_switch, codegen_emit_gc_switch, out_idx
 extern codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
 extern codegen_emit_jmp_get_slot, codegen_patch_slot_to_here
 extern codegen_emit_push_rax, codegen_emit_pop_rbx
+extern codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
+extern codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
 extern codegen_emit_mov_rax_var, codegen_emit_store_rax_to_var
 extern codegen_emit_rdrand_rax, codegen_emit_neg_rax, codegen_emit_not_rax
 extern codegen_emit_bitwise_not_rax
@@ -32,6 +34,7 @@ extern codegen_emit_shl_rax_by_rbx, codegen_emit_shr_rax_by_rbx
 extern codegen_set_frame, codegen_clear_frame
 extern codegen_emit_frame_prologue, codegen_emit_leave
 extern codegen_emit_jmp_prot
+extern codegen_add_frame_local
 extern codegen_emit_str_rax
 extern codegen_emit_seq_alloc, codegen_emit_seq_push, codegen_emit_seq_pop_rax
 extern codegen_emit_seq_len_rax
@@ -432,6 +435,8 @@ parse_factor:
     mov byte [tco_was_emitted], 1
     jmp .done
 .prt_do_normal:
+    ; O6: save r10/r11 if live as expression spill regs (noop when depth=0)
+    call codegen_emit_expr_spill_save
     ; ── Gap-1 fix: caller-save all in-scope vars before call ─────────────────
     xor r13, r13                ; loop counter i = 0
 .prt_cs:
@@ -454,6 +459,8 @@ parse_factor:
     call codegen_emit_pop_var_slot
     jmp .prt_cr
 .prt_cr_done:
+    ; O6: restore r10/r11 after call if they were saved
+    call codegen_emit_expr_spill_restore
     movzx ecx, byte [proto_ret_type]
     test cl, cl
     jz .prt_default_type
@@ -654,9 +661,9 @@ parse_term:
     movzx r12d, byte [cur_type]
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_unary
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     cmp r12b, TYPE_FLOAT
     je .mulf
     call codegen_emit_imul_rax_rbx
@@ -670,9 +677,9 @@ parse_term:
     movzx r12d, byte [cur_type]
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_unary
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     cmp r12b, TYPE_FLOAT
     je .divf
     call codegen_emit_idiv_rbx_by_rax
@@ -685,27 +692,27 @@ parse_term:
 .mod:
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_unary
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     call codegen_emit_imod_rbx_by_rax
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .shl:
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_unary
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     call codegen_emit_shl_rax_by_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .shr:
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_unary
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     call codegen_emit_shr_rax_by_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
@@ -738,9 +745,9 @@ parse_additive:
     movzx r12d, byte [cur_type]
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_term
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     cmp r12b, TYPE_FLOAT
     je .addf
     call codegen_emit_add_rax_rbx
@@ -754,9 +761,9 @@ parse_additive:
     movzx r12d, byte [cur_type]
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_term
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     cmp r12b, TYPE_FLOAT
     je .subf
     call codegen_emit_sub_rax_rbx
@@ -769,27 +776,27 @@ parse_additive:
 .band:
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_term
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     call codegen_emit_bitwise_and_rax_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .bor:
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_term
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     call codegen_emit_bitwise_or_rax_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .bxor:
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_term
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     call codegen_emit_bitwise_xor_rax_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
@@ -839,9 +846,9 @@ parse_comparison:
 .op:
     mov byte [tco_return_active], 0
     call lexer_next
-    call codegen_emit_push_rax
+    call codegen_emit_expr_save_rax
     call parse_additive
-    call codegen_emit_pop_rbx
+    call codegen_emit_expr_restore_rbx
     movzx rdi, r12b
     call codegen_emit_cmp_rbx_rax_setcc
     mov byte [cur_type], TYPE_BOOL
@@ -1061,6 +1068,15 @@ parse_stmt:
     mov dl, 0
     mov cl, r15b
     call var_add
+    ; O5: if inside protocol body, register as frame local
+    cmp rax, -1
+    je .done
+    cmp qword [prot_body_depth], 0
+    jle .done
+    push rax
+    mov rdi, rax
+    call codegen_add_frame_local
+    pop rax
     jmp .done
 .pinit:
     call lexer_next
@@ -1073,6 +1089,14 @@ parse_stmt:
     call var_add
     cmp rax, -1
     je .done
+    ; O5: register as frame local BEFORE store so store uses frame slot
+    cmp qword [prot_body_depth], 0
+    jle .pinit_store
+    push rax
+    mov rdi, rax
+    call codegen_add_frame_local
+    pop rax
+.pinit_store:
     mov r14, rax
     mov rdi, r14
     call codegen_emit_store_rax_to_var

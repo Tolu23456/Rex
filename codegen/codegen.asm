@@ -46,10 +46,14 @@ global codegen_set_for_step, for_step_val
 global codegen_emit_exit1
 global codegen_push_loop_else_flag, codegen_pop_loop_else_flag, codegen_peek_loop_else_flag
 global codegen_emit_each_start, codegen_emit_each_end
-; O1: stack frames  O2: loop pin  O3: peephole  O4: TCO
+; O1: stack frames  O2: loop pin  O3: peephole  O4: TCO  O5: frame locals
 global codegen_set_frame, codegen_clear_frame
 global codegen_emit_frame_prologue, codegen_emit_leave
 global codegen_emit_jmp_prot
+global codegen_add_frame_local
+; O6: register-based expression spill
+global codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
+global codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
 extern elf_header, program_header
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
@@ -77,6 +81,13 @@ loop_else_flag_depth: resq 1
 frame_active:     resb 1
 frame_param_cnt:  resb 1
 frame_param_vars: resb 6
+; O5: protocol-local variables on stack frame
+frame_local_cnt:  resb 1
+frame_local_vars: resb 32
+; O6: expression spill register depth (0=r10 free, 1=r10 in use, 2=r10+r11)
+expr_spill_depth: resb 1
+; O9: position in out_buffer of the sub rsp imm32 to patch with actual frame size
+frame_size_patch_pos: resq 1
 ; O2: loop counter register pin (r15)
 loop_pin_active:  resb 1
 loop_pin_var_idx: resq 1
@@ -1023,6 +1034,24 @@ codegen_emit_arg_pops:
     dec rbx
     cmp rbx, 4
     jge .r89
+    ; O7: for rdi (rbx=0) retroactively optimize if preceding emit was push rax (50)
+    cmp rbx, 0
+    jne .ap_normal
+    mov rax, [out_idx]
+    test rax, rax
+    jz .ap_normal
+    lea rcx, [out_buffer]
+    cmp byte [rcx + rax - 1], 0x50
+    jne .ap_normal
+    mov byte [rcx + rax - 1], 0x90   ; patch push rax → NOP
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7                       ; mov rdi, rax = 48 89 C7
+    call emit_b
+    jmp .ok
+.ap_normal:
     lea rax, [rel .pop_bytes]
     movzx eax, byte [rax+rbx]
     call emit_b
@@ -1095,6 +1124,127 @@ codegen_emit_push_rax:
 codegen_emit_pop_rbx:
     mov al, 0x5B
     call emit_b
+    ret
+
+; ── O6: register-based expression spill ───────────────────────────────────────
+; Replaces push rax / pop rbx for binary-operator LHS saves with r10/r11 moves.
+; depth=0 → save to r10 (free register); depth=1 → save to r11; depth≥2 → push.
+; This eliminates hardware-stack memory traffic in hot expression-evaluation loops.
+
+codegen_emit_expr_save_rax:
+    ; Emit: save rax to r10 (depth=0), r11 (depth=1), or push rax (depth≥2).
+    ; Increments expr_spill_depth.
+    push rbx
+    movzx rbx, byte [expr_spill_depth]
+    cmp rbx, 0
+    je .esr_d0
+    cmp rbx, 1
+    je .esr_d1
+    ; depth ≥ 2: fallback — push rax (50)
+    mov al, 0x50
+    call emit_b
+    inc byte [expr_spill_depth]
+    pop rbx
+    ret
+.esr_d0:
+    ; mov r10, rax = 49 89 C2
+    mov al, 0x49 & 0xFF
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC2
+    call emit_b
+    inc byte [expr_spill_depth]
+    pop rbx
+    ret
+.esr_d1:
+    ; mov r11, rax = 49 89 C3
+    mov al, 0x49 & 0xFF
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    inc byte [expr_spill_depth]
+    pop rbx
+    ret
+
+codegen_emit_expr_restore_rbx:
+    ; Emit: restore rbx from r10 (depth 1→0), r11 (depth 2→1), or pop rbx (depth≥3).
+    ; Decrements expr_spill_depth.
+    push rbx
+    dec byte [expr_spill_depth]
+    movzx rbx, byte [expr_spill_depth]
+    cmp rbx, 0
+    je .err_d0
+    cmp rbx, 1
+    je .err_d1
+    ; depth was ≥ 3: fallback — pop rbx (5B)
+    mov al, 0x5B
+    call emit_b
+    pop rbx
+    ret
+.err_d0:
+    ; mov rbx, r10 = 4C 89 D3
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xD3
+    call emit_b
+    pop rbx
+    ret
+.err_d1:
+    ; mov rbx, r11 = 4C 89 DB
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xDB
+    call emit_b
+    pop rbx
+    ret
+
+codegen_emit_expr_spill_save:
+    ; Before a protocol call: if r10/r11 are live spill regs, push them.
+    ; For most programs (expr_spill_depth=0 at call sites) this emits nothing.
+    movzx rax, byte [expr_spill_depth]
+    test rax, rax
+    jz .ess_done
+    ; push r10 = 41 52
+    mov al, 0x41
+    call emit_b
+    mov al, 0x52
+    call emit_b
+    cmp byte [expr_spill_depth], 2
+    jl .ess_done
+    ; push r11 = 41 53
+    mov al, 0x41
+    call emit_b
+    mov al, 0x53
+    call emit_b
+.ess_done:
+    ret
+
+codegen_emit_expr_spill_restore:
+    ; After a protocol call: restore r10/r11 if they were saved.
+    movzx rax, byte [expr_spill_depth]
+    test rax, rax
+    jz .esr2_done
+    cmp rax, 2
+    jl .esr2_one
+    ; pop r11 = 41 5B
+    mov al, 0x41
+    call emit_b
+    mov al, 0x5B
+    call emit_b
+.esr2_one:
+    ; pop r10 = 41 5A
+    mov al, 0x41
+    call emit_b
+    mov al, 0x5A
+    call emit_b
+.esr2_done:
     ret
 
 codegen_emit_mov_rax_var:
@@ -2590,22 +2740,39 @@ codegen_emit_each_end:
 ; O1 / O2 / O4 new helpers
 ; ══════════════════════════════════════════════════════════════════════════════
 
-; ── O1: internal helper – find frame slot for a var_idx ───────────────────────
-; rdi=var_idx → rax=slot K (0-based) or -1 (not a frame param)
+; ── O1/O5: find frame slot for a var_idx (params + locals) ───────────────────
+; rdi=var_idx → rax=slot K (0-based) or -1 (not in frame)
 ; Preserves rdi; clobbers rax, rcx, rdx only.
 codegen_find_frame_slot:
     cmp byte [frame_active], 0
     je .not_frame
     xor ecx, ecx
     movzx rdx, byte [frame_param_cnt]
-.scan:
+.scan_params:
     cmp rcx, rdx
-    jge .not_frame
+    jge .scan_locals
     movzx eax, byte [frame_param_vars + rcx]
     cmp rdi, rax
     je .found
     inc rcx
-    jmp .scan
+    jmp .scan_params
+.scan_locals:
+    ; O5: search local vars after params
+    xor ecx, ecx
+    movzx rdx, byte [frame_local_cnt]
+.scan_lc:
+    cmp rcx, rdx
+    jge .not_frame
+    movzx eax, byte [frame_local_vars + rcx]
+    cmp rdi, rax
+    je .found_local
+    inc rcx
+    jmp .scan_lc
+.found_local:
+    ; slot = param_cnt + local_idx
+    movzx eax, byte [frame_param_cnt]
+    add rax, rcx
+    ret
 .found:
     mov rax, rcx
     ret
@@ -2623,6 +2790,7 @@ codegen_set_frame:
     mov [frame_param_cnt], bh ; wrong — use byte store
     ; fix: byte-store param_cnt from dil
     mov [frame_param_cnt], dil
+    mov byte [frame_local_cnt], 0   ; O5: reset locals on each protocol entry
     xor ecx, ecx
 .sf_copy:
     cmp cl, bl
@@ -2638,13 +2806,52 @@ codegen_set_frame:
 
 ; ── O1: clear frame state (called at protocol exit) ──────────────────────────
 codegen_clear_frame:
+    ; O9: patch the sub rsp imm32 in the prologue with the actual frame size.
+    ; size = (param_cnt + local_cnt) * 8, rounded up to 16-byte alignment, min 16.
+    movzx rax, byte [frame_param_cnt]
+    movzx rcx, byte [frame_local_cnt]
+    add rax, rcx
+    shl rax, 3          ; × 8 bytes per slot
+    add rax, 15
+    and rax, -16        ; round up to multiple of 16
+    cmp rax, 16
+    jge .cf_patch
+    mov rax, 16
+.cf_patch:
+    mov rcx, [frame_size_patch_pos]
+    lea rdx, [out_buffer]
+    mov [rdx + rcx], eax    ; patch the imm32
+    ; clear state
     mov byte [frame_active], 0
+    mov byte [frame_local_cnt], 0
     ret
 
-; ── O1: emit frame prologue: push rbp; mov rbp,rsp; sub rsp,N*8 ───────────────
-; rdi = param_count
+; ── O5: register a var as a protocol-body local in the stack frame ─────────────
+; rdi = var_idx: adds to frame_local_vars if capacity allows disp8 range
+; Slot assigned = frame_param_cnt + current frame_local_cnt
+; disp8 for slot K = -(K+1)*8; must fit in signed byte (≤ 128 magnitude)
+codegen_add_frame_local:
+    push rbx
+    movzx rbx, byte [frame_local_cnt]
+    cmp rbx, 32
+    jge .afl_full
+    ; verify disp8 range: slot = param_cnt + local_cnt; (slot+1)*8 ≤ 128
+    movzx rax, byte [frame_param_cnt]
+    add rax, rbx        ; total slots so far (= slot index for this new local)
+    inc rax             ; slot + 1
+    shl rax, 3          ; * 8 = magnitude of displacement
+    cmp rax, 129        ; > 128 overflows signed disp8
+    jge .afl_full
+    mov [frame_local_vars + rbx], dil
+    inc byte [frame_local_cnt]
+.afl_full:
+    pop rbx
+    ret
+
+; ── O1/O5/O9: emit frame prologue: push rbp; mov rbp,rsp; sub rsp,<placeholder> ─
+; rdi = param_count.  Actual frame size is patched at codegen_clear_frame time
+; once all local variables have been declared (O9 patch-back).
 codegen_emit_frame_prologue:
-    push rdi
     ; push rbp = 55
     mov al, 0x55
     call emit_b
@@ -2655,31 +2862,19 @@ codegen_emit_frame_prologue:
     call emit_b
     mov al, 0xE5
     call emit_b
-    pop rdi
-    ; sub rsp, N*8
-    shl rdi, 3              ; N*8
-    cmp rdi, 127
-    jg .fp_imm32
-    ; sub rsp, imm8 = 48 83 EC <imm8>
-    mov al, 0x48
-    call emit_b
-    mov al, 0x83
-    call emit_b
-    mov al, 0xEC
-    call emit_b
-    mov al, dil
-    call emit_b
-    ret
-.fp_imm32:
-    ; sub rsp, imm32 = 48 81 EC <imm32>
+    ; sub rsp, <imm32> placeholder = 48 81 EC 00 00 00 00
+    ; Save the imm32 offset so codegen_clear_frame can patch the actual size.
     mov al, 0x48
     call emit_b
     mov al, 0x81
     call emit_b
     mov al, 0xEC
     call emit_b
-    mov eax, edi
-    call emit_d
+    ; record patch position = current out_idx (points at the 4-byte immediate)
+    mov rax, [out_idx]
+    mov [frame_size_patch_pos], rax
+    xor eax, eax
+    call emit_d        ; placeholder imm32 = 0
     ret
 
 ; ── O1: emit leave = C9 ───────────────────────────────────────────────────────
@@ -2745,15 +2940,89 @@ codegen_peephole:
 .ph_b:
     ; ── Pattern B (2 bytes) ──────────────────────────────────────────────────
     cmp rdx, 2
-    jl .ph_next
+    jl .ph_d
     lea rdi, [rsi+rbx]
     cmp byte [rdi],   0x50
-    jne .ph_next
+    jne .ph_d
     cmp byte [rdi+1], 0x58
-    jne .ph_next
+    jne .ph_d
     mov byte [rdi],   0x90
     mov byte [rdi+1], 0x90
     add rbx, 2
+    jmp .ph_loop
+.ph_d:
+    ; ── Pattern D (16 bytes): setcc al + movzx rax,al + test rax,rax + jz → jcc ─
+    ; Actual encoding: 0F 9X C0  48 0F B6 C0  48 85 C0  0F 84 <rel32>  (16 bytes)
+    ; (movzx rax,al has REX.W prefix 48, making it 4 bytes, not 3)
+    ; Folds setle/l/ge/g/e/ne + movzx + test + jz into a single 6-byte jcc,
+    ; saving 3 instructions per comparison in if/while conditions.
+    cmp rdx, 16
+    jl .ph_next
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi],   0x0F
+    jne .ph_next
+    ; [1] = setcc byte: high nibble must be 9
+    movzx eax, byte [rdi+1]
+    mov ecx, eax
+    and ecx, 0xF0
+    cmp ecx, 0x90
+    jne .ph_next
+    ; low nibble must be in {4,5,C,D,E,F}
+    mov ecx, eax
+    and ecx, 0x0F
+    cmp ecx, 0x04
+    jl .ph_next
+    cmp ecx, 0x05
+    jle .ph_d_ok    ; 4 or 5 → sete/setne
+    cmp ecx, 0x0C
+    jl .ph_next     ; 6–B: not a recognized setcc
+.ph_d_ok:
+    ; verify the remaining 13 bytes:
+    ; [2]=C0  [3]=48(REX.W)  [4]=0F  [5]=B6  [6]=C0(movzx rax,al)
+    ; [7]=48  [8]=85  [9]=C0(test rax,rax)
+    ; [10]=0F [11]=84 [12..15]=rel32(jz)
+    cmp byte [rdi+2],  0xC0
+    jne .ph_next
+    cmp byte [rdi+3],  0x48
+    jne .ph_next
+    cmp byte [rdi+4],  0x0F
+    jne .ph_next
+    cmp byte [rdi+5],  0xB6
+    jne .ph_next
+    cmp byte [rdi+6],  0xC0
+    jne .ph_next
+    cmp byte [rdi+7],  0x48
+    jne .ph_next
+    cmp byte [rdi+8],  0x85
+    jne .ph_next
+    cmp byte [rdi+9],  0xC0
+    jne .ph_next
+    cmp byte [rdi+10], 0x0F
+    jne .ph_next
+    cmp byte [rdi+11], 0x84
+    jne .ph_next
+    ; Match! Transform to:  0F <NOT-jcc> <rel32+10>  90*10
+    ; [1]: NOT-condition jcc byte = (setcc_byte XOR 1) + 0xF0  (≡ −0x10 mod 256)
+    movzx eax, byte [rdi+1]
+    xor al, 0x01
+    add al, 0xF0
+    mov byte [rdi+1], al
+    ; [2..5]: new rel32 = old_rel32 + 10  (jcc is 10 bytes earlier than old jz)
+    mov eax, dword [rdi+12]
+    add eax, 10
+    mov dword [rdi+2], eax
+    ; [6..15]: fill with NOPs (10 bytes)
+    mov byte [rdi+6],  0x90
+    mov byte [rdi+7],  0x90
+    mov byte [rdi+8],  0x90
+    mov byte [rdi+9],  0x90
+    mov byte [rdi+10], 0x90
+    mov byte [rdi+11], 0x90
+    mov byte [rdi+12], 0x90
+    mov byte [rdi+13], 0x90
+    mov byte [rdi+14], 0x90
+    mov byte [rdi+15], 0x90
+    add rbx, 6
     jmp .ph_loop
 .ph_next:
     inc rbx
