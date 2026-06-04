@@ -51,6 +51,9 @@ global codegen_set_frame, codegen_clear_frame
 global codegen_emit_frame_prologue, codegen_emit_leave
 global codegen_emit_jmp_prot
 global codegen_add_frame_local
+; O18: register allocator
+global regalloc_cnt, regalloc_active
+global codegen_emit_regalloc_epilogue
 ; O6: register-based expression spill
 global codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
 global codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
@@ -108,6 +111,12 @@ sr_add_candidate:    resb 1  ; 1 = candidate 12-byte rewind sequence is live
 sr_add_rhs_is_pin:   resb 1  ; 1 = the + RHS was the O2-pinned loop variable (r15)
 sr_add_done:         resb 1  ; 1 = fusion fired; suppress the next O13 store of this accum
 sr_add_patch_pos:    resq 1  ; out_idx at the start of the candidate sequence
+; O15: strength-reduction operator (0=add 1=sub 2=mul 3=div)
+sr_op:               resb 1
+; O18: register allocator — pin first N protocol params to r12/r13
+regalloc_active:     resb 1
+regalloc_cnt:        resb 1
+regalloc_vars:       resb 2
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -1407,6 +1416,38 @@ codegen_emit_mov_rax_var:
 .mrv_no_accum:
     ; O14: not the accum var — cancel any pending fusion candidate
     mov byte [sr_add_candidate], 0
+    ; O18: register allocator check — emit mov rax,r12/r13 for pinned params
+    cmp byte [regalloc_active], 0
+    je .mrv_no_regalloc
+    movzx rcx, byte [regalloc_cnt]
+    test rcx, rcx
+    jz .mrv_no_regalloc
+    movzx rax, byte [regalloc_vars]
+    cmp rdi, rax
+    jne .mrv_ra_slot1
+    ; param 0 pinned to r12: mov rax,r12 = 4C 89 E0
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    ret
+.mrv_ra_slot1:
+    cmp rcx, 2
+    jl .mrv_no_regalloc
+    movzx rax, byte [regalloc_vars+1]
+    cmp rdi, rax
+    jne .mrv_no_regalloc
+    ; param 1 pinned to r13: mov rax,r13 = 4C 89 E8
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xE8
+    call emit_b
+    ret
+.mrv_no_regalloc:
     ; O1: frame param check
     push rdi
     call codegen_find_frame_slot
@@ -1474,6 +1515,44 @@ codegen_emit_store_rax_to_var:
     call emit_b
     ret
 .srv_no_pin:
+    ; O18: register allocator check — emit mov r12/r13,rax for pinned params
+    cmp byte [regalloc_active], 0
+    je .srv_no_regalloc
+    ; guard: don't intercept if this var is the active O13 accumulator
+    cmp byte [loop_accum_active], 0
+    je .srv_ra_try
+    cmp rdi, [loop_accum_var_idx]
+    je .srv_no_regalloc
+.srv_ra_try:
+    movzx rcx, byte [regalloc_cnt]
+    test rcx, rcx
+    jz .srv_no_regalloc
+    movzx rax, byte [regalloc_vars]
+    cmp rdi, rax
+    jne .srv_ra_slot1
+    ; param 0 pinned to r12: mov r12,rax = 49 89 C4
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC4
+    call emit_b
+    ret
+.srv_ra_slot1:
+    cmp rcx, 2
+    jl .srv_no_regalloc
+    movzx rax, byte [regalloc_vars+1]
+    cmp rdi, rax
+    jne .srv_no_regalloc
+    ; param 1 pinned to r13: mov r13,rax = 49 89 C5
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC5
+    call emit_b
+    ret
+.srv_no_regalloc:
     ; O1: frame param check (frame params stay on stack, never pinned to r14)
     push rdi
     call codegen_find_frame_slot
@@ -1547,21 +1626,72 @@ codegen_emit_store_rax_to_var:
     mov rdx, [loop_accum_patch_pos]
     lea rcx, [out_buffer]
     mov [rcx+rdx+4], eax       ; patch 4-byte address into pre-loop mov r14,[addr] placeholder
-    ; O14: if deferred strength-reduction fired, rewind and replace with add r14,r15
+    ; O14/O15: if deferred strength-reduction fired, rewind to sr_add_patch_pos
+    ; and emit the fused operator (sr_op: 0=add 1=sub 2=mul 3=div)
     cmp byte [sr_add_done], 0
     je .srv_do_promote_normal
     mov byte [sr_add_done], 0
     mov byte [loop_accum_read_first], 0
-    ; Rewind out_idx to sr_add_patch_pos (before the 8-byte global load + 15 bytes of
-    ; save/pin-load/restore/add that were emitted as temporaries)
     mov rax, [sr_add_patch_pos]
     mov [out_idx], rax
-    ; emit add r14,r15 = 4D 01 FE
+    movzx rcx, byte [sr_op]
+    cmp rcx, 1
+    je .sdp_sub
+    cmp rcx, 2
+    je .sdp_mul
+    cmp rcx, 3
+    je .sdp_div
+    ; sr_op=0: add r14,r15 = 4D 01 FE
     mov al, 0x4D
     call emit_b
     mov al, 0x01
     call emit_b
     mov al, 0xFE
+    call emit_b
+    ret
+.sdp_sub:
+    ; sub r14,r15 = 4D 29 FE
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x29
+    call emit_b
+    mov al, 0xFE
+    call emit_b
+    ret
+.sdp_mul:
+    ; imul r14,r15 = 4D 0F AF F7
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xAF
+    call emit_b
+    mov al, 0xF7
+    call emit_b
+    ret
+.sdp_div:
+    ; mov rax,r14: 4C 89 F0  cqo: 48 99  idiv r15: 49 F7 FF  mov r14,rax: 49 89 C6
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x99
+    call emit_b
+    mov al, 0x49
+    call emit_b
+    mov al, 0xF7
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC6
     call emit_b
     ret
 .srv_do_promote_normal:
@@ -1685,6 +1815,36 @@ codegen_emit_add_rax_rbx:
     ret
 
 codegen_emit_sub_rax_rbx:
+    ; O15: strength-reduce :accum = accum - pin → sub r14,r15 (4D 29 FE)
+    cmp byte [sr_add_candidate], 0
+    je .sub_normal
+    cmp byte [sr_add_rhs_is_pin], 0
+    je .sub_normal
+    cmp byte [expr_spill_depth], 0
+    jne .sub_normal
+    mov byte [sr_op], 1
+    cmp byte [loop_accum_active], 0
+    je .sub_sr_deferred
+    ; Case 1: accum active — rewind 12 bytes, emit sub r14,r15
+    mov rax, [sr_add_patch_pos]
+    mov [out_idx], rax
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x29
+    call emit_b
+    mov al, 0xFE
+    call emit_b
+    ret
+.sub_sr_deferred:
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1
+.sub_normal:
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
     ; rbx - rax → rax: neg rax; add rax,rbx
     mov al, 0x48
     call emit_b
@@ -1701,6 +1861,38 @@ codegen_emit_sub_rax_rbx:
     ret
 
 codegen_emit_imul_rax_rbx:
+    ; O15: strength-reduce :accum = accum * pin → imul r14,r15 (4D 0F AF F7)
+    cmp byte [sr_add_candidate], 0
+    je .mul_normal
+    cmp byte [sr_add_rhs_is_pin], 0
+    je .mul_normal
+    cmp byte [expr_spill_depth], 0
+    jne .mul_normal
+    mov byte [sr_op], 2
+    cmp byte [loop_accum_active], 0
+    je .mul_sr_deferred
+    ; Case 1: accum active — rewind 12 bytes, emit imul r14,r15
+    mov rax, [sr_add_patch_pos]
+    mov [out_idx], rax
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xAF
+    call emit_b
+    mov al, 0xF7
+    call emit_b
+    ret
+.mul_sr_deferred:
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1
+.mul_normal:
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
     ; imul rax,rbx
     mov al, 0x48
     call emit_b
@@ -1713,6 +1905,52 @@ codegen_emit_imul_rax_rbx:
     ret
 
 codegen_emit_idiv_rbx_by_rax:
+    ; O15: strength-reduce :accum = accum / pin → mov rax,r14; cqo; idiv r15; mov r14,rax
+    cmp byte [sr_add_candidate], 0
+    je .div_normal
+    cmp byte [sr_add_rhs_is_pin], 0
+    je .div_normal
+    cmp byte [expr_spill_depth], 0
+    jne .div_normal
+    mov byte [sr_op], 3
+    cmp byte [loop_accum_active], 0
+    je .div_sr_deferred
+    ; Case 1: accum active — rewind 12 bytes, emit fused div sequence
+    mov rax, [sr_add_patch_pos]
+    mov [out_idx], rax
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1
+    mov al, 0x4C  ; mov rax,r14 = 4C 89 F0
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+    mov al, 0x48  ; cqo = 48 99
+    call emit_b
+    mov al, 0x99
+    call emit_b
+    mov al, 0x49  ; idiv r15 = 49 F7 FF
+    call emit_b
+    mov al, 0xF7
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0x49  ; mov r14,rax = 49 89 C6
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    ret
+.div_sr_deferred:
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1
+.div_normal:
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
     ; rbx/rax → rax: mov rcx,rax; mov rax,rbx; cqo; idiv rcx
     mov al, 0x48
     call emit_b
@@ -3073,12 +3311,17 @@ codegen_find_frame_slot:
     inc rcx
     jmp .scan_lc
 .found_local:
-    ; slot = param_cnt + local_idx
+    ; slot = param_cnt + local_idx + regalloc_cnt (O18: offset past callee-save area)
     movzx eax, byte [frame_param_cnt]
     add rax, rcx
+    movzx rdx, byte [regalloc_cnt]
+    add rax, rdx
     ret
 .found:
+    ; slot = param_idx + regalloc_cnt (O18: offset past callee-save area)
     mov rax, rcx
+    movzx rdx, byte [regalloc_cnt]
+    add rax, rdx
     ret
 .not_frame:
     mov rax, -1
@@ -3096,11 +3339,29 @@ codegen_set_frame:
     xor ecx, ecx
 .sf_copy:
     cmp cl, bl
-    jge .sf_done
+    jge .sf_ra_init
     movzx eax, byte [rsi+rcx]
     mov [frame_param_vars+rcx], al
     inc cl
     jmp .sf_copy
+.sf_ra_init:
+    ; O18: init register allocator — pin first min(param_cnt, 2) params to r12/r13
+    movzx rax, bl            ; param_cnt
+    cmp al, 2
+    jle .sf_ra_set
+    mov al, 2
+.sf_ra_set:
+    mov byte [regalloc_active], 1
+    mov [regalloc_cnt], al
+    movzx rax, al            ; how many to copy
+    xor ecx, ecx
+.sf_ra_copy:
+    cmp cl, [regalloc_cnt]
+    jge .sf_done
+    movzx rdx, byte [frame_param_vars + rcx]
+    mov [regalloc_vars + rcx], dl
+    inc cl
+    jmp .sf_ra_copy
 .sf_done:
     pop rcx
     pop rbx
@@ -3109,9 +3370,11 @@ codegen_set_frame:
 ; ── O1: clear frame state (called at protocol exit) ──────────────────────────
 codegen_clear_frame:
     ; O9: patch the sub rsp imm32 in the prologue with the actual frame size.
-    ; size = (param_cnt + local_cnt) * 8, rounded up to 16-byte alignment, min 16.
+    ; size = (param_cnt + local_cnt + regalloc_cnt) * 8, rounded to 16, min 16.
     movzx rax, byte [frame_param_cnt]
     movzx rcx, byte [frame_local_cnt]
+    add rax, rcx
+    movzx rcx, byte [regalloc_cnt]   ; O18: callee-save slots for r12/r13
     add rax, rcx
     shl rax, 3          ; × 8 bytes per slot
     add rax, 15
@@ -3126,6 +3389,8 @@ codegen_clear_frame:
     ; clear state
     mov byte [frame_active], 0
     mov byte [frame_local_cnt], 0
+    mov byte [regalloc_active], 0    ; O18: clear register allocator
+    mov byte [regalloc_cnt], 0
     ret
 
 ; ── O5: register a var as a protocol-body local in the stack frame ─────────────
@@ -3137,9 +3402,11 @@ codegen_add_frame_local:
     movzx rbx, byte [frame_local_cnt]
     cmp rbx, 32
     jge .afl_full
-    ; verify disp8 range: slot = param_cnt + local_cnt; (slot+1)*8 ≤ 128
+    ; verify disp8 range: slot = param_cnt + local_cnt + regalloc_cnt; (slot+1)*8 ≤ 128
     movzx rax, byte [frame_param_cnt]
-    add rax, rbx        ; total slots so far (= slot index for this new local)
+    add rax, rbx        ; total slots so far
+    movzx rdx, byte [regalloc_cnt]
+    add rax, rdx        ; O18: account for callee-save slots
     inc rax             ; slot + 1
     shl rax, 3          ; * 8 = magnitude of displacement
     cmp rax, 129        ; > 128 overflows signed disp8
@@ -3177,6 +3444,75 @@ codegen_emit_frame_prologue:
     mov [frame_size_patch_pos], rax
     xor eax, eax
     call emit_d        ; placeholder imm32 = 0
+    ; O18: save callee-saved regs to frame slots and load from ABI regs
+    ; Frame layout: [rbp-8]=saved r12, [rbp-16]=saved r13 (if regalloc_cnt=2)
+    ; Param loads: r12←rdi (param0), r13←rsi (param1)
+    movzx rcx, byte [regalloc_cnt]
+    test rcx, rcx
+    jz .fp_done
+    ; mov [rbp-8],r12 = 4C 89 65 F8
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x65
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    ; mov r12,rdi = 49 89 FC
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xFC
+    call emit_b
+    cmp rcx, 2
+    jl .fp_done
+    ; mov [rbp-16],r13 = 4C 89 6D F0
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x6D
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+    ; mov r13,rsi = 49 89 F5
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF5
+    call emit_b
+.fp_done:
+    ret
+
+; ── O18: restore r12/r13 from frame callee-save slots before leave ────────────
+codegen_emit_regalloc_epilogue:
+    movzx rcx, byte [regalloc_cnt]
+    test rcx, rcx
+    jz .re_done
+    ; mov r12,[rbp-8] = 4C 8B 65 F8
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x65
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    cmp rcx, 2
+    jl .re_done
+    ; mov r13,[rbp-16] = 4C 8B 6D F0
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x6D
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+.re_done:
     ret
 
 ; ── O1: emit leave = C9 ───────────────────────────────────────────────────────

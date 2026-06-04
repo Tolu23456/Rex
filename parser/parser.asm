@@ -33,6 +33,8 @@ extern codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
 extern codegen_emit_shl_rax_by_rbx, codegen_emit_shr_rax_by_rbx
 extern codegen_set_frame, codegen_clear_frame
 extern codegen_emit_frame_prologue, codegen_emit_leave
+extern codegen_emit_regalloc_epilogue
+extern regalloc_cnt
 extern codegen_emit_jmp_prot
 extern codegen_add_frame_local
 extern codegen_emit_str_rax
@@ -1645,12 +1647,18 @@ parse_stmt:
     pop r13
     pop r12
     ; emit frame-relative param stores: REX 89 ModRM disp8
+    ; O18: skip params K < regalloc_cnt (already in r12/r13 via frame_prologue)
+    ; O18: displacement offset by regalloc_cnt (callee-save slots at top of frame)
     xor r14, r14
 .prot_fs:
     cmp r14, r12
     jge .prot_nobody
     cmp r14, 6
     jge .prot_nobody
+    ; O18: skip regalloc params (loaded into r12/r13 by frame_prologue)
+    movzx rax, byte [regalloc_cnt]
+    cmp r14, rax
+    jl .prot_fs_next
     cmp r14, 4
     jge .prot_fs_rex_r
     mov al, 0x48
@@ -1666,12 +1674,14 @@ parse_stmt:
     movzx ecx, byte [rax+r14]
     mov al, cl
     call emit_b_indirect
-    ; disp8 = -(K+1)*8
-    mov al, r14b
-    inc al
+    ; disp8 = -(K+1+regalloc_cnt)*8  (O18: offset past callee-save slots)
+    movzx rax, byte [regalloc_cnt]
+    add rax, r14
+    inc rax
     shl al, 3
     neg al
     call emit_b_indirect
+.prot_fs_next:
     inc r14
     jmp .prot_fs
 .prot_fs_mrm: db 0x7D, 0x75, 0x55, 0x4D, 0x45, 0x4D
@@ -2592,6 +2602,8 @@ get_var_va_indirect:
 ; Unwinds the per-call hardware-stack frame installed at protocol entry (B-1).
 ; Preserves rbx, r14. Must be called before codegen_emit_ret on every return path.
 proto_emit_restore:
+    ; O18: restore callee-saved r12/r13 from frame before leave
+    call codegen_emit_regalloc_epilogue
     ; O1: emit leave (C9) instead of pop sequence — frame-relative params
     call codegen_emit_leave
     ret
