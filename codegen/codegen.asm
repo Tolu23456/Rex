@@ -9,7 +9,7 @@ global codegen_emit_while_start, codegen_emit_while_end
 global codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
 global codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
 global codegen_emit_push_var_slot, codegen_emit_pop_var_slot
-global codegen_emit_assign_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
+global codegen_emit_assign_var, codegen_emit_zero_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
 global codegen_emit_mm_switch, codegen_emit_gc_switch
 global codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
 global codegen_emit_jmp_get_slot, codegen_patch_slot_to_here
@@ -373,6 +373,25 @@ codegen_emit_assign_var:
     call emit_d
     ret
 
+codegen_emit_zero_var:
+    ; rdi=var_idx: emit  mov qword [var_addr], 0  (9 bytes vs 18-byte assign_var)
+    ; Encoding: 48 C7 04 25 <addr32> 00 00 00 00
+    push rdi
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
+    xor eax, eax
+    call emit_d
+    ret
+
 codegen_emit_unknown_bool:
     ; emit: rdrand eax; and eax,1; mov [var_addr],eax
     push rdi
@@ -511,6 +530,22 @@ codegen_end_protos:
 .done:
     ret
 
+; ── loop-top alignment helper ─────────────────────────────────────────────────
+; Emit 0–15 NOP bytes so the next byte lands on a 16-byte boundary.
+; Aligning loop tops to 16 bytes maximises i-cache line utilisation.
+codegen_align_loop_top:
+    push rcx
+.alt_spin:
+    mov rcx, [out_idx]
+    test rcx, 15
+    jz .alt_done
+    mov al, 0x90        ; NOP
+    call emit_b
+    jmp .alt_spin
+.alt_done:
+    pop rcx
+    ret
+
 ; ── for loop (static bounds) ──────────────────────────────────────────────────
 codegen_emit_for_start:
     ; rdi=loop_var_idx  rsi=from_val  rdx=end_val
@@ -598,6 +633,7 @@ codegen_emit_for_start:
     mov rdi, r12
     call get_var_va
     call emit_d
+    call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]       ; loop cond start (after the init load)
     ; emit cmp r15,end_val = 49 81 FF <imm32>
     mov al, 0x49
@@ -611,6 +647,7 @@ codegen_emit_for_start:
     jmp .fs_patch
 .fs_cond_global:
     inc qword [loop_pin_depth]
+    call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]
     ; cmp qword [addr], imm32 = 48 81 3C 25 <addr32> <imm32>
     mov al, 0x48
@@ -801,6 +838,7 @@ codegen_emit_for_start_dyn:
     lea rcx, [break_base_stack]
     mov [rcx+r14*8], rax
     inc qword [break_base_depth]
+    call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]
     ; emit: mov rax,[loop_var]; cmp rax,[end_var]; jge .exit
     mov al, 0x48
@@ -3024,7 +3062,77 @@ codegen_peephole:
     mov byte [rdi+15], 0x90
     add rbx, 6
     jmp .ph_loop
+; ── Pattern E (14 bytes) ─────────────────────────────────────────────────────
+; Fold:  mov r10,rax  +  mov rax,[abs32]  +  mov rbx,r10
+;        49 89 C2       48 8B 04 25 <a4>    4C 89 D3          (14 bytes)
+;   →    mov rbx,rax  +  mov rax,[abs32]  +  NOP×3
+;        48 89 C3       48 8B 04 25 <a4>    90 90 90
+; Eliminates the r10 save/restore round-trip when a sub-expression load follows.
 .ph_next:
+    cmp rdx, 14
+    jl .ph_e_miss
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi+0],  0x49
+    jne .ph_e_miss
+    cmp byte [rdi+1],  0x89
+    jne .ph_e_miss
+    cmp byte [rdi+2],  0xC2
+    jne .ph_e_miss
+    cmp byte [rdi+3],  0x48
+    jne .ph_e_miss
+    cmp byte [rdi+4],  0x8B
+    jne .ph_e_miss
+    cmp byte [rdi+5],  0x04
+    jne .ph_e_miss
+    cmp byte [rdi+6],  0x25
+    jne .ph_e_miss
+    ; bytes 7..10: abs32 address — skip
+    cmp byte [rdi+11], 0x4C
+    jne .ph_e_miss
+    cmp byte [rdi+12], 0x89
+    jne .ph_e_miss
+    cmp byte [rdi+13], 0xD3
+    jne .ph_e_miss
+    ; match: rewrite in-place
+    mov byte [rdi+0],  0x48  ; REX.W (was REX.WB for r10)
+    ; [1] stays 0x89
+    mov byte [rdi+2],  0xC3  ; ModRM: rbx←rax (was C2 = r10←rax)
+    ; [3..10]: mov rax,[abs32] unchanged
+    mov byte [rdi+11], 0x90  ; NOP
+    mov byte [rdi+12], 0x90  ; NOP
+    mov byte [rdi+13], 0x90  ; NOP
+    add rbx, 11              ; advance past mov rbx,rax (3) + mov rax,[abs32] (8)
+    jmp .ph_loop
+.ph_e_miss:
+; ── Pattern F (6 bytes) ──────────────────────────────────────────────────────
+; Fold adjacent:  mov r10,rax  +  mov rbx,r10  →  mov rbx,rax  +  NOP×3
+;                 49 89 C2       4C 89 D3          48 89 C3       90 90 90
+; Catches cases where both operands of a binary op were already in registers.
+    cmp rdx, 6
+    jl .ph_f_miss
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi+0],  0x49
+    jne .ph_f_miss
+    cmp byte [rdi+1],  0x89
+    jne .ph_f_miss
+    cmp byte [rdi+2],  0xC2
+    jne .ph_f_miss
+    cmp byte [rdi+3],  0x4C
+    jne .ph_f_miss
+    cmp byte [rdi+4],  0x89
+    jne .ph_f_miss
+    cmp byte [rdi+5],  0xD3
+    jne .ph_f_miss
+    ; match: fold to mov rbx,rax + 3 NOPs
+    mov byte [rdi+0],  0x48
+    ; [1] stays 0x89
+    mov byte [rdi+2],  0xC3
+    mov byte [rdi+3],  0x90
+    mov byte [rdi+4],  0x90
+    mov byte [rdi+5],  0x90
+    add rbx, 3              ; advance past mov rbx,rax (3 bytes)
+    jmp .ph_loop
+.ph_f_miss:
     inc rbx
     jmp .ph_loop
 .ph_done:

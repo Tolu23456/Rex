@@ -49,6 +49,7 @@ extern codegen_emit_cap_rax
 extern codegen_set_for_step
 extern codegen_push_loop_else_flag, codegen_pop_loop_else_flag
 extern codegen_emit_each_start, codegen_emit_each_end
+extern codegen_emit_zero_var
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
 var_count:       resq 1
@@ -73,6 +74,11 @@ cur_proto_param_vars:  resb 6       ; B-1: var indices for each param (up to 6)
 tco_return_active:     resb 1       ; O4: 1 if we are inside a .ret that may be TCO
 tco_was_emitted:       resb 1       ; O4: 1 if TCO jmp was emitted for this return
 tco_body_entry:        resq 1       ; O4: out_idx of current protocol body start (after prologue)
+for_start_tok:         resb 1       ; static-bounds: tok_type before start parse_expr
+for_end_tok:           resb 1       ; static-bounds: tok_type before end parse_expr
+for_start_val:         resq 1       ; static-bounds: tok_int before start parse_expr
+for_end_val:           resq 1       ; static-bounds: tok_int before end parse_expr
+for_rollback_idx:      resq 1       ; static-bounds: out_idx before for init code
 section .data
 err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
@@ -1258,6 +1264,13 @@ parse_stmt:
     call strcpy
     call lexer_next             ; skip varname → 'in'
     call lexer_next             ; skip 'in' → start expr
+    ; static-bounds O2: save start token state and out_idx before any emit
+    movzx rax, byte [tok_type]
+    mov [for_start_tok], al
+    mov rax, [tok_int]
+    mov [for_start_val], rax
+    mov rax, [out_idx]
+    mov [for_rollback_idx], rax
     call parse_expr             ; parse start, tok = '..'
     ; save var_count before synthetic loop vars (#37)
     mov rbx, [scope_depth]
@@ -1279,9 +1292,16 @@ parse_stmt:
     jne .for_nodd
     call lexer_next
 .for_nodd:
+    ; static-bounds: save end token state before emit
+    movzx rax, byte [tok_type]
+    mov [for_end_tok], al
+    mov rax, [tok_int]
+    mov [for_end_val], rax
     call parse_expr             ; parse end expr
     cmp byte [tok_type], TOK_STEP
     jne .for_nostep
+    ; step present — disable static path by clearing sentinel
+    mov byte [for_start_tok], 0
     call lexer_next             ; skip 'step'
     cmp byte [tok_type], TOK_INT_LIT
     jne .for_nostep
@@ -1289,6 +1309,19 @@ parse_stmt:
     call codegen_set_for_step
     call lexer_next             ; skip step value
 .for_nostep:
+    ; static-bounds check: were both bounds compile-time integer literals?
+    cmp byte [for_start_tok], TOK_INT_LIT
+    jne .for_dynamic
+    cmp byte [for_end_tok], TOK_INT_LIT
+    jne .for_dynamic
+    ; static path: rollback the emitted start/end init code — codegen_emit_for_start
+    ; will re-emit the init using optimal encodings and then pin i to r15 (O2).
+    mov rax, [for_rollback_idx]
+    mov [out_idx], rax
+    xor r13, r13                ; no i_fe var in static path
+    jmp .for_le_alloc
+.for_dynamic:
+    ; dynamic path: store rax (end value) into a dedicated i_fe runtime variable
     lea rdi, [for_end_name]
     lea rsi, [saved_name]
     call strcpy
@@ -1305,6 +1338,7 @@ parse_stmt:
     mov r13, rax
     mov rdi, r13
     call codegen_emit_store_rax_to_var
+.for_le_alloc:
     ; allocate __le flag var for loop-else (reclaimed by scope_stack at loop exit)
     push r13
     push r14
@@ -1325,16 +1359,26 @@ parse_stmt:
     mov rdi, rax
     call codegen_push_loop_else_flag
     pop rdi
-    xor rsi, rsi
     push r13
     push r14
-    call codegen_emit_assign_var
+    call codegen_emit_zero_var  ; emit: mov qword [__le], 0  (9 bytes, not 18)
     pop r14
     pop r13
 .for_le_cont:
+    ; dispatch: static bounds → register-pinned loop, dynamic → memory-based loop
+    cmp byte [for_start_tok], TOK_INT_LIT
+    jne .for_start_dyn
+    ; static: constant bounds let codegen_emit_for_start pin i to r15 (O2)
+    mov rdi, r14
+    mov rsi, [for_start_val]
+    mov rdx, [for_end_val]
+    call codegen_emit_for_start
+    jmp .for_started
+.for_start_dyn:
     mov rdi, r14
     mov rsi, r13
     call codegen_emit_for_start_dyn
+.for_started:
     mov r15, rax
     call lexer_next             ; skip ':'
     cmp byte [tok_type], TOK_NEWLINE
