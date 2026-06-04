@@ -138,11 +138,24 @@ Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
 ## Benchmark — Measured Numbers (June 2026, latest run)
-- Rex sum (1B): **804ms** correct output `499999999500000000` (2.4× faster than C 1947ms — C uses volatile)
+- Rex sum (1B): **~375ms** correct output `499999999500000000` (previously 804ms before O14; ~5.2× faster than C 1947ms)
 - Rex fib(42): 2222ms (5.9× slower than C 377ms — VM load varies; earlier 1238ms also measured)
 - Rex seq-push (500k): 12ms (4.8× faster than C malloc/free 58ms)
-- Rex binary size ~8595 bytes (minimal) vs C ~15800 bytes (1.8× smaller)
+- Rex binary size ~8712 bytes (minimal) vs C ~15800 bytes (1.8× smaller)
 - Rex startup ~3ms vs C ~8ms (~2.7× faster)
+
+## O14: Strength-Reduction Fusion (IMPLEMENTED)
+Fuses `:accum = accum + pin` → single `add r14, r15` (4D 01 FE), cutting the hot loop body
+from 6 instructions to 2 (`add r14,r15` + `inc r15`).
+Two cases handled:
+1. **Accum already active** (loop_accum_active==1 at load time): set candidate in O13 read path;
+   rewind 12 bytes (mov rax,r14 + save + mov rax,r15 + restore) in `codegen_emit_add_rax_rbx`,
+   suppress next O13 store via `sr_add_done`.
+2. **Read-first** (loop_accum_active==0): set candidate in `.mrv_global` read-first block;
+   defer to `.srv_do_promote` which rewinds to `sr_add_patch_pos` (before 8-byte global load)
+   after patching the pre-loop r14 placeholder, then emits `add r14,r15`.
+**Key BSS fields:** `sr_add_candidate`, `sr_add_rhs_is_pin`, `sr_add_done`, `sr_add_patch_pos`.
+All cleared at loop start. Fusion only fires when expr_spill_depth==0 (no nested expression).
 
 ## For-loop Init Address Corruption Bug (FIXED)
 In `codegen_emit_for_start`, the zero-path and 32-bit non-zero path both call

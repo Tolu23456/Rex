@@ -103,6 +103,11 @@ loop_accum_active:    resb 1      ; 1 = accumulator (r14) is live for this loop
 loop_accum_var_idx:   resq 1      ; var_idx of the variable promoted to r14
 loop_accum_read_first: resb 1     ; 1 = candidate var was LOADED before its first store
 loop_accum_load_patch_pos: resq 1 ; out_buffer offset of that first global load (8 bytes)
+; O14: strength-reduction — fuse :accum = accum + pin → single add r14,r15
+sr_add_candidate:    resb 1  ; 1 = candidate 12-byte rewind sequence is live
+sr_add_rhs_is_pin:   resb 1  ; 1 = the + RHS was the O2-pinned loop variable (r15)
+sr_add_done:         resb 1  ; 1 = fusion fired; suppress the next O13 store of this accum
+sr_add_patch_pos:    resq 1  ; out_idx at the start of the candidate sequence
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -656,6 +661,9 @@ codegen_emit_for_start:
     mov qword [loop_accum_var_idx], -1
     mov byte [loop_accum_read_first], 0
     mov qword [loop_accum_load_patch_pos], 0
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 0
     mov al, 0x4C
     call emit_b
     mov al, 0x8B
@@ -1360,6 +1368,11 @@ codegen_emit_mov_rax_var:
     je .mrv_no_pin
     cmp rdi, [loop_pin_var_idx]
     jne .mrv_no_pin
+    ; O14: if fusion candidate is live, mark that RHS is the pinned var
+    cmp byte [sr_add_candidate], 0
+    je .mrv_pin_emit
+    mov byte [sr_add_rhs_is_pin], 1
+.mrv_pin_emit:
     mov al, 0x4C
     call emit_b
     mov al, 0x89
@@ -1373,6 +1386,17 @@ codegen_emit_mov_rax_var:
     je .mrv_no_accum
     cmp rdi, [loop_accum_var_idx]
     jne .mrv_no_accum
+    ; O14: candidate setup — if pin is live and spill depth is 0, start a fusion candidate
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    cmp byte [loop_pin_active], 0
+    je .mrv_accum_emit
+    cmp byte [expr_spill_depth], 0
+    jne .mrv_accum_emit
+    mov byte [sr_add_candidate], 1
+    mov rax, [out_idx]
+    mov [sr_add_patch_pos], rax
+.mrv_accum_emit:
     mov al, 0x4C
     call emit_b
     mov al, 0x89
@@ -1381,6 +1405,8 @@ codegen_emit_mov_rax_var:
     call emit_b
     ret
 .mrv_no_accum:
+    ; O14: not the accum var — cancel any pending fusion candidate
+    mov byte [sr_add_candidate], 0
     ; O1: frame param check
     push rdi
     call codegen_find_frame_slot
@@ -1413,6 +1439,11 @@ codegen_emit_mov_rax_var:
     mov byte [loop_accum_read_first], 1
     mov rax, [out_idx]
     mov [loop_accum_load_patch_pos], rax   ; start of the 8-byte mov rax,[abs32] we're about to emit
+    ; O14: also arm fusion candidate if spill depth is free (expr is at the outermost level)
+    cmp byte [expr_spill_depth], 0
+    jne .mrv_global_emit
+    mov byte [sr_add_candidate], 1
+    mov [sr_add_patch_pos], rax            ; same position: before the 8-byte global load
 .mrv_global_emit:
     push rdi
     mov al, 0x48
@@ -1469,6 +1500,12 @@ codegen_emit_store_rax_to_var:
     je .srv_first_check
     cmp rdi, [loop_accum_var_idx]
     jne .srv_global
+    ; O14: if strength-reduction already wrote r14 via add r14,r15, skip this store
+    cmp byte [sr_add_done], 0
+    je .srv_accum_emit
+    mov byte [sr_add_done], 0
+    ret
+.srv_accum_emit:
     ; emit mov r14,rax = 49 89 C6
     mov al, 0x49
     call emit_b
@@ -1503,13 +1540,31 @@ codegen_emit_store_rax_to_var:
     mov byte [rcx+rdx+7], 0x90
     mov byte [loop_accum_read_first], 0
 .srv_do_promote:
-    ; Promote: set accumulator, patch the placeholder address, store to r14
+    ; Promote: set accumulator, patch the pre-loop placeholder address
     mov [loop_accum_var_idx], rdi
     mov byte [loop_accum_active], 1
     call get_var_va            ; rdi=var_idx → rax=VA (rdi preserved by caller-save)
     mov rdx, [loop_accum_patch_pos]
     lea rcx, [out_buffer]
-    mov [rcx+rdx+4], eax       ; patch 4-byte address into placeholder
+    mov [rcx+rdx+4], eax       ; patch 4-byte address into pre-loop mov r14,[addr] placeholder
+    ; O14: if deferred strength-reduction fired, rewind and replace with add r14,r15
+    cmp byte [sr_add_done], 0
+    je .srv_do_promote_normal
+    mov byte [sr_add_done], 0
+    mov byte [loop_accum_read_first], 0
+    ; Rewind out_idx to sr_add_patch_pos (before the 8-byte global load + 15 bytes of
+    ; save/pin-load/restore/add that were emitted as temporaries)
+    mov rax, [sr_add_patch_pos]
+    mov [out_idx], rax
+    ; emit add r14,r15 = 4D 01 FE
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xFE
+    call emit_b
+    ret
+.srv_do_promote_normal:
     ; emit mov r14,rax = 49 89 C6
     mov al, 0x49
     call emit_b
@@ -1582,7 +1637,45 @@ codegen_emit_bitwise_not_rax:
     ret
 
 codegen_emit_add_rax_rbx:
-    ; add rax,rbx
+    ; O14: strength-reduce :accum = accum + pin → add r14,r15 (4D 01 FE)
+    ; Conditions: candidate live, RHS was the pin var, spill depth back to 0.
+    ; If all met, rewind the 12 pre-emitted bytes and emit a single add r14,r15.
+    cmp byte [sr_add_candidate], 0
+    je .add_normal
+    cmp byte [sr_add_rhs_is_pin], 0
+    je .add_normal
+    cmp byte [expr_spill_depth], 0
+    jne .add_normal
+    ; Conditions met. Check whether the accumulator is already live (Case 1)
+    ; or this is the first-store promotion (Case 2: read-first / deferred).
+    cmp byte [loop_accum_active], 0
+    je .add_sr_deferred
+    ; Case 1 — accum active: rewind the 12 pre-emitted bytes and emit add r14,r15 now.
+    ;   mov rax,r14 (3) + mov r10,rax (3) + mov rax,r15 (3) + mov rbx,r10 (3) = 12
+    mov rax, [sr_add_patch_pos]
+    mov [out_idx], rax
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1      ; suppress the next O13 store
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xFE
+    call emit_b
+    ret
+.add_sr_deferred:
+    ; Case 2 — read-first: accum not yet promoted. Signal .srv_do_promote to
+    ; rewind the whole sequence (8-byte global load + save + pin-load + restore + add)
+    ; and replace it with add r14,r15 at that time.
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    mov byte [sr_add_done], 1
+    ; fall through: still emit add rax,rbx (will be rewound by .srv_do_promote)
+.add_normal:
+    mov byte [sr_add_candidate], 0
+    mov byte [sr_add_rhs_is_pin], 0
+    ; add rax,rbx = 48 01 D8
     mov al, 0x48
     call emit_b
     mov al, 0x01
