@@ -13,7 +13,7 @@ Run a test by compiling the `.rex` file with `rexc` and executing the output.
 | `test_and_or_short_circuit.rex` | #33 — short-circuit and/or | ✅ Fixed — should pass |
 | `test_string_literal_length.rex` | #34 — string truncation | ✅ Fixed — 64+ char strings truncated, no corruption |
 | `test_err_types.rex` | #25 — err with non-string | ✅ Fixed — int/bool args print cleanly, no segfault |
-| `test_recursive_protocol.rex` | #18 — recursive protocols | ❌ Known bug — prints wrong values |
+| `test_recursive_protocol.rex` | #18 — recursive protocols | ✅ Fixed — fib(0)=0 fib(1)=1 fib(5)=5 fib(10)=55 all correct |
 | `test_for_negative_bounds.rex` | #20 — negative for bounds | ✅ Fixed — should pass |
 | `test_var_scope.rex` | #26, #37 — slot reclamation | ✅ Fixed — should pass |
 | `test_stop_multiloop.rex` | #22 — stop multi-level | ⚠️ Limitation — stop is innermost only; workaround shown |

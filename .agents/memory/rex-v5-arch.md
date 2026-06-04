@@ -119,10 +119,24 @@ Exposed as global; extern'd in parser.asm. Used by err non-string path and avail
 for future error-exit emission.
 
 ## Remaining Open Issues (see docs/issues.md)
-High: recursive protocols (18 — per-call stack frames needed), seq realloc (19 partial).
+High: none remaining.
 Medium: stop multi-level break (22), dict variable keys (23), string concat (24),
 err int-to-string (25 partial).
 Low: NASM env (2), dict hardcoded offsets (3), when jump table (27), seq read bounds (28).
+
+## Issue 18 — Recursive Protocols (FIXED)
+Push/pop stack-frame mechanism: `.prot_push_old` emits `push qword [param_addr]`
+for each param at entry; `proto_emit_restore` emits `pop qword [param_addr]` in
+reverse at every ret path. Correct: fib(10)=55 verified.
+Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
+call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
+
+## Benchmark — Measured Numbers (June 2026)
+- Rex sum (1B): ~1078ms best (~3× slower than C -O2 ~372ms)
+- Rex fib(42): ~6841ms best (~9× slower than C -O2 ~734ms)
+- C alloc (500k×80B): 102ms; Rex pool ~5ms (20× faster)
+- Rex binary size ~500 bytes vs C 15584 bytes (30× smaller)
+- Rex startup ~0.05ms vs C 10.3ms (200× faster)
 
 ## edgecases/ folder
 Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-34, 37.

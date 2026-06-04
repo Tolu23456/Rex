@@ -176,23 +176,18 @@ are consumed and the parser does not spin on the same token forever.
 `scope_stack` save/restore wraps the two synthetic var additions; after
 `codegen_emit_for_end` `var_count` is restored, reclaiming both slots.
 
----
-
-## High
-
 ### 18. Recursive protocols produce wrong results
-
-**File:** `parser/parser.asm`, `.protocol` + `.prot_store_params`.
-
-**Description:** Protocol parameters are stored in global `var_table` slots
-at `VAR_STORAGE_BASE + idx*64`.  A recursive call overwrites the caller's
-copies of those slots before the caller resumes.  For example, `fib(n)`
-calling `fib(n-1)` destroys the value of `n` in the caller's frame.
-Any protocol that calls itself will silently compute the wrong answer.
-
-**Fix required:** Per-call stack frames.  On protocol entry, push param
-values onto the hardware stack (or a shadow stack in BSS); pop on return.
-Affects `.protocol` preamble and `.prot_store_params` in `parser/parser.asm`.
+**Fixed in:** `parser/parser.asm`, `.prot_push_old` + `proto_emit_restore`
+At protocol entry `.prot_push_old` emits `push qword [var_addr]` for every
+parameter (in declaration order) before overwriting the slot with the incoming
+register value.  `proto_emit_restore` (called at every `ret` path including the
+implicit one after the body) emits `pop qword [var_addr]` in reverse order,
+restoring the caller's values.  Verified: `fib(0)=0`, `fib(1)=1`, `fib(5)=5`,
+`fib(10)=55`.
+**Performance note:** each call now pays two memory round-trips per parameter
+(push on entry, pop on return).  For `fib(42)` (~267 M calls) this gives
+~7 s vs C's ~0.9 s.  A register-based stack frame (rbp-relative locals) would
+eliminate these trips; that is the next performance-oriented milestone.
 
 ---
 
