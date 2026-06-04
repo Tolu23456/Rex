@@ -2017,10 +2017,11 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x0B
     call emit_b
-    ; jb +57  →  72 39  (skip grow code when len < cap)
+    ; jb +56  →  72 38  (skip grow code when len < cap)
+    ; grow block is exactly 56 bytes; landing on pop rax restores saved value
     mov al, 0x72
     call emit_b
-    mov al, 0x39
+    mov al, 0x38
     call emit_b
     ; ── inline grow (57 bytes) ───────────────────────────────────────────────
     ; Strategy: new_cap = old_cap*2; new_size = 16 + new_cap*8;
@@ -2037,14 +2038,14 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x3B
     call emit_b
-    ; shl rdi,4         →  48 C1 E7 10  (rdi = old_cap*16 = new_size-16)
+    ; shl rdi,4         →  48 C1 E7 04  (rdi = old_cap*16 = new_size-16)
     mov al, 0x48
     call emit_b
     mov al, 0xC1
     call emit_b
     mov al, 0xE7
     call emit_b
-    mov al, 0x10
+    mov al, 0x04
     call emit_b
     ; add rdi,16        →  48 83 C7 10  (rdi = new_size = 16 + old_cap*16)
     mov al, 0x48

@@ -293,7 +293,7 @@ rt_alc:
     xor rdi, rdi
     mov esi, 67108864       ; 64 MB
     mov rdx, 3
-    mov r10d, 0x22
+    mov r10d, 0x22          ; MAP_PRIVATE | MAP_ANONYMOUS
     mov r8, -1
     xor r9d, r9d
     syscall                 ; rax = pool base ptr

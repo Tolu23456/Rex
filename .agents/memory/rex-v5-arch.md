@@ -102,11 +102,17 @@ See issue 31 for resolution options.
 `tok_ident` is 64 bytes; max 63 content chars. Bounds check `cmp rbx,63; jge .strd` added.
 Overlong strings are truncated silently (issue 34).
 
-## seq push inline grow (FULL FIX — issue 19)
-`codegen_emit_seq_push` emits `cmp rcx,[rbx]; jb +57` then a 57-byte inline grow block.
+## seq push inline grow (FIXED — two bugs corrected)
+`codegen_emit_seq_push` emits `cmp rcx,[rbx]; jb +56` then a 56-byte inline grow block.
 Grow: push rcx; compute new_size=16+old_cap*16; call rt_alc; pop rcx; write new_cap/len;
 rep movsq copies elements; pop rbx (new ptr); mov [var_addr],rbx; reload rcx. Unbounded growth.
-**Why jb +57:** grow block is exactly 57 bytes (verified). If byte count changes, rel8 must match.
+**Bug 1 (FIXED):** `jb +57` (0x39) was off-by-one — grow block is 56 bytes not 57. The
+no-grow path skipped `pop rax`, leaking 8 bytes of stack per iteration → stack overflow
+at ~1M pushes. Fix: `mov al, 0x38` (jb +56).
+**Bug 2 (FIXED):** `shl rdi, 0x10` (shift by 16) instead of `shl rdi, 0x04` (shift by 4).
+This computed new_size = 16+old_cap×65536 instead of 16+old_cap×16. For old_cap=131072,
+the 8 GB mmap returned MAP_FAILED → segfault. Fix: `mov al, 0x04` for the shift immediate.
+**Rule:** grow block is exactly 56 bytes; jb offset must equal 56 (0x38); shift must be 4 (0x04).
 
 ## err non-string guard (PARTIAL FIX — issue 25)
 `.err_stmt` in parser.asm checks `cur_type` after `parse_expr`. If not TYPE_STR, calls
@@ -131,12 +137,13 @@ reverse at every ret path. Correct: fib(10)=55 verified.
 Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
-## Benchmark — Measured Numbers (June 2026)
-- Rex sum (1B): ~1078ms best (~3× slower than C -O2 ~372ms)
-- Rex fib(42): ~6841ms best (~9× slower than C -O2 ~734ms)
-- C alloc (500k×80B): 102ms; Rex pool ~5ms (20× faster)
-- Rex binary size ~500 bytes vs C 15584 bytes (30× smaller)
-- Rex startup ~0.05ms vs C 10.3ms (200× faster)
+## Benchmark — Measured Numbers (June 2026, latest run)
+- Rex sum (1B): 605ms best (3.2× FASTER than C 1947ms — C uses volatile)
+- Rex fib(42): 1238ms best (3.3× slower than C 377ms)
+- Rex seq-push (500k): 9ms best (6.4× faster than C malloc/free 58ms)
+- Rex binary size ~8595 bytes (minimal) vs C ~15800 bytes (1.8× smaller)
+- Rex startup ~3ms vs C ~8ms (~2.7× faster)
+- NOTE: sum reversal (Rex faster) is because C bench uses `volatile` which kills optimization.
 
 ## edgecases/ folder
 Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-34, 37.
