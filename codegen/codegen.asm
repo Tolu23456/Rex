@@ -92,6 +92,13 @@ frame_size_patch_pos: resq 1
 loop_pin_active:  resb 1
 loop_pin_var_idx: resq 1
 loop_pin_depth:   resq 1
+; O13: loop accumulator post-pass rewriter (r14)
+; At loop start: emit mov r14,[placeholder] at patch_pos; save body start.
+; At loop end:   scan body for first non-counter store, rewrite loads/stores
+;                to use r14, patch pre-load address, emit post-loop flush.
+loop_accum_patch_pos: resq 1      ; offset in out_buffer of the 8-byte pre-load placeholder
+loop_body_start_idx:  resq 1      ; offset in out_buffer where loop body begins
+loop_accum_addr_tmp:  resq 1      ; discovered accumulator VA (scratch during rewrite)
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -633,6 +640,22 @@ codegen_emit_for_start:
     mov rdi, r12
     call get_var_va
     call emit_d
+    ; O13: emit pre-load placeholder for accumulator: mov r14,[0] = 4C 8B 34 25 00 00 00 00
+    ; (address patched when first accumulator store is detected; NOP'd if none found)
+    mov rax, [out_idx]
+    mov [loop_accum_patch_pos], rax
+    mov byte [loop_accum_active], 0
+    mov qword [loop_accum_var_idx], -1
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x34
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    xor eax, eax
+    call emit_d
     call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]       ; loop cond start (after the init load)
     ; emit cmp r15,end_val = 49 81 FF <imm32>
@@ -814,6 +837,41 @@ codegen_emit_for_end:
     call emit_d
     mov byte [loop_pin_active], 0
 .fe_done:
+    ; O13: accumulator flush/NOP — only for outermost loop (depth==1 before decrement)
+    cmp qword [loop_pin_depth], 1
+    jne .fe_accum_skip
+    cmp byte [loop_accum_active], 0
+    je .fe_accum_nop
+    ; flush r14 → [accum_addr]: mov [accum_addr],r14 = 4C 89 34 25 <addr32>
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x34
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov rdi, [loop_accum_var_idx]
+    call get_var_va
+    call emit_d
+    jmp .fe_accum_done
+.fe_accum_nop:
+    ; no accumulator found: replace the 8-byte placeholder with an 8-byte NOP
+    ; 8-byte NOP: 0F 1F 84 00 00 00 00 00
+    mov rbx, [loop_accum_patch_pos]
+    lea rdi, [out_buffer]
+    mov byte [rdi+rbx+0], 0x0F
+    mov byte [rdi+rbx+1], 0x1F
+    mov byte [rdi+rbx+2], 0x84
+    mov byte [rdi+rbx+3], 0x00
+    mov byte [rdi+rbx+4], 0x00
+    mov byte [rdi+rbx+5], 0x00
+    mov byte [rdi+rbx+6], 0x00
+    mov byte [rdi+rbx+7], 0x00
+.fe_accum_done:
+    mov byte [loop_accum_active], 0
+    mov qword [loop_accum_var_idx], -1
+.fe_accum_skip:
     dec qword [loop_pin_depth]
     pop r14
     pop r13
@@ -1286,7 +1344,7 @@ codegen_emit_expr_spill_restore:
     ret
 
 codegen_emit_mov_rax_var:
-    ; rdi=var_idx: emit mov rax,[var_addr]  (O2: r15 if pinned; O1: rbp-rel if frame param)
+    ; rdi=var_idx: emit mov rax,[var_addr]  (O2: r15 if pinned; O13: r14 if accum; O1: rbp-rel)
     ; O2: loop pin check — emit mov rax,r15 = 4C 89 F8
     cmp byte [loop_pin_active], 0
     je .mrv_no_pin
@@ -1300,6 +1358,19 @@ codegen_emit_mov_rax_var:
     call emit_b
     ret
 .mrv_no_pin:
+    ; O13: accumulator check — emit mov rax,r14 = 4C 89 F0
+    cmp byte [loop_accum_active], 0
+    je .mrv_no_accum
+    cmp rdi, [loop_accum_var_idx]
+    jne .mrv_no_accum
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+    ret
+.mrv_no_accum:
     ; O1: frame param check
     push rdi
     call codegen_find_frame_slot
@@ -1336,7 +1407,7 @@ codegen_emit_mov_rax_var:
     ret
 
 codegen_emit_store_rax_to_var:
-    ; rdi=var_idx: emit mov [var_addr],rax  (O2: r15 if pinned; O1: rbp-rel if frame param)
+    ; rdi=var_idx: emit mov [var_addr],rax  (O2: r15 if pinned; O13: r14 if accum; O1: rbp-rel)
     ; O2: loop pin check — emit mov r15,rax = 49 89 C7
     cmp byte [loop_pin_active], 0
     je .srv_no_pin
@@ -1350,12 +1421,12 @@ codegen_emit_store_rax_to_var:
     call emit_b
     ret
 .srv_no_pin:
-    ; O1: frame param check
+    ; O1: frame param check (frame params stay on stack, never pinned to r14)
     push rdi
     call codegen_find_frame_slot
     pop rdi
     cmp rax, -1
-    je .srv_global
+    je .srv_global_check
     ; frame param at slot K: emit mov [rbp-(K+1)*8],rax = 48 89 45 <disp8>
     mov rcx, rax
     mov al, 0x48
@@ -1368,6 +1439,43 @@ codegen_emit_store_rax_to_var:
     shl rcx, 3
     neg rcx
     mov al, cl
+    call emit_b
+    ret
+.srv_global_check:
+    ; O13: if accumulator already known, redirect store to r14
+    cmp byte [loop_accum_active], 0
+    je .srv_first_check
+    cmp rdi, [loop_accum_var_idx]
+    jne .srv_global
+    ; emit mov r14,rax = 49 89 C6
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    ret
+.srv_first_check:
+    ; First global store inside the outermost loop → promote to accumulator (O13)
+    cmp byte [loop_pin_active], 0
+    je .srv_global             ; not in a pinned loop
+    cmp qword [loop_pin_depth], 1
+    jne .srv_global            ; nested loop: only pin in outermost
+    cmp rdi, [loop_pin_var_idx]
+    je .srv_global             ; this IS the loop counter
+    ; Promote: set accumulator, patch the placeholder address, store to r14
+    mov [loop_accum_var_idx], rdi
+    mov byte [loop_accum_active], 1
+    call get_var_va            ; rdi=var_idx → rax=VA (rdi preserved by caller-save)
+    mov rdx, [loop_accum_patch_pos]
+    lea rcx, [out_buffer]
+    mov [rcx+rdx+4], eax       ; patch 4-byte address into placeholder
+    ; emit mov r14,rax = 49 89 C6
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC6
     call emit_b
     ret
 .srv_global:
@@ -2299,13 +2407,24 @@ codegen_emit_push_var_slot:
     cmp rax, -1
     jne .pvs_skip                  ; frame param: hardware frame protects it
     cmp byte [loop_pin_active], 0
-    je .pvs_global
+    je .pvs_check_accum
     cmp rdi, [loop_pin_var_idx]
-    jne .pvs_global
-    ; pinned: push r15 = 41 57
+    jne .pvs_check_accum
+    ; pinned to r15: push r15 = 41 57
     mov al, 0x41
     call emit_b
     mov al, 0x57
+    call emit_b
+    ret
+.pvs_check_accum:
+    ; O13: accumulator var → push r14 = 41 56
+    cmp byte [loop_accum_active], 0
+    je .pvs_global
+    cmp rdi, [loop_accum_var_idx]
+    jne .pvs_global
+    mov al, 0x41
+    call emit_b
+    mov al, 0x56
     call emit_b
     ret
 .pvs_global:
@@ -2333,13 +2452,24 @@ codegen_emit_pop_var_slot:
     cmp rax, -1
     jne .ppv_skip
     cmp byte [loop_pin_active], 0
-    je .ppv_global
+    je .ppv_check_accum
     cmp rdi, [loop_pin_var_idx]
-    jne .ppv_global
-    ; pinned: pop r15 = 41 5F
+    jne .ppv_check_accum
+    ; pinned to r15: pop r15 = 41 5F
     mov al, 0x41
     call emit_b
     mov al, 0x5F
+    call emit_b
+    ret
+.ppv_check_accum:
+    ; O13: accumulator var → pop r14 = 41 5E
+    cmp byte [loop_accum_active], 0
+    je .ppv_global
+    cmp rdi, [loop_accum_var_idx]
+    jne .ppv_global
+    mov al, 0x41
+    call emit_b
+    mov al, 0x5E
     call emit_b
     ret
 .ppv_global:
@@ -3001,19 +3131,20 @@ codegen_peephole:
     cmp byte [rdi],   0x0F
     jne .ph_next
     ; [1] = setcc byte: high nibble must be 9
+    ; NOTE: use edx (not ecx) here — ecx holds out_idx and must not be clobbered
     movzx eax, byte [rdi+1]
-    mov ecx, eax
-    and ecx, 0xF0
-    cmp ecx, 0x90
+    mov edx, eax
+    and edx, 0xF0
+    cmp edx, 0x90
     jne .ph_next
     ; low nibble must be in {4,5,C,D,E,F}
-    mov ecx, eax
-    and ecx, 0x0F
-    cmp ecx, 0x04
+    mov edx, eax
+    and edx, 0x0F
+    cmp edx, 0x04
     jl .ph_next
-    cmp ecx, 0x05
+    cmp edx, 0x05
     jle .ph_d_ok    ; 4 or 5 → sete/setne
-    cmp ecx, 0x0C
+    cmp edx, 0x0C
     jl .ph_next     ; 6–B: not a recognized setcc
 .ph_d_ok:
     ; verify the remaining 13 bytes:
@@ -3134,6 +3265,72 @@ codegen_peephole:
     add rbx, 3              ; advance past mov rbx,rax (3 bytes)
     jmp .ph_loop
 .ph_f_miss:
+; ── Pattern G (18 bytes) ─────────────────────────────────────────────────────
+; Fold: mov rax,r14 + mov r10,rax + mov rax,r15 + mov rbx,r10 + add rax,rbx + mov r14,rax
+;       4C 89 F0    49 89 C2       4C 89 F8       4C 89 D3       48 01 D8      49 89 C6
+;   →   add r14,r15  (4D 01 FE)  +  7-byte NOP  +  8-byte NOP  (18 bytes total)
+; Fires when O13 (r14 accum) + O2 (r15 counter) both active and loop body is accum += counter.
+    cmp rdx, 18
+    jl .ph_g_miss
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi+0],  0x4C
+    jne .ph_g_miss
+    cmp byte [rdi+1],  0x89
+    jne .ph_g_miss
+    cmp byte [rdi+2],  0xF0
+    jne .ph_g_miss
+    cmp byte [rdi+3],  0x49
+    jne .ph_g_miss
+    cmp byte [rdi+4],  0x89
+    jne .ph_g_miss
+    cmp byte [rdi+5],  0xC2
+    jne .ph_g_miss
+    cmp byte [rdi+6],  0x4C
+    jne .ph_g_miss
+    cmp byte [rdi+7],  0x89
+    jne .ph_g_miss
+    cmp byte [rdi+8],  0xF8
+    jne .ph_g_miss
+    cmp byte [rdi+9],  0x4C
+    jne .ph_g_miss
+    cmp byte [rdi+10], 0x89
+    jne .ph_g_miss
+    cmp byte [rdi+11], 0xD3
+    jne .ph_g_miss
+    cmp byte [rdi+12], 0x48
+    jne .ph_g_miss
+    cmp byte [rdi+13], 0x01
+    jne .ph_g_miss
+    cmp byte [rdi+14], 0xD8
+    jne .ph_g_miss
+    cmp byte [rdi+15], 0x49
+    jne .ph_g_miss
+    cmp byte [rdi+16], 0x89
+    jne .ph_g_miss
+    cmp byte [rdi+17], 0xC6
+    jne .ph_g_miss
+    ; Match: fold to add r14,r15 + 7-byte NOP + 8-byte NOP
+    mov byte [rdi+0],  0x4D     ; add r14,r15 = 4D 01 FE
+    mov byte [rdi+1],  0x01
+    mov byte [rdi+2],  0xFE
+    mov byte [rdi+3],  0x0F     ; 7-byte NOP: 0F 1F 80 00 00 00 00
+    mov byte [rdi+4],  0x1F
+    mov byte [rdi+5],  0x80
+    mov byte [rdi+6],  0x00
+    mov byte [rdi+7],  0x00
+    mov byte [rdi+8],  0x00
+    mov byte [rdi+9],  0x00
+    mov byte [rdi+10], 0x0F     ; 8-byte NOP: 0F 1F 84 00 00 00 00 00
+    mov byte [rdi+11], 0x1F
+    mov byte [rdi+12], 0x84
+    mov byte [rdi+13], 0x00
+    mov byte [rdi+14], 0x00
+    mov byte [rdi+15], 0x00
+    mov byte [rdi+16], 0x00
+    mov byte [rdi+17], 0x00
+    add rbx, 3                  ; advance past add r14,r15 (3 bytes)
+    jmp .ph_loop
+.ph_g_miss:
     inc rbx
     jmp .ph_loop
 .ph_done:
