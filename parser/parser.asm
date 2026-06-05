@@ -18,6 +18,7 @@ extern codegen_emit_push_rax, codegen_emit_pop_rbx
 extern codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
 extern codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
 extern codegen_emit_mov_rax_var, codegen_emit_store_rax_to_var
+extern push_style_frame, codegen_emit_memo_check, codegen_emit_memo_store
 extern codegen_emit_rdrand_rax, codegen_emit_neg_rax, codegen_emit_not_rax
 extern codegen_emit_bitwise_not_rax
 extern codegen_emit_add_rax_rbx, codegen_emit_sub_rax_rbx
@@ -76,6 +77,9 @@ cur_proto_param_vars:  resb 6       ; B-1: var indices for each param (up to 6)
 tco_return_active:     resb 1       ; O4: 1 if we are inside a .ret that may be TCO
 tco_was_emitted:       resb 1       ; O4: 1 if TCO jmp was emitted for this return
 tco_body_entry:        resq 1       ; O4: out_idx of current protocol body start (after prologue)
+proto_is_self_recursive: resb 1    ; O20: 1 if current protocol calls itself
+proto_memo_active:     resb 1      ; @memo: 1 if current protocol is memoized
+next_proto_memo:       resb 1      ; @memo: pending flag set by 'memo' keyword
 for_start_tok:         resb 1       ; static-bounds: tok_type before start parse_expr
 for_end_tok:           resb 1       ; static-bounds: tok_type before end parse_expr
 for_start_val:         resq 1       ; static-bounds: tok_int before start parse_expr
@@ -443,6 +447,11 @@ parse_factor:
     mov byte [tco_was_emitted], 1
     jmp .done
 .prt_do_normal:
+    ; O20: detect self-recursive call (r12 = called proto idx, cur_proto_idx = current)
+    cmp r12, [cur_proto_idx]
+    jne .prt_not_self_recur
+    mov byte [proto_is_self_recursive], 1
+.prt_not_self_recur:
     ; O6: save r10/r11 if live as expression spill regs (noop when depth=0)
     call codegen_emit_expr_spill_save
     ; ── Gap-1 fix: caller-save all in-scope vars before call ─────────────────
@@ -1015,6 +1024,8 @@ parse_stmt:
     je .pass
     cmp al, TOK_AT
     je .at
+    cmp al, TOK_MEMO
+    je .memo
     cmp al, TOK_USE
     je .use
     cmp al, TOK_ERR
@@ -1038,6 +1049,13 @@ parse_stmt:
     cmp al, TOK_ASSERT
     je .assert
     call lexer_next
+    jmp .done
+
+; ── @memo — memoize next protocol definition ───────────────────────────────────
+.memo:
+    mov byte [next_proto_memo], 1
+    call lexer_next
+    call parse_stmt
     jmp .done
 
 ; ── type declarations ──────────────────────────────────────────────────────────
@@ -1569,6 +1587,17 @@ parse_stmt:
     mov rax, [proto_count]
     mov [cur_proto_idx], rax
     inc qword [proto_count]
+    ; O20: reset self-recursive flag for this protocol
+    mov byte [proto_is_self_recursive], 0
+    ; @memo: latch memo flag if requested by 'memo' keyword
+    cmp byte [next_proto_memo], 0
+    je .prot_no_memo_set
+    mov byte [proto_memo_active], 1
+    mov byte [next_proto_memo], 0
+    jmp .prot_memo_latch
+.prot_no_memo_set:
+    mov byte [proto_memo_active], 0
+.prot_memo_latch:
     call lexer_next
     cmp byte [tok_type], TOK_LPAREN
     jne .prot_nobody
@@ -1691,6 +1720,12 @@ parse_stmt:
     ; O4: capture body-start out_idx (after any prologue+param-stores) for TCO jmp
     mov rax, [out_idx]
     mov [tco_body_entry], rax
+    ; @memo: emit cache lookup check at body entry (before any user code)
+    cmp byte [proto_memo_active], 0
+    je .prot_no_memo_check
+    mov rdi, [cur_proto_idx]
+    call codegen_emit_memo_check
+.prot_no_memo_check:
     ; save var_count for protocol-level scoping
     mov rax, [scope_depth]
     lea rcx, [scope_stack]
@@ -2599,12 +2634,26 @@ get_var_va_indirect:
     jmp codegen_get_var_va_proxy
 
 ; ── proto_emit_restore ────────────────────────────────────────────────────────
-; Emit pop qword [var_addr] for each protocol param in REVERSE order.
-; Unwinds the per-call hardware-stack frame installed at protocol entry (B-1).
-; Preserves rbx, r14. Must be called before codegen_emit_ret on every return path.
+; Emit the protocol epilogue: optional memo store, then leave + regalloc restore.
+; O21: for push-style (push r12 prologue) the order is leave→pop_r12, not the
+;      default regalloc→leave, so that pop r12 undoes the push before sub rsp.
+; @memo: emit cache store BEFORE regalloc so r12 still holds the param value.
 proto_emit_restore:
-    ; O18: restore callee-saved r12/r13 from frame before leave
+    ; @memo: store result to cache (r12 = param, rax = result, must come first)
+    cmp byte [proto_memo_active], 0
+    je .por_no_memo
+    mov rdi, [cur_proto_idx]
+    call codegen_emit_memo_store
+.por_no_memo:
+    ; O21: push-style → leave (add rsp for locals) then pop r12
+    cmp byte [push_style_frame], 0
+    jne .por_push_style
+    ; standard order: regalloc epilogue then leave
     call codegen_emit_regalloc_epilogue
-    ; O1: emit leave (C9) instead of pop sequence — frame-relative params
     call codegen_emit_leave
+    ret
+.por_push_style:
+    ; push-style order: leave first (locals), then pop r12 (undoes push r12)
+    call codegen_emit_leave
+    call codegen_emit_regalloc_epilogue
     ret

@@ -139,7 +139,8 @@ call. Next step: rbp-relative stack frames to eliminate global-memory indirectio
 
 ## Benchmark — Measured Numbers (June 2026, latest run)
 - Rex sum (1B): **~367ms** correct `499999999500000000` (O14 fusion intact; ~5.1× faster than C ~1947ms)
-- Rex fib(42): **~1288ms** correct `267914296` (FLC+O18 active; ~3.4× slower than C ~377ms)
+- Rex fib(40) non-memo: **~454ms** correct `102334155` (O21 active; ~3.2× slower than C ~142ms)
+- Rex fib(40) @memo: **~3ms** correct `102334155` (hash-table cache, effectively O(n))
 - Rex alloc: **~8ms**
 - Rex binary size ~8712 bytes minimal vs C ~15800 bytes (1.8× smaller)
 
@@ -235,3 +236,47 @@ read-before-write path needs the retroactive patch. Reset both fields at loop st
 ## edgecases/ folder
 Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-34, 37.
 Each file has expected-output comments and a README.md with a status table.
+
+## O21: Push-Style Prologue for 1-Param Protocols (IMPLEMENTED)
+Replaces `sub rsp,N; mov [rsp],r12; mov r12,rdi` with `push r12; mov r12,rdi; sub rsp,N`.
+Eliminates the stack save of r12 at function entry (the push IS the save) and the
+`mov r12,[rsp]` restore (replaced by `pop r12` at epilogue).
+**BSS:** `push_style_frame resb 1` in codegen.asm. Set by `codegen_set_frame` when
+param_cnt==1 AND regalloc_cnt==1. Cleared at `codegen_clear_frame`.
+**Prologue:** emits `41 54` (push r12) + `49 89 FC` (mov r12,rdi) + `48 81 EC 00000000` (sub rsp placeholder).
+**Epilogue:** `codegen_emit_regalloc_epilogue` emits `41 5C` (pop r12) instead of `4C 8B 24 24` (mov r12,[rsp]).
+**proto_emit_restore order (CRITICAL):** push-style = leave THEN pop r12 (leave adjusts rsp first,
+then pop undoes the push). Standard = regalloc-restore THEN leave.
+**Frame slot for param 0:** `codegen_find_frame_slot` returns slot=1 (not -1) for param 0
+in push-style, so Gap-1 correctly skips caller-save (r12 is callee-saved by the push/pop pair).
+**Performance:** Rex fib(40) ~454ms vs C ~142ms = 3.2× (improved from 3.4×).
+
+## O20: Self-Recursive Protocol Flag (IMPLEMENTED)
+BSS `proto_is_self_recursive resb 1` set to 1 in parse_prot `.prt_do_normal` when the
+called proto_idx equals `cur_proto_idx`. Reset to 0 at each `.prot` entry. Carries the
+information that the current protocol calls itself (for future optimizations).
+
+## @memo: Algorithmic Memoization (IMPLEMENTED)
+Syntax: `memo proto name(n): ...` — `memo` keyword (TOK_MEMO=86) before `proto`.
+Lexer: matches dword `0x6F6D656D` ("memo"), emits TOK_MEMO via `.kmemo` handler.
+Parser: `next_proto_memo` BSS flag set on TOK_MEMO; latched into `proto_memo_active` at `.prot`.
+**Cache:** per-protocol pointer at `MEMO_PTR_BASE + proto_idx*8` (= 0x445000 for proto 0).
+  Pointer is null until first call; then `rt_alc(8192)` allocates 1024×8-byte table,
+  filled with -1 (sentinel = uncached). Key = param value (assumed non-negative integer ≤ 1023).
+**codegen_emit_memo_check:** emitted at protocol body entry by parser at `.prot_nobody`.
+  Alloc path is **46 bytes** (NOT 48 — `mov [addr],r11` is 8 bytes: 4D 89 1C 25 + addr32).
+  jnz offset must be 46 (0x2E). Bug: was 48 (0x30) → jumped 2 bytes INTO the cmp instruction → segfault.
+  Cache hit path: `mov rbx,[r11+r12*8]; cmp rbx,-1; je .miss; mov rax,rbx; epilogue; ret`.
+  REX encoding: `4B 8B 1C E3` (REX.WXB, ModRM=1C, SIB=E3: scale=8, index=r12, base=r11).
+**codegen_emit_memo_store:** emitted before every epilogue by `proto_emit_restore`.
+  Bounds-checks n < 1024 then stores: `mov [r11+r12*8], rax` = `4B 89 04 E3`.
+  Table pointer reloaded from MEMO_PTR_BASE (not cached in register across calls).
+**MEMO_PTR_BASE=0x445000** (safe: var storage ends at 0x444000, no collision).
+**Performance:** @memo fib(40) ~3ms vs non-memo ~454ms — effectively O(n) instead of O(2^n).
+
+## Rex Protocol Call Syntax
+Rex uses `@name(args)` NOT `name(args)` for protocol calls. In parse_factor, `TOK_AT`
+dispatches to `.prt` which calls `proto_find`. Plain `TOK_IDENT` goes to `.idn` (var lookup)
+and returns 0 if not a variable — protocol names are NOT valid as bare identifiers in expressions.
+**Why this matters for debugging:** `output(fib(10))` outputs 0 (silent wrong result);
+correct is `output(@fib(10))`. Always use `@` prefix when calling protocols.

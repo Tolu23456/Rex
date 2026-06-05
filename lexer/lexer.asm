@@ -703,6 +703,12 @@ lexer_classify:
     cmp byte [tok_ident+4], 0
     je .kstep
 .nstep:
+    ; "memo": m,e,m,o → dword 0x6F6D656D, then null
+    cmp eax, 0x6F6D656D
+    jne .nmemo
+    cmp byte [tok_ident+4], 0
+    je .kmemo
+.nmemo:
     cmp eax, 0x656E6F4E
     jne .nkeyword
     cmp byte [tok_ident+4], 0
@@ -900,4 +906,7 @@ lexer_classify:
     ret
 .kis:
     mov byte [tok_type], TOK_IS
+    ret
+.kmemo:
+    mov byte [tok_type], TOK_MEMO
     ret

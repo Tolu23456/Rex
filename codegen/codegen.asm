@@ -54,6 +54,9 @@ global codegen_add_frame_local
 ; O18: register allocator
 global regalloc_cnt, regalloc_active
 global codegen_emit_regalloc_epilogue
+; O21: push-style frame + @memo
+global push_style_frame
+global codegen_emit_memo_check, codegen_emit_memo_store
 ; O6: register-based expression spill
 global codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
 global codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
@@ -120,6 +123,12 @@ sr_op:               resb 1
 regalloc_active:     resb 1
 regalloc_cnt:        resb 1
 regalloc_vars:       resb 2
+; O21: push-style frame — 1-param protocols use push r12/pop r12 instead of sub/add rsp slot
+push_style_frame:    resb 1
+; @memo: positions for forward jump patching during memo check emission
+memo_jnz_patch:      resq 1
+memo_jge_patch:      resq 1
+memo_je_patch:       resq 1
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -3490,10 +3499,17 @@ codegen_find_frame_slot:
     jmp .scan_lc
 .found_local:
     ; slot = param_cnt + local_idx + regalloc_cnt (O18: offset past callee-save area)
+    ; O21: push-style has no callee-save slots in sub-rsp frame — locals start at slot 0
+    cmp byte [push_style_frame], 0
+    jne .found_local_push
     movzx eax, byte [frame_param_cnt]
     add rax, rcx
     movzx rdx, byte [regalloc_cnt]
     add rax, rdx
+    ret
+.found_local_push:
+    ; push-style: param is in r12 (not a frame slot), locals start at [rsp+0]
+    mov rax, rcx
     ret
 .found:
     ; slot = param_idx + regalloc_cnt (O18: offset past callee-save area)
@@ -3529,6 +3545,12 @@ codegen_set_frame:
     jle .sf_ra_set
     mov al, 2
 .sf_ra_set:
+    ; O21: enable push-style frame for exactly 1-param protocols
+    mov byte [push_style_frame], 0
+    cmp al, 1
+    jne .sf_ra_nopush
+    mov byte [push_style_frame], 1
+.sf_ra_nopush:
     mov byte [regalloc_active], 1
     mov [regalloc_cnt], al
     movzx rax, al            ; how many to copy
@@ -3549,18 +3571,64 @@ codegen_set_frame:
 codegen_clear_frame:
     push rbx
     ; O9: patch the sub rsp imm32 in the prologue with the actual frame size.
-    ; size = (param_cnt + local_cnt + regalloc_cnt) * 8, rounded to 16, min 16.
+    ; O21: push-style frame covers only locals (param in r12 via push; callee slots via push instruction)
+    cmp byte [push_style_frame], 0
+    je .cf_standard_size
+    ; push-style: size = local_cnt * 8, rounded to 16 (min 0 = no sub rsp needed)
+    movzx rax, byte [frame_local_cnt]
+    shl rax, 3
+    add rax, 15
+    and rax, -16
+    jmp .cf_check_nop
+.cf_standard_size:
+    ; standard: size = (param_cnt + local_cnt + regalloc_cnt) * 8, rounded to 16, min 16
     movzx rax, byte [frame_param_cnt]
     movzx rcx, byte [frame_local_cnt]
     add rax, rcx
-    movzx rcx, byte [regalloc_cnt]   ; O18: callee-save slots for r12/r13
+    movzx rcx, byte [regalloc_cnt]
     add rax, rcx
-    shl rax, 3          ; × 8 bytes per slot
+    shl rax, 3
     add rax, 15
-    and rax, -16        ; round up to multiple of 16
+    and rax, -16
     cmp rax, 16
     jge .cf_patch
     mov rax, 16
+    jmp .cf_patch
+.cf_check_nop:
+    ; O21: if push-style and size==0, NOP out sub rsp and all add rsp epilogues
+    test rax, rax
+    jnz .cf_patch
+    ; NOP 7 bytes at (frame_size_patch_pos - 3) = the sub rsp instruction
+    mov rcx, [frame_size_patch_pos]
+    sub rcx, 3
+    lea rdx, [out_buffer]
+    mov byte [rdx+rcx+0], 0x90
+    mov byte [rdx+rcx+1], 0x90
+    mov byte [rdx+rcx+2], 0x90
+    mov byte [rdx+rcx+3], 0x90
+    mov byte [rdx+rcx+4], 0x90
+    mov byte [rdx+rcx+5], 0x90
+    mov byte [rdx+rcx+6], 0x90
+    ; NOP each add rsp epilogue (7 bytes at leave_patch_list[i] - 3)
+    movzx rbx, byte [leave_patch_cnt]
+    test rbx, rbx
+    jz .cf_clear
+    xor ecx, ecx
+.cf_nop_loop:
+    cmp rcx, rbx
+    jge .cf_clear
+    mov r8, [leave_patch_list + rcx*8]
+    sub r8, 3
+    lea rdx, [out_buffer]
+    mov byte [rdx+r8+0], 0x90
+    mov byte [rdx+r8+1], 0x90
+    mov byte [rdx+r8+2], 0x90
+    mov byte [rdx+r8+3], 0x90
+    mov byte [rdx+r8+4], 0x90
+    mov byte [rdx+r8+5], 0x90
+    mov byte [rdx+r8+6], 0x90
+    inc rcx
+    jmp .cf_nop_loop
 .cf_patch:
     mov rcx, [frame_size_patch_pos]
     lea rdx, [out_buffer]
@@ -3584,6 +3652,7 @@ codegen_clear_frame:
     mov byte [regalloc_active], 0    ; O18: clear register allocator
     mov byte [regalloc_cnt], 0
     mov byte [leave_patch_cnt], 0    ; FLC: clear leave patch count
+    mov byte [push_style_frame], 0   ; O21: clear push-style flag
     pop rbx
     ret
 
@@ -3614,7 +3683,35 @@ codegen_add_frame_local:
 ; rdi = param_count.  No frame pointer — rsp-relative addressing throughout.
 ; Actual frame size is patched at codegen_clear_frame time (O9 patch-back).
 codegen_emit_frame_prologue:
-    ; sub rsp, <imm32> placeholder = 48 81 EC 00 00 00 00
+    ; O21: push-style for 1-param protocols → push r12 + mov r12,rdi + sub rsp placeholder
+    cmp byte [push_style_frame], 0
+    je .fp_standard
+    ; push r12 = 41 54
+    mov al, 0x41
+    call emit_b
+    mov al, 0x54
+    call emit_b
+    ; mov r12, rdi = 49 89 FC
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xFC
+    call emit_b
+    ; sub rsp, placeholder (for locals only): 48 81 EC 00000000
+    mov al, 0x48
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xEC
+    call emit_b
+    mov rax, [out_idx]
+    mov [frame_size_patch_pos], rax
+    xor eax, eax
+    call emit_d
+    ret
+.fp_standard:
+    ; standard prologue: sub rsp, <imm32> placeholder = 48 81 EC 00 00 00 00
     ; Save the imm32 offset so codegen_clear_frame can patch the actual size.
     mov al, 0x48
     call emit_b
@@ -3677,7 +3774,10 @@ codegen_emit_regalloc_epilogue:
     movzx rcx, byte [regalloc_cnt]
     test rcx, rcx
     jz .re_done
-    ; mov r12,[rsp] = 4C 8B 24 24  (ModRM: mod=00 reg=100=r12 rm=100=SIB)
+    ; O21: push-style uses pop r12 (41 5C) instead of mov r12,[rsp] (4C 8B 24 24)
+    cmp byte [push_style_frame], 0
+    jne .re_pop_r12
+    ; standard: mov r12,[rsp] = 4C 8B 24 24  (ModRM: mod=00 reg=100=r12 rm=100=SIB)
     mov al, 0x4C
     call emit_b
     mov al, 0x8B
@@ -3698,6 +3798,13 @@ codegen_emit_regalloc_epilogue:
     mov al, 0x24
     call emit_b
     mov al, 0x08
+    call emit_b
+    jmp .re_done
+.re_pop_r12:
+    ; O21 push-style: pop r12 = 41 5C
+    mov al, 0x41
+    call emit_b
+    mov al, 0x5C
     call emit_b
 .re_done:
     ret
@@ -4122,4 +4229,268 @@ codegen_peephole:
     inc rbx
     jmp .ph_loop
 .ph_done:
+    ret
+
+; ── @memo: emit cache lookup check at protocol body entry ─────────────────────
+; rdi = proto_idx.  Emits runtime code that:
+;   1. On first call: allocates an 8192-byte table via rt_alc, fills with -1 (stosq)
+;   2. Checks r12 (param) is in [0, MEMO_TABLE_ENTRIES)
+;   3. On cache hit (table[r12] != -1): returns the cached value and exits protocol
+;   4. On miss: falls through to the protocol body
+;
+; Emitted machine code layout (72 or 74 bytes depending on push_style_frame):
+;   [0..14]  alloc-check: mov r11,[ptr]; test r11,r11; jnz +48
+;   [15..62] alloc-path (48 bytes): mov edi,8192; call rt_alc; fill; store ptr
+;   [63..94] use_ptr: range-check; lookup; mov rax,rbx; epilogue; ret
+;   [95/97]  .miss (fall-through)
+;
+; jump offsets are computed and patched at emit time.
+codegen_emit_memo_check:
+    push rbx
+    push r12
+    push r13
+    mov r12d, edi               ; r12 = proto_idx (compiler scratch)
+
+    ; ── mov r11, [MEMO_PTR_BASE + proto_idx*8] — 4D 8B 1C 25 addr32 ──
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    imul eax, r12d, 8
+    add eax, MEMO_PTR_BASE      ; addr32 fits: 0x445000 + max(32)*8 = 0x445100 < 2^32
+    call emit_d
+    ; ── test r11, r11 — 4D 85 DB ──
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x85
+    call emit_b
+    mov al, 0xDB
+    call emit_b
+    ; ── jnz +46 — 75 2E ──  (skip alloc path; alloc path is exactly 46 bytes)
+    mov al, 0x75
+    call emit_b
+    mov al, 46
+    call emit_b
+
+    ; ── alloc path (46 bytes) ──
+    ; mov edi, 8192 — BF 00 20 00 00
+    mov al, 0xBF
+    call emit_b
+    mov eax, 8192
+    call emit_d
+    ; call rt_alc — E8 <rel32>
+    mov al, 0xE8
+    call emit_b
+    mov rax, LOAD_BASE + RT_ALC_OFFSET
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ; mov r11, rax — 49 89 C3
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    ; push rdi — 57
+    mov al, 0x57
+    call emit_b
+    ; push rcx — 51
+    mov al, 0x51
+    call emit_b
+    ; mov rdi, r11 — 4C 89 DF
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xDF
+    call emit_b
+    ; mov rax, -1 (movabs) — 48 B8 FF FF FF FF FF FF FF FF
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov eax, -1
+    call emit_d
+    mov eax, -1
+    call emit_d
+    ; mov ecx, 1024 — B9 00 04 00 00
+    mov al, 0xB9
+    call emit_b
+    mov eax, 1024
+    call emit_d
+    ; rep stosq — F3 48 AB
+    mov al, 0xF3
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0xAB
+    call emit_b
+    ; pop rcx — 59
+    mov al, 0x59
+    call emit_b
+    ; pop rdi — 5F
+    mov al, 0x5F
+    call emit_b
+    ; mov [MEMO_PTR_BASE + proto_idx*8], r11 — 4D 89 1C 25 addr32
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    imul eax, r12d, 8
+    add eax, MEMO_PTR_BASE
+    call emit_d
+    ; (alloc path = 5+5+3+1+1+3+10+5+3+1+1+8 = 46 bytes) ✓
+
+    ; ── .use_ptr: range check ──
+    ; cmp r12, 1024 — 49 81 FC 00 04 00 00
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xFC
+    call emit_b
+    mov eax, 1024
+    call emit_d
+    ; jge rel8 (.miss) — 7D <placeholder>
+    mov al, 0x7D
+    call emit_b
+    mov rax, [out_idx]
+    mov [memo_jge_patch], rax
+    mov al, 0
+    call emit_b
+    ; mov rbx, [r11 + r12*8] — 4B 8B 1C E3
+    ; REX: W=1,R=0,X=1(r12-index),B=1(r11-base) → 0x4B
+    ; ModRM: mod=00 reg=011(rbx) rm=100(SIB) → 0x1C
+    ; SIB: scale=11(8) index=100(r12) base=011(r11) → 0xE3
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0xE3
+    call emit_b
+    ; cmp rbx, -1 — 48 83 FB FF
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xFB
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    ; je rel8 (.miss) — 74 <placeholder>
+    mov al, 0x74
+    call emit_b
+    mov rax, [out_idx]
+    mov [memo_je_patch], rax
+    mov al, 0
+    call emit_b
+    ; mov rax, rbx — 48 89 D8
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xD8
+    call emit_b
+
+    ; ── emit cache-hit epilogue (push-style or standard) then ret ──
+    cmp byte [push_style_frame], 0
+    jne .mc_push_epilogue
+    call codegen_emit_regalloc_epilogue
+    call codegen_emit_leave
+    jmp .mc_epilogue_done
+.mc_push_epilogue:
+    call codegen_emit_leave
+    call codegen_emit_regalloc_epilogue
+.mc_epilogue_done:
+    ; ret — C3
+    mov al, 0xC3
+    call emit_b
+
+    ; ── patch jge and je to point to .miss (current out_idx) ──
+    lea rcx, [out_buffer]
+    mov rax, [out_idx]
+    mov r13, [memo_jge_patch]
+    mov rbx, r13
+    inc rbx                     ; byte after the rel8 field
+    sub rax, rbx                ; rax = target - next_instr = rel8 value
+    mov [rcx + r13], al
+    mov rax, [out_idx]
+    mov r13, [memo_je_patch]
+    mov rbx, r13
+    inc rbx
+    sub rax, rbx
+    mov [rcx + r13], al
+
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; ── @memo: emit cache store after protocol body computes its result ────────────
+; rdi = proto_idx.  Emits runtime code that stores rax into memo_table[r12]
+; when r12 is in range.  Called from proto_emit_restore BEFORE regalloc epilogue
+; so that r12 still holds the protocol parameter.
+;
+; Emitted code (24 bytes):
+;   cmp r12, 1024       7B
+;   jge .skip (+14)     2B   (skip if out of range)
+;   mov r11,[ptr]      10B   (load pointer — table must exist; check emitted at entry)
+;   mov [r11+r12*8],rax 4B
+;   .skip:
+codegen_emit_memo_store:
+    push rbx
+    ; cmp r12, 1024 — 49 81 FC 00 04 00 00
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xFC
+    call emit_b
+    mov eax, 1024
+    call emit_d
+    ; jge .skip (+14) — 7D 0E
+    ; skip sequence = 10 (mov r11,[ptr]) + 4 (mov [r11+r12*8],rax) = 14 bytes
+    mov al, 0x7D
+    call emit_b
+    mov al, 14
+    call emit_b
+    ; mov r11, [MEMO_PTR_BASE + proto_idx*8] — 4D 8B 1C 25 addr32
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x1C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    imul eax, edi, 8
+    add eax, MEMO_PTR_BASE
+    call emit_d
+    ; mov [r11 + r12*8], rax — 4B 89 04 E3
+    ; REX: W=1,R=0,X=1(r12-index),B=1(r11-base) → 0x4B
+    ; ModRM: mod=00 reg=000(rax) rm=100(SIB) → 0x04
+    ; SIB: scale=11(8) index=100(r12) base=011(r11) → 0xE3
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0xE3
+    call emit_b
+    ; .skip:
+    pop rbx
     ret

@@ -85,6 +85,9 @@ TOK_AS         equ 82
 TOK_REPEAT     equ 83
 TOK_UNREACHABLE equ 84
 TOK_ASSERT     equ 85
+TOK_MEMO        equ 86
+MEMO_PTR_BASE   equ 0x445000   ; base addr for per-proto memo pointers (after var table ends at 0x444000)
+MEMO_TABLE_ENTRIES equ 1024    ; entries per memo table (int64, -1=uncached)
 TYPE_INT equ 1
 TYPE_FLOAT equ 2
 TYPE_BOOL equ 3
