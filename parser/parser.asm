@@ -1669,22 +1669,23 @@ parse_stmt:
     call emit_b_indirect
     mov al, 0x89
     call emit_b_indirect
-    ; ModRM byte for [rbp+disp8] destination
+    ; ModRM byte for [rsp+disp8] destination (rm=100 → SIB follows)
     lea rax, [rel .prot_fs_mrm]
     movzx ecx, byte [rax+r14]
     mov al, cl
     call emit_b_indirect
-    ; disp8 = -(K+1+regalloc_cnt)*8  (O18: offset past callee-save slots)
+    ; SIB = 0x24 (scale=0, index=none, base=rsp)
+    mov al, 0x24
+    call emit_b_indirect
+    ; disp8 = (K+regalloc_cnt)*8  (FLC: positive rsp-relative offset, bottom-up slots)
     movzx rax, byte [regalloc_cnt]
     add rax, r14
-    inc rax
     shl al, 3
-    neg al
     call emit_b_indirect
 .prot_fs_next:
     inc r14
     jmp .prot_fs
-.prot_fs_mrm: db 0x7D, 0x75, 0x55, 0x4D, 0x45, 0x4D
+.prot_fs_mrm: db 0x7C, 0x74, 0x54, 0x4C, 0x44, 0x4C
 
 .prot_nobody:
     ; O4: capture body-start out_idx (after any prologue+param-stores) for TCO jmp

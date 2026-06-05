@@ -138,8 +138,8 @@ Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
 ## Benchmark — Measured Numbers (June 2026, latest run)
-- Rex sum (1B): **~385ms** correct `499999999500000000` (O14 fusion intact; ~5.1× faster than C ~1947ms)
-- Rex fib(42): **~1355ms** correct `267914296` (O18 active; ~3.6× slower than C ~377ms)
+- Rex sum (1B): **~367ms** correct `499999999500000000` (O14 fusion intact; ~5.1× faster than C ~1947ms)
+- Rex fib(42): **~1288ms** correct `267914296` (FLC+O18 active; ~3.4× slower than C ~377ms)
 - Rex alloc: **~8ms**
 - Rex binary size ~8712 bytes minimal vs C ~15800 bytes (1.8× smaller)
 
@@ -152,27 +152,48 @@ BSS `sr_op` (resb 1) distinguishes op type (0=add 1=sub 2=mul 3=div).
 `.srv_do_promote` dispatches on sr_op for deferred case. Sub/mul/div emitters now contain
 the same candidate/deferred/normal structure as `codegen_emit_add_rax_rbx`.
 
+## FLC: Frameless Calling Convention (IMPLEMENTED)
+Eliminates `push rbp; mov rbp,rsp` from every protocol prologue. Replaces rbp-relative
+frame addressing with rsp-relative (bottom-up slot layout). Epilogue: `add rsp,N; ret`
+instead of `leave; ret`. Saves ~2 prologue instructions per call + 1 µop per epilogue.
+**Measured gain:** fib(42) 1355ms → 1288ms (~67ms, ~5%); smaller than projected (CPU stack engine
+makes push rbp / mov rbp,rsp cheap on modern hardware — near-zero latency via register renaming).
+**Frame layout (bottom-up):** slot K → [rsp+K*8]. Slots: 0=r12 save, 1=r13 save (if regalloc_cnt=2),
+then param slots at regalloc_cnt, then locals above.
+**Slot access encoding (rsp-relative):** `[rsp+K*8]` requires SIB byte 0x24:
+  - read rax:  `48 8B 44 24 <K*8>` (5 bytes vs 4 for rbp-relative)
+  - write rax: `48 89 44 24 <K*8>`
+  - read rdi:  `48 8B 7C 24 <K*8>`
+**O18 slot saves/restores (CRITICAL ModRM encoding):**
+  - `mov [rsp],r12`  = `4C 89 24 24` (ModRM=0x24: mod=00 reg=100=r12[3:0] rm=100=SIB)
+  - `mov r12,[rsp]`  = `4C 8B 24 24`
+  - `mov [rsp+8],r13` = `4C 89 6C 24 08` (ModRM=0x6C: mod=01 reg=101=r13[3:0] rm=100=SIB)
+  - `mov r13,[rsp+8]` = `4C 8B 6C 24 08`
+  **Bug fixed:** `0x04`/`0x4C` (r8/r9 reg fields) were used as ModRM; correct is `0x24`/`0x6C`
+  (r12/r13 lower 3 bits are 100/101, not 000/001). Verify: r12=12=0b1100→low3=100; r13=13=0b1101→low3=101.
+**Leave patch mechanism:** `codegen_emit_leave` emits `add rsp,imm32` placeholder (48 81 C4 00000000)
+and records the imm32 offset in `leave_patch_list` (BSS: resq 16). `codegen_clear_frame` patches
+both `sub rsp` prologue AND all `add rsp` epilogues with the same computed frame_size.
+**prot_fs encoding (parser.asm):** after emitting ModRM (now 0x7C/0x74/0x54/0x4C/0x44/0x4C for SIB form),
+emit SIB=0x24, then disp8=(K+regalloc_cnt)*8 positive (not neg). Old table was rbp-relative.
+**Remaining gap with C fib:** Rex spills/reloads local a and b to frame on every non-leaf call
+(4 mem ops). C uses callee-saved rbx to hold fib(n-1) across the second recursive call (0 mem ops).
+
 ## O18: Register Allocator — Pin Protocol Params to r12/r13 (IMPLEMENTED)
 Pins first min(param_cnt, 2) protocol params to callee-saved registers r12/r13.
-**Frame layout** (regalloc_cnt=N): [rbp-8]=saved r12, [rbp-16]=saved r13, then O1 slots
-at [rbp-(K+1+N)*8]. `codegen_find_frame_slot` adds regalloc_cnt to all return values
-so all callers (emit_mov_rax_var, emit_store_rax_to_var, output_typed, add_frame_local) auto-correct.
+**Frame layout** (regalloc_cnt=N): slots 0..N-1 are r12/r13 saves (FLC bottom-up); O1 param/local
+slots at K+N. `codegen_find_frame_slot` adds regalloc_cnt to all return values so all callers auto-correct.
 **BSS:** `sr_op resb 1`, `regalloc_active resb 1`, `regalloc_cnt resb 1`, `regalloc_vars resb 2`
 **Entry/exit sequences** emitted by `codegen_emit_frame_prologue` and `codegen_emit_regalloc_epilogue`.
 **Regalloc read:** `mov rax,r12` (4C 89 E0) or `mov rax,r13` (4C 89 E8).
 **Regalloc write:** `mov r12,rax` (49 89 C4) or `mov r13,rax` (49 89 C5).
 **Priority:** O13 accum and O2 pin checks are BEFORE O18 in read path; O18 store write
 guards against intercepting the active O13 accumulator via `loop_accum_active` check.
-**Known trade-off:** O18 adds 2 instructions per call (save + load r12) at protocol entry
-and 1 at exit (restore r12). For deep-recursive protocols (fib: 700M calls, few param reads)
-this HURTS (~7% regression) because store-to-load forwarding already makes [rbp-8] reads
-nearly free. O18 HELPS loop-heavy protocols called once with many param reads in the body.
-**TCO interaction:** TCO jmp bypasses the r12/r13 load instructions (they're in the prologue,
-tco_body_entry is after the prologue). For self-recursive TCO protocols, r12 would hold the
-OLD param — CORRECTNESS BUG if TCO fires on a protocol with regalloc_cnt > 0. Fib/sum/alloc
-do not trigger TCO, so this is a latent issue only.
-**Encoding verified:** [rbp-8] for r12: save=4C 89 65 F8; load-from-rdi=49 89 FC; restore=4C 8B 65 F8.
-[rbp-16] for r13: save=4C 89 6D F0; load-from-rsi=49 89 F5; restore=4C 8B 6D F0.
+**Known trade-off:** O18 adds mem ops per call. For deep-recursive protocols (fib: 700M calls,
+few param reads) this HURTS vs no-regalloc; store-to-load forwarding already makes frame reads
+cheap. O18 HELPS loop-heavy protocols called once with many param reads in the body.
+**TCO interaction:** r12 holds OLD param if TCO fires — latent correctness bug for regalloc protocols.
+Fib/sum/alloc do not trigger TCO.
 
 ## O14: Strength-Reduction Fusion (IMPLEMENTED)
 Fuses `:accum = accum + pin` → single `add r14, r15` (4D 01 FE), cutting the hot loop body

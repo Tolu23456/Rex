@@ -91,6 +91,9 @@ frame_local_vars: resb 32
 expr_spill_depth: resb 1
 ; O9: position in out_buffer of the sub rsp imm32 to patch with actual frame size
 frame_size_patch_pos: resq 1
+; FLC: frameless leave patch list — records imm32 positions of all add rsp epilogues
+leave_patch_list: resq 16
+leave_patch_cnt:  resb 1
 ; O2: loop counter register pin (r15)
 loop_pin_active:  resb 1
 loop_pin_var_idx: resq 1
@@ -279,17 +282,17 @@ codegen_output_typed:
     call codegen_find_frame_slot  ; rdi preserved; rax=slot or -1
     cmp rax, -1
     je .ot_global
-    ; frame param: emit mov rdi,[rbp-(K+1)*8] = 48 8B 7D <disp8>
+    ; frame slot K: emit mov rdi,[rsp+K*8] = 48 8B 7C 24 <disp8>
     mov rcx, rax
     mov al, 0x48
     call emit_b
     mov al, 0x8B
     call emit_b
-    mov al, 0x7D
+    mov al, 0x7C
     call emit_b
-    inc rcx
+    mov al, 0x24
+    call emit_b
     shl rcx, 3
-    neg rcx
     mov al, cl
     call emit_b
     pop rdi
@@ -1454,17 +1457,17 @@ codegen_emit_mov_rax_var:
     pop rdi
     cmp rax, -1
     je .mrv_global
-    ; frame param at slot K: emit mov rax,[rbp-(K+1)*8] = 48 8B 45 <disp8>
+    ; frame slot K: emit mov rax,[rsp+K*8] = 48 8B 44 24 <disp8>
     mov rcx, rax
     mov al, 0x48
     call emit_b
     mov al, 0x8B
     call emit_b
-    mov al, 0x45
+    mov al, 0x44
     call emit_b
-    inc rcx
+    mov al, 0x24
+    call emit_b
     shl rcx, 3
-    neg rcx
     mov al, cl
     call emit_b
     ret
@@ -1559,17 +1562,17 @@ codegen_emit_store_rax_to_var:
     pop rdi
     cmp rax, -1
     je .srv_global_check
-    ; frame param at slot K: emit mov [rbp-(K+1)*8],rax = 48 89 45 <disp8>
+    ; frame slot K: emit mov [rsp+K*8],rax = 48 89 44 24 <disp8>
     mov rcx, rax
     mov al, 0x48
     call emit_b
     mov al, 0x89
     call emit_b
-    mov al, 0x45
+    mov al, 0x44
     call emit_b
-    inc rcx
+    mov al, 0x24
+    call emit_b
     shl rcx, 3
-    neg rcx
     mov al, cl
     call emit_b
     ret
@@ -3369,6 +3372,7 @@ codegen_set_frame:
 
 ; ── O1: clear frame state (called at protocol exit) ──────────────────────────
 codegen_clear_frame:
+    push rbx
     ; O9: patch the sub rsp imm32 in the prologue with the actual frame size.
     ; size = (param_cnt + local_cnt + regalloc_cnt) * 8, rounded to 16, min 16.
     movzx rax, byte [frame_param_cnt]
@@ -3385,12 +3389,27 @@ codegen_clear_frame:
 .cf_patch:
     mov rcx, [frame_size_patch_pos]
     lea rdx, [out_buffer]
-    mov [rdx + rcx], eax    ; patch the imm32
-    ; clear state
+    mov [rdx + rcx], eax    ; patch sub rsp imm32
+    ; FLC: patch all add rsp imm32 in leave epilogues with the same frame_size
+    movzx rbx, byte [leave_patch_cnt]
+    test rbx, rbx
+    jz .cf_clear
+    lea rdx, [out_buffer]
+    xor ecx, ecx
+.cf_leave_loop:
+    cmp rcx, rbx
+    jge .cf_clear
+    mov r8, [leave_patch_list + rcx*8]
+    mov [rdx + r8], eax
+    inc rcx
+    jmp .cf_leave_loop
+.cf_clear:
     mov byte [frame_active], 0
     mov byte [frame_local_cnt], 0
     mov byte [regalloc_active], 0    ; O18: clear register allocator
     mov byte [regalloc_cnt], 0
+    mov byte [leave_patch_cnt], 0    ; FLC: clear leave patch count
+    pop rbx
     ret
 
 ; ── O5: register a var as a protocol-body local in the stack frame ─────────────
@@ -3402,14 +3421,13 @@ codegen_add_frame_local:
     movzx rbx, byte [frame_local_cnt]
     cmp rbx, 32
     jge .afl_full
-    ; verify disp8 range: slot = param_cnt + local_cnt + regalloc_cnt; (slot+1)*8 ≤ 128
+    ; verify disp8 range: slot = param_cnt + local_cnt + regalloc_cnt; slot*8 ≤ 127
     movzx rax, byte [frame_param_cnt]
     add rax, rbx        ; total slots so far
     movzx rdx, byte [regalloc_cnt]
     add rax, rdx        ; O18: account for callee-save slots
-    inc rax             ; slot + 1
-    shl rax, 3          ; * 8 = magnitude of displacement
-    cmp rax, 129        ; > 128 overflows signed disp8
+    shl rax, 3          ; * 8 = rsp-relative displacement
+    cmp rax, 128        ; ≥ 128 overflows signed disp8
     jge .afl_full
     mov [frame_local_vars + rbx], dil
     inc byte [frame_local_cnt]
@@ -3417,20 +3435,10 @@ codegen_add_frame_local:
     pop rbx
     ret
 
-; ── O1/O5/O9: emit frame prologue: push rbp; mov rbp,rsp; sub rsp,<placeholder> ─
-; rdi = param_count.  Actual frame size is patched at codegen_clear_frame time
-; once all local variables have been declared (O9 patch-back).
+; ── FLC/O1/O5/O9: emit frameless prologue: sub rsp,<placeholder> ─────────────
+; rdi = param_count.  No frame pointer — rsp-relative addressing throughout.
+; Actual frame size is patched at codegen_clear_frame time (O9 patch-back).
 codegen_emit_frame_prologue:
-    ; push rbp = 55
-    mov al, 0x55
-    call emit_b
-    ; mov rbp,rsp = 48 89 E5
-    mov al, 0x48
-    call emit_b
-    mov al, 0x89
-    call emit_b
-    mov al, 0xE5
-    call emit_b
     ; sub rsp, <imm32> placeholder = 48 81 EC 00 00 00 00
     ; Save the imm32 offset so codegen_clear_frame can patch the actual size.
     mov al, 0x48
@@ -3444,20 +3452,20 @@ codegen_emit_frame_prologue:
     mov [frame_size_patch_pos], rax
     xor eax, eax
     call emit_d        ; placeholder imm32 = 0
-    ; O18: save callee-saved regs to frame slots and load from ABI regs
-    ; Frame layout: [rbp-8]=saved r12, [rbp-16]=saved r13 (if regalloc_cnt=2)
+    ; O18: save callee-saved regs to rsp-relative slots and load from ABI regs
+    ; Frame layout (bottom-up): [rsp+0]=saved r12, [rsp+8]=saved r13 (regalloc_cnt=2)
     ; Param loads: r12←rdi (param0), r13←rsi (param1)
     movzx rcx, byte [regalloc_cnt]
     test rcx, rcx
     jz .fp_done
-    ; mov [rbp-8],r12 = 4C 89 65 F8
+    ; mov [rsp],r12 = 4C 89 24 24  (ModRM: mod=00 reg=100=r12 rm=100=SIB)
     mov al, 0x4C
     call emit_b
     mov al, 0x89
     call emit_b
-    mov al, 0x65
+    mov al, 0x24
     call emit_b
-    mov al, 0xF8
+    mov al, 0x24
     call emit_b
     ; mov r12,rdi = 49 89 FC
     mov al, 0x49
@@ -3468,14 +3476,16 @@ codegen_emit_frame_prologue:
     call emit_b
     cmp rcx, 2
     jl .fp_done
-    ; mov [rbp-16],r13 = 4C 89 6D F0
+    ; mov [rsp+8],r13 = 4C 89 6C 24 08  (ModRM: mod=01 reg=101=r13 rm=100=SIB)
     mov al, 0x4C
     call emit_b
     mov al, 0x89
     call emit_b
-    mov al, 0x6D
+    mov al, 0x6C
     call emit_b
-    mov al, 0xF0
+    mov al, 0x24
+    call emit_b
+    mov al, 0x08
     call emit_b
     ; mov r13,rsi = 49 89 F5
     mov al, 0x49
@@ -3487,38 +3497,56 @@ codegen_emit_frame_prologue:
 .fp_done:
     ret
 
-; ── O18: restore r12/r13 from frame callee-save slots before leave ────────────
+; ── O18: restore r12/r13 from rsp-relative callee-save slots before epilogue ──
 codegen_emit_regalloc_epilogue:
     movzx rcx, byte [regalloc_cnt]
     test rcx, rcx
     jz .re_done
-    ; mov r12,[rbp-8] = 4C 8B 65 F8
+    ; mov r12,[rsp] = 4C 8B 24 24  (ModRM: mod=00 reg=100=r12 rm=100=SIB)
     mov al, 0x4C
     call emit_b
     mov al, 0x8B
     call emit_b
-    mov al, 0x65
+    mov al, 0x24
     call emit_b
-    mov al, 0xF8
+    mov al, 0x24
     call emit_b
     cmp rcx, 2
     jl .re_done
-    ; mov r13,[rbp-16] = 4C 8B 6D F0
+    ; mov r13,[rsp+8] = 4C 8B 6C 24 08  (ModRM: mod=01 reg=101=r13 rm=100=SIB)
     mov al, 0x4C
     call emit_b
     mov al, 0x8B
     call emit_b
-    mov al, 0x6D
+    mov al, 0x6C
     call emit_b
-    mov al, 0xF0
+    mov al, 0x24
+    call emit_b
+    mov al, 0x08
     call emit_b
 .re_done:
     ret
 
-; ── O1: emit leave = C9 ───────────────────────────────────────────────────────
+; ── FLC: emit add rsp,imm32 (frameless epilogue) with patch-back ─────────────
+; Records imm32 position in leave_patch_list; patched with frame_size at
+; codegen_clear_frame time. Must be followed by codegen_emit_ret.
 codegen_emit_leave:
-    mov al, 0xC9
+    push rbx
+    ; add rsp, imm32 = 48 81 C4 <imm32>
+    mov al, 0x48
     call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xC4
+    call emit_b
+    ; record imm32 patch position
+    movzx rbx, byte [leave_patch_cnt]
+    mov rax, [out_idx]
+    mov [leave_patch_list + rbx*8], rax
+    inc byte [leave_patch_cnt]
+    xor eax, eax
+    call emit_d        ; placeholder imm32 = 0
+    pop rbx
     ret
 
 ; ── O4: emit jmp rel32 to a protocol out_idx (like call_prot but jmp) ─────────
