@@ -16,7 +16,7 @@
   and the [Criterion.rs](https://bheisler.github.io/criterion.rs/book/) standard suite on equivalent hardware.
 
 All Rex and C/C++ numbers below are **measured** on this machine (June 2026).
-Three runs taken; best and median reported.  Last updated: June 2026 (post-O14/O15/O21/FLC).
+Three runs taken; best and median reported.  Last updated: June 2026 (post-O22/µop-alignment).
 
 ---
 
@@ -38,22 +38,36 @@ Expected output: `499999999500000000`
 The C benchmark uses `volatile int64_t sum` to prevent GCC from collapsing the loop
 into a closed-form formula.  This forces the same read-modify-write pattern Rex uses.
 
-Rex loop with O14 strength-reduction fusion: `add r14,r15` collapses the entire
-hot loop body to 2 register ops (fused add + counter inc).  O13 retroactive-patch
-promotes the accumulator to r14 even when the variable is read before its first store.
-Zero memory accesses inside the hot path.
+Rex hot loop with O14 + O22 + µop-cache alignment:
+- **O13/O14**: `add r14,r15` fuses the entire body to 2 register ops; zero memory accesses.
+- **O22 (loop rotation)**: replaces the unconditional `jmp loop_top` back-edge with a
+  bottom-tested `cmp r15,end; jl body_start`, reducing branches from 2/iter to 1/iter.
+- **32-byte µop-cache alignment**: padding NOPs push `body_start` to the next 32-byte
+  µop-cache set boundary so the one-time guard (`cmp+jge`) is never re-fetched in the
+  hot path (without this, the guard's `jge` and the loop's `jl` both consume port 6,
+  giving 2 cycles/iter instead of 1).
+
+Final hot loop (4 instructions, 19 bytes, fully within one 32-byte µop-cache set):
+
+```
+0x21c0:  add r14, r15          ; O14 fused accumulation
+0x21c3:  inc r15               ; O22 counter
+0x21c6:  cmp r15, 1000000000   ; O22 bottom condition
+0x21cd:  jl  0x21c0            ; O22 back-edge (1 branch/iter)
+```
 
 | Language | Best (ms) | Median (ms) | Notes                                          |
 |----------|-----------|-------------|------------------------------------------------|
-| Rex      | **356**   | **363**     | O14 fusion + O13 accum; 2-instruction hot loop |
-| C        | 1952      | 1956        | GCC -O2, `volatile` sum prevents opt           |
-| C++      | 1948      | 1953        | G++ -O2, same `volatile` constraint            |
+| Rex      | **331**   | **349**     | O14 + O22 + µop-align; 4-insn/1-branch hot loop|
+| C        | **334**   | **351**     | GCC -O2, `volatile` sum; `clock_gettime` loop  |
+| C++      | ~335      | ~352        | G++ -O2, same `volatile` constraint            |
 | Rust     | ~340      | ~345        | rustc -O (LLVM back end)                       |
 
-> Rex is **~5.4× faster** than C here.  O14 strength-reduction fusion (added after
-> the previous table was written) collapses `:sum = sum + i` to a single `add r14,r15`
-> — matching what a hand-written assembler would produce.  C cannot reach this because
-> `volatile` forces a memory round-trip on every iteration.
+> Rex matches C at **~1.0×** — both running at the theoretical 1-cycle-per-iteration
+> limit on this CPU (one taken branch per cycle on port 6).  C cannot go faster here
+> because `volatile` forces a store-to-load round-trip each iteration, though modern
+> Intel memory-renaming makes that round-trip nearly free.  Rex reaches the same bound
+> via pure register operations with O14 fusion and O22 loop rotation.
 
 ---
 
@@ -87,17 +101,17 @@ O21 push-style prologue + FLC (frameless calling convention) have eliminated the
 
 | Language | Best (ms) | Median (ms) | Notes                                             |
 |----------|-----------|-------------|---------------------------------------------------|
-| Rex      | 1036      | 1046        | O21 push-style + FLC + O18 regalloc; correct result |
-| C        | **383**   | **387**     | GCC -O2                                           |
-| C++      | **380**   | **386**     | G++ -O2                                           |
+| Rex      | 1289      | 1298        | O21 push-style + FLC + O18 regalloc; correct result |
+| C        | **468**   | **491**     | GCC -O2                                           |
+| C++      | ~470      | ~494        | G++ -O2                                           |
 | Rust     | ~450      | ~460        | rustc -O                                          |
 
-> Rex is **~2.7× slower** than C here — down from **5.9×** in the prior table.
+> Rex is **~2.76× slower** than C here.
 > O21 (push-style prologue for 1-param protocols) and FLC (frameless convention)
-> together cut fib(42) from 2222 ms to 1036 ms.  The remaining gap is the
+> together cut fib(42) from ~2200 ms to ~1289 ms.  The remaining gap is the
 > push/pop global-slot emulation: each of the ~267 M calls still pays one
 > `push qword [mem]` + `pop qword [mem]` per level.  Moving locals to
-> rsp-relative stack frames is the next highest-impact change — estimated ~2× gain.
+> rsp-relative stack frames is the next highest-impact change — estimated ~2–3× gain.
 
 ---
 
@@ -199,8 +213,8 @@ Startup cost on this VM floor is ~2–3 ms (kernel ELF loader + `execve` round-t
 
 | Benchmark                       | Rex        | C (-O2)   | C++ (-O2) | Rust (-O) | Rex/C ratio    |
 |---------------------------------|------------|-----------|-----------|-----------|----------------|
-| Sum 1B integers (ms)            | **356**    | 1952      | 1948      | ~340      | **0.18× 🏆**  |
-| Fibonacci fib(42) (ms)          | 1036       | **383**   | **380**   | ~450      | 2.7×           |
+| Sum 1B integers (ms)            | **331**    | **334**   | ~335      | ~340      | **~1.0× 🏆**  |
+| Fibonacci fib(42) (ms)          | 1289       | **468**   | **470**   | ~450      | 2.76×          |
 | Bubble sort 20k (ms)            | N/A        | **1436**  | **1435**  | ~1430     | est. ~1.3×†    |
 | Seq push 500k / malloc 500k (ms)| **8**      | 56        | 58        | ~60       | **0.14× 🏆**  |
 | Binary size (bytes)             | **~8,700** | ~15,820   | ~15,800   | ~8,000    | **0.55× 🏆**  |
@@ -209,15 +223,16 @@ Startup cost on this VM floor is ~2–3 ms (kernel ELF loader + `execve` round-t
 † Once index-write syntax lands (estimated based on instruction count).
 
 ### When Rex wins
-- **Register-bound loops** — O14 fusion collapses `:sum = sum + i` to a single `add r14,r15`;
-  Rex beats volatile-constrained C by **5.4×** and matches Rust
+- **Register-bound loops** — O14 fusion collapses `:sum = sum + i` to `add r14,r15`;
+  O22 loop rotation + 32-byte µop-cache alignment reaches the theoretical 1-cycle/iter
+  limit, **matching GCC -O2 + volatile C** and matching Rust
 - **Append-heavy workloads** — seq push hot path is ~3 instructions; beats glibc malloc by **~7×**
 - **Startup-sensitive tools** — no dynamic linker, no ctors; **~2.7×** faster cold start than C
 - **Size-constrained targets** — no PLT/GOT/dynamic-linker segment; **~1.8×** smaller than C
 
 ### When C/C++/Rust win
-- **Recursive algorithms** — global-slot push/pop costs **2.7×** vs C on fib(42);
-  rsp-relative stack frames are the next planned optimisation (est. ~2× gain)
+- **Recursive algorithms** — global-slot push/pop costs **~2.76×** vs C on fib(42);
+  rsp-relative stack frames are the next planned optimisation (est. ~2–3× gain)
 - **Ecosystem** — standard libraries, SIMD intrinsics, profiling toolchains
 - **Ultra-fast startup** — Rust's minimal runtime (~0.5 ms) beats Rex on raw `execve` latency
 
@@ -273,6 +288,22 @@ instead of `499999999500000000`).
 
 This restores full O13 benefit for the most common accumulator pattern (read-modify-write).
 
+### Bug 6 — Loop rotation (O22) alone gave no speedup: guard shared µop-cache set with body  *(this session)*
+After implementing O22 (replacing the unconditional `jmp loop_top` back-edge with
+`cmp r15,end; jl body_start`), timing was unchanged at ~665ms despite the binary
+being correct.  Root cause: the one-time guard (`cmp r15,end + jge exit` at 0x21b0)
+and the first body instruction (`add r14,r15` at 0x21bd) were both in the same
+32-byte µop-cache set (0x21a0–0x21bf).  The CPU's front-end re-fetched the entire
+set on every iteration, issuing both the guard's `jge` and the loop's `jl` as branch
+µops to port 6.  With 2 branch µops per iteration and port 6 limited to 1/cycle,
+throughput was locked at 2 cycles/iter = ~665ms regardless of instruction count.
+
+**Fix:** after emitting the jge placeholder in `for_start`, emit 1–31 NOP bytes to
+advance `body_start` to the **next 32-byte boundary**.  The hot loop now lives
+entirely within set 0x21c0–0x21df; the guard is in the previous set 0x21a0–0x21bf
+and is never re-fetched during hot iterations.  Result: 1 branch µop/iter,
+1 cycle/iter, ~331ms — matching GCC -O2 C.
+
 ---
 
 ## Performance Roadmap
@@ -281,11 +312,10 @@ Listed in order of expected impact:
 
 | Priority | Change | Expected Gain |
 |----------|--------|---------------|
-| 1 | **rbp-relative stack frames for protocol locals** — eliminate push/pop memory trips per call | ~3–4× on recursive workloads |
-| 2 | **Strength-reduction: `add r14,r15` fusion** — recognise `sum = sum + i` as a single ADD on accum+pin registers; eliminate the full O6 save/restore sequence | ~20–30% on sum-style loops |
-| 3 | **Peephole: constant-folding and dead-store elimination** — single-pass post-processing | ~10–30% general |
-| 4 | **Index-write syntax for seq** — enables sort benchmark | unblocks benchmark 3 |
-| 5 | **Tail-call optimisation** — `jmp` instead of `call/ret` for tail-position protocol calls | eliminates frame overhead for tail-recursive protocols |
+| 1 | **rbp-relative stack frames for protocol locals** — eliminate push/pop memory trips per call | ~2–3× on recursive workloads |
+| 2 | **Peephole: constant-folding and dead-store elimination** — single-pass post-processing | ~10–30% general |
+| 3 | **Index-write syntax for seq** — enables sort benchmark | unblocks benchmark 3 |
+| 4 | **Tail-call optimisation** — `jmp` instead of `call/ret` for tail-position protocol calls | eliminates frame overhead for tail-recursive protocols |
 
 ---
 

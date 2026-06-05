@@ -137,12 +137,28 @@ reverse at every ret path. Correct: fib(10)=55 verified.
 Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
-## Benchmark — Measured Numbers (June 2026, latest run)
-- Rex sum (1B): **~367ms** correct `499999999500000000` (O14 fusion intact; ~5.1× faster than C ~1947ms)
-- Rex fib(40) non-memo: **~454ms** correct `102334155` (O21 active; ~3.2× slower than C ~142ms)
-- Rex fib(40) @memo: **~3ms** correct `102334155` (hash-table cache, effectively O(n))
-- Rex alloc: **~8ms**
+## Benchmark — Measured Numbers (June 2026, post-O22)
+- Rex sum (1B): **~331ms** correct `499999999500000000` (O14+O22+µop-align; AT PARITY with C ~334ms)
+- Rex fib(42): **~1289ms** correct `267914296` (O21+FLC+O18; ~2.76× slower than C ~468ms)
+- Rex alloc: **~8ms** vs C malloc ~56ms (Rex ~7× faster)
 - Rex binary size ~8712 bytes minimal vs C ~15800 bytes (1.8× smaller)
+
+## O22: Loop Rotation + 32-byte µop-cache alignment (IMPLEMENTED — CRITICAL LESSON)
+O22 replaces the unconditional `jmp loop_top` back-edge with `cmp r15,end; jl body_start` (1 branch/iter instead of 2).
+**Without µop-cache alignment, O22 gives ZERO speedup.** The root cause:
+- The one-time guard (`cmp r15,end + jge exit`, 13 bytes) and `body_start` (the first loop body instruction)
+  were in the SAME 32-byte µop-cache set (Intel DSB, 32-byte aligned blocks).
+- On every hot iteration, the CPU re-fetched the entire set, issuing both `jge` and `jl` as branch µops to port 6.
+- Port 6 handles 1 branch/cycle → 2 branch µops/iter = 2 cycles/iter even with "1 branch" loop.
+- MEASURED: inline asm of the exact same 4-instruction loop runs at 341ms (1 cycle/iter); Rex binary was 665ms (2 cycles/iter).
+**Fix:** after emitting the jge placeholder in `.fs_patch` (for the pinned rotation path), emit 1–31 NOP bytes
+to advance `body_start` to the **next 32-byte boundary**: `NOPs = (0x20 - (out_idx & 0x1F)) & 0x1F`.
+Then record `for_rotation_body_pc = out_idx`. Hot loop lives entirely in ONE 32-byte µop-cache set → 1 branch/iter.
+**Rule:** any future loop optimization that creates a bottom-tested loop MUST ensure the loop body is in a
+DIFFERENT 32-byte set from any pre-loop guard. The guard's `jge`/`jne` WILL be re-issued by the µop cache
+every iteration otherwise, burning port 6 capacity.
+**BSS added:** `for_rotation_end_val resq 1`, `for_rotation_body_pc resq 1`, `for_rotation_nop_cnt resb 1`.
+In `for_end` (pinned path), back-edge is now `.fe_pin_jmp` (rotation); non-pinned still uses `.fe_jmp` (unconditional jmp).
 
 ## O15: Strength-Reduction — sub/mul/div Fusion (IMPLEMENTED)
 Extends O14 to fuse `:accum = accum OP pin` for OP = -, *, /  in addition to +.

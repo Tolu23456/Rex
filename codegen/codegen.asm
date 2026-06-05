@@ -81,6 +81,10 @@ cont_base_depth:  resq 1
 prot_jmp_idx:     resq 1
 prot_jmp_live:    resb 1
 for_step_val:     resq 1
+; O22: loop rotation — bottom-tested back-edge for pinned outermost loops
+for_rotation_end_val:  resq 1  ; end_val of the pinned loop (saved before r13 is clobbered)
+for_rotation_body_pc:  resq 1  ; out_idx of body_start (32-byte aligned, after guard padding)
+for_rotation_nop_cnt:  resb 1  ; temp: NOP count during body_start alignment
 loop_else_flag_stack: resq 32
 loop_else_flag_depth: resq 1
 ; O1: stack frame for protocol params
@@ -706,6 +710,7 @@ codegen_emit_for_start:
     call emit_b
     mov rax, r13             ; end_val
     call emit_d
+    mov [for_rotation_end_val], r13  ; O22: save before r13 is clobbered in .fs_patch
     jmp .fs_patch
 .fs_cond_global:
     inc qword [loop_pin_depth]
@@ -737,6 +742,31 @@ codegen_emit_for_start:
     inc qword [jump_patch_depth]
     xor eax, eax
     call emit_d
+    ; O22: record body_start_pc for pinned outermost loop (loop_pin_active=1 and var matches)
+    cmp byte [loop_pin_active], 0
+    je .fs_push_cont
+    cmp r12, [loop_pin_var_idx]
+    jne .fs_push_cont
+    ; Align body_start to next 32-byte µop-cache set boundary so the guard's jge
+    ; (predicted not-taken) is never re-fetched from cache on hot iterations.
+    ; Without this, guard + body share one 32-byte set → 2 branch µops/iter → 2 cycles/iter.
+    mov rax, [out_idx]
+    and rax, 0x1F             ; offset of guard_end within its 32-byte set
+    jz .fs_rot_aligned        ; already at a new boundary, no padding needed
+    neg rax
+    add rax, 0x20             ; NOPs needed = 32 - offset
+    mov [for_rotation_nop_cnt], al
+.fs_rot_nop_loop:
+    mov al, 0x90              ; NOP
+    call emit_b               ; (may clobber rax/rcx/rdx; reload count from BSS)
+    movzx rax, byte [for_rotation_nop_cnt]
+    dec al
+    mov [for_rotation_nop_cnt], al
+    jnz .fs_rot_nop_loop
+.fs_rot_aligned:
+    mov rax, [out_idx]
+    mov [for_rotation_body_pc], rax
+.fs_push_cont:
     mov rdi, rbx
     call codegen_push_cont
     mov rax, rbx
@@ -769,7 +799,7 @@ codegen_emit_for_end:
     call emit_b
     mov al, 0xC7
     call emit_b
-    jmp .fe_jmp
+    jmp .fe_pin_jmp
 .fe_pin_step:
     cmp r14, 127
     jg .fe_pin_imm32
@@ -782,7 +812,7 @@ codegen_emit_for_end:
     call emit_b
     mov al, r14b
     call emit_b
-    jmp .fe_jmp
+    jmp .fe_pin_jmp
 .fe_pin_imm32:
     ; add r15, imm32 = 49 81 C7 <imm32>
     mov al, 0x49
@@ -793,7 +823,7 @@ codegen_emit_for_end:
     call emit_b
     mov eax, r14d
     call emit_d
-    jmp .fe_jmp
+    jmp .fe_pin_jmp
 .fe_global_inc:
     cmp r14, 1
     jne .fe_step
@@ -843,8 +873,32 @@ codegen_emit_for_end:
     call emit_d
     mov eax, r14d
     call emit_d
+.fe_pin_jmp:
+    ; O22: loop rotation — bottom-tested back-edge for pinned loop
+    ; emit: cmp r15, end_val = 49 81 FF <imm32>
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov rax, [for_rotation_end_val]
+    call emit_d
+    ; emit: jl body_start_pc = 0F 8C <rel32>
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x8C
+    call emit_b
+    mov rax, [for_rotation_body_pc]
+    add rax, LOAD_BASE
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    jmp .fe_after_jmp
 .fe_jmp:
-    ; emit: jmp back to loop start
+    ; emit: jmp back to loop start (non-pinned / dynamic-bounds loops)
     mov al, 0xE9
     call emit_b
     mov rax, r12
@@ -854,6 +908,7 @@ codegen_emit_for_end:
     add rdx, LOAD_BASE
     sub rax, rdx
     call emit_d
+.fe_after_jmp:
     call codegen_patch_jump
     call codegen_patch_breaks
     call codegen_pop_cont
