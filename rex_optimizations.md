@@ -18,9 +18,11 @@ practical in a hand-rolled compiler.
 | B1 | `bench_rex.rex` | Loop body wrote `total = total + i` (immutable rebind error at runtime) | Changed to `:total = total + i` |
 | B2 | `codegen/codegen.asm` — `codegen_emit_each_start` | Missing `inc qword [loop_pin_depth]`; `each_end` always decremented, causing underflow that spoiled the O2 pin flag for any loop that followed an `each` | Added the missing increment |
 | B3 | `codegen/codegen.asm` — `codegen_set_frame` | Dead store `mov [frame_param_cnt], bh` clobbered the parameter count with a stale high byte of rbx | Removed the dead store |
+| B4 | `codegen/codegen.asm` — `codegen_emit_for_start` | `get_var_va` returns the variable address in `rax`, but the immediately-following `mov al, 0x89/0x04/0x25` byte emissions clobbered the low byte of `rax` before `emit_d` consumed it (e.g. 0x440040 → 0x440025) | Save address with `mov rbx, rax` after `get_var_va`; restore with `mov rax, rbx` before `emit_d` |
+| B5 | `codegen/codegen.asm` — `codegen_peephole` Pattern D | Pattern D used `mov ecx, eax` for a nibble check, clobbering `rcx` which holds the captured `out_idx` for the entire peephole scan; the scanner then terminated early at the corrupted end index | Changed `mov ecx, eax` → `mov edx, eax` throughout Pattern D |
 
 After these fixes `bench_rex.rex` (`for :i in 0..10000000: :total = total + i`)
-produces `49999995000000` in ≈ 8 ms (dynamic-bounds path).
+produces `49999995000000` correctly.
 
 ---
 
@@ -51,7 +53,7 @@ code for the most common case.
 4021DF: mov [0x440000],rax   ; store total     — 8 bytes
 4021E7: inc qword [0x440040] ; i++             — 8 bytes
 4021EF: jmp 0x4021b0         ;                 — 5 bytes
-; = 11 instructions, 68 bytes, two 8-byte memory loads of i per iteration
+; = 11 instructions, 68 bytes, 5 memory ops per iteration
 ```
 
 **Implementation.**
@@ -85,14 +87,9 @@ The static emitter's pin path (triggered when `loop_pin_depth == 0`):
 - `codegen_emit_for_end` sees `loop_pin_active` and emits `inc r15` instead of
   `inc qword [i_addr]`, then flushes `mov [i_addr], r15` on loop exit.
 
-**Result — pinned inner loop:**
+**Result — pinned inner loop (before O13/O14 fusion):**
 
 ```
-; init (once):
-xor eax, eax            ; 2 bytes  (from_val == 0 → compact form)
-mov [i_addr], eax       ; 7 bytes
-mov r15, [i_addr]       ; 8 bytes  ← r15 = i (stays there for entire loop)
-
 ; loop top (hot path):
 cmp r15, 10000000       ; 7 bytes  ← immediate, no memory read
 jnl exit                ; 6 bytes
@@ -101,10 +98,23 @@ add rax, r15            ; 3 bytes  ← r15 used directly, no second memory load
 mov [total_addr], rax   ; 8 bytes
 inc r15                 ; 3 bytes  ← register increment, no memory write
 jmp top                 ; 5 bytes
-; = 7 instructions, 40 bytes — saves 28 bytes and 4 memory ops per iteration
+; = 7 instructions, 40 bytes, 2 memory ops/iter (down from 11 / 68 / 5)
 ```
 
-**Estimated speedup for the benchmark: ~30–35%.**
+**Combined with O13/O14 accumulator fusion (previously implemented), the actual
+current inner loop is:**
+
+```
+49 81 FF 80 96 98 00   cmp r15, 10000000   ; 7 bytes — static immediate
+0F 8D 0B 00 00 00      jnl exit            ; 6 bytes
+4D 01 FE               add r14, r15        ; 3 bytes — O14: fused accum+pin add
+49 FF C7               inc r15             ; 3 bytes — O2: register increment
+E9 E8 FF FF FF         jmp loop_top        ; 5 bytes
+; = 5 instructions, 24 bytes, 0 memory ops in hot path
+```
+
+Code size for the entire bench program: **119 bytes** (down from 147 bytes on
+the fully dynamic path).
 
 ---
 
@@ -133,6 +143,11 @@ the right operand is a single memory load, the expression saver stores `rax` to
 `r10`, loads the right operand into `rax`, then restores `r10 → rbx`.  The
 restoration can instead happen *before* the load: `mov rbx, rax; mov rax, [addr]`.
 This eliminates one register rename and the `r10` dependency chain.
+
+**Note on interaction with O14:**  In the benchmark, O14 strength-reduction
+fusion replaces the `mov r10,rax; load; mov rbx,r10` body with a single
+`add r14,r15`.  Pattern E therefore does not fire in the benchmark — it fires
+in programs that use binary `+` on two non-pinned variables.
 
 **Savings:** 1 instruction, 3 bytes of dependency per matching binary expression.
 
@@ -217,6 +232,85 @@ codegen_align_loop_top:
 
 **Savings:** up to 15 bytes of wasted fetch bandwidth per loop iteration, zero
 cost when already aligned.
+
+---
+
+### O-F  FLC — Frameless Calling Convention
+
+**File:** `codegen/codegen.asm` — `codegen_emit_frame_prologue`,
+`codegen_emit_leave`, `codegen_clear_frame`, `codegen_emit_regalloc_epilogue`;
+`parser/parser.asm` — `.prot_fs` param-store loop
+
+**What it replaces.**
+
+Every protocol call previously used the System V ABI frame pointer convention:
+
+```asm
+; prologue (4 bytes):
+push rbp          ; 55
+mov  rbp, rsp     ; 48 89 E5
+sub  rsp, N       ; 48 81 EC <N32>
+
+; epilogue:
+leave             ; C9  (= mov rsp,rbp; pop rbp)
+ret               ; C3
+```
+
+**Frameless replacement.**
+
+Remove `push rbp; mov rbp,rsp` entirely.  Address all frame slots
+`[rsp + K*8]` (positive offsets, bottom-up layout).  Replace `leave` with a
+patched `add rsp, N`:
+
+```asm
+; prologue (7 bytes — saves 4):
+sub rsp, N        ; 48 81 EC <N32>   (placeholder N, patched at clear_frame)
+
+; epilogue:
+add rsp, N        ; 48 81 C4 <N32>   (placeholder, patched to same N)
+ret               ; C3
+```
+
+**Patch-back mechanism.**  Because N is not known until all locals are declared,
+both the prologue `sub rsp` and every epilogue `add rsp` use placeholder `imm32 =
+0`.  `codegen_emit_frame_prologue` records the prologue imm32 offset in
+`frame_size_patch_pos`.  `codegen_emit_leave` records each epilogue imm32 offset
+into `leave_patch_list[leave_patch_cnt++]`.  `codegen_clear_frame` patches all of
+them with the computed frame size.
+
+**Frame slot encoding (rsp-relative).**  `[rsp + disp8]` requires a SIB byte
+since `rsp` as base triggers SIB-present encoding (`rm = 100`):
+
+| Operation | Encoding | Bytes |
+|-----------|----------|-------|
+| `mov rax,[rsp+K*8]` | `48 8B 44 24 <K*8>` | 5 |
+| `mov [rsp+K*8],rax` | `48 89 44 24 <K*8>` | 5 |
+| `mov rdi,[rsp+K*8]` | `48 8B 7C 24 <K*8>` | 5 |
+| `mov [rsp+K*8],rdi` | `48 89 7C 24 <K*8>` | 5 |
+| `mov [rsp],r12`     | `4C 89 24 24`       | 4 |
+| `mov r12,[rsp]`     | `4C 8B 24 24`       | 4 |
+| `mov [rsp+8],r13`   | `4C 89 6C 24 08`    | 5 |
+| `mov r13,[rsp+8]`   | `4C 8B 6C 24 08`    | 5 |
+
+`[rbp-K*8]` was 4 bytes (no SIB needed for rbp base); `[rsp+K*8]` costs one
+extra SIB byte per access, but the saved `push rbp; mov rbp,rsp` (4 bytes of
+prologue, ~2 µops) and the simpler `add rsp` epilogue (vs `leave` which is
+micro-sequenced) more than compensate.
+
+**ModRM table for param stores in `.prot_fs` (`parser.asm`).**  Stores of ABI
+argument registers into frame slots use ModRM `mod=01, rm=100` (SIB present):
+
+```
+reg:      rdi    rsi    rdx    rcx    r8     r9
+ModRM:    0x7C   0x74   0x54   0x4C   0x44   0x4C
+```
+
+Followed by `SIB = 0x24` and `disp8 = (K + regalloc_cnt) * 8`.
+
+**Measured gain (fib(42), 700 M recursive calls):**
+`1355 ms → 1288 ms` (~67 ms, ~5 %).  Smaller than expected because modern CPUs
+rename `push rbp` / `mov rbp,rsp` at near-zero latency via the stack engine;
+the main savings come in register pressure and code density, not µop count.
 
 ---
 
@@ -383,13 +477,33 @@ them, hiding DRAM latency entirely.
 
 ## Performance Summary
 
-| Inner loop | Instructions | Bytes | Memory ops/iter |
-|------------|-------------|-------|-----------------|
-| Before (dynamic bounds) | 11 | 68 | 4 (2 loads of i, 1 store i, 1 load total, 1 store total = 5; with cmp = +1 indirect) |
-| After O-A (static + pinned) | 7 | 40 | 2 (1 load total, 1 store total) |
-| After O-B (peephole E) | 6 | 37 | 2 |
-| After O-E (aligned top) | 6 | ≤ 40 | 2 (top is 16-byte aligned) |
+### Benchmark: `for :i in 0..10000000: :total = total + i`
 
-The combination of O-A through O-E brings the benchmark loop from a
-memory-bound 11-instruction sequence to a 6-instruction loop dominated only by
-the `total` accumulator read-modify-write.
+| Stage | Instructions (hot loop) | Bytes (hot loop) | Mem ops/iter | Total code size |
+|-------|------------------------|-----------------|--------------|-----------------|
+| Baseline (fully dynamic) | 11 | 68 | 5 | 147 bytes |
+| + O-A (static pin, r15) | 7 | 40 | 2 | — |
+| + O-D (9-byte `__le` init) | 7 | 40 | 2 | — |
+| + O-E (16-byte loop alignment) | 7 | ≤ 55 | 2 | — |
+| + O13/O14 accum fusion (r14) | **5** | **24** | **0** | **119 bytes** |
+
+The inner hot loop is now:
+
+```
+49 81 FF 80 96 98 00   cmp r15, 10000000   ; static immediate — no load
+0F 8D 0B 00 00 00      jnl exit
+4D 01 FE               add r14, r15        ; O14 fused accum+pin (3 bytes)
+49 FF C7               inc r15             ; O2 register increment (3 bytes)
+E9 E8 FF FF FF         jmp loop_top
+```
+
+All five instructions are single-µop.  Zero memory operations in the hot path.
+
+### Benchmark: `fib(42)` (700 M recursive calls)
+
+| Stage | Time | Notes |
+|-------|------|-------|
+| Before FLC | ~1355 ms | rbp-relative frame, `push rbp; leave` |
+| After O-F (FLC) | ~1288 ms | rsp-relative frame, `sub rsp; add rsp` |
+| Gain | ~67 ms (~5%) | Stack engine makes `push rbp` near-free; savings mainly from code density |
+| vs C (`gcc -O2`) | ~377 ms | Rex ~3.4× slower; remaining gap is 4 spill/reload ops per call vs C's 0 |
