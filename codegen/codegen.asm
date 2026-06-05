@@ -1869,6 +1869,47 @@ codegen_emit_add_rax_rbx:
     mov al, dl                 ; disp8 (edx preserved across emit_b)
     call emit_b
 .add_emit:
+    ; O24: memory-operand add fusion
+    ; If last 8 bytes = mov rbx,rax (48 89 C3) + mov rax,[rsp+D] (48 8B 44 24 D),
+    ; rewind 8 bytes and emit add rax,[rsp+D] (48 03 44 24 D) = 5 bytes.
+    ; This fires immediately after O19 rewrites the r10 round-trip, fusing the
+    ; load+save+load+restore+add sequence into: mov rax,[rsp+Da] + add rax,[rsp+Db].
+    mov rax, [out_idx]
+    cmp rax, 8
+    jl .add_o24_skip
+    lea rcx, [out_buffer]
+    add rcx, rax
+    sub rcx, 8
+    cmp byte [rcx+0], 0x48
+    jne .add_o24_skip
+    cmp byte [rcx+1], 0x89
+    jne .add_o24_skip
+    cmp byte [rcx+2], 0xC3        ; mov rbx,rax
+    jne .add_o24_skip
+    cmp byte [rcx+3], 0x48
+    jne .add_o24_skip
+    cmp byte [rcx+4], 0x8B
+    jne .add_o24_skip
+    cmp byte [rcx+5], 0x44
+    jne .add_o24_skip
+    cmp byte [rcx+6], 0x24        ; mov rax,[rsp+D]
+    jne .add_o24_skip
+    ; [rcx+7] = D (disp8)
+    movzx edx, byte [rcx+7]
+    sub rax, 8
+    mov [out_idx], rax
+    mov al, 0x48                   ; add rax,[rsp+D] = 48 03 44 24 D
+    call emit_b
+    mov al, 0x03
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    mov al, dl                     ; edx preserved across emit_b
+    call emit_b
+    ret
+.add_o24_skip:
     ; add rax,rbx = 48 01 D8
     mov al, 0x48
     call emit_b
@@ -1915,41 +1956,41 @@ codegen_emit_sub_rax_rbx:
     ; rewind and emit lea rax,[r12-K] (5 bytes) instead of neg rax; add rax,rbx (6 bytes).
     mov rax, [out_idx]
     cmp rax, 14
-    jl .sub_emit
+    jl .sub_o19b
     lea rcx, [out_buffer]
     add rcx, rax
     sub rcx, 14
     cmp byte [rcx+0],  0x4C
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+1],  0x89
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+2],  0xE0
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+3],  0x49
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+4],  0x89
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+5],  0xC2
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+6],  0xB8
-    jne .sub_emit
+    jne .sub_o19b
     movzx edx, byte [rcx+7]
     test edx, edx
-    jz .sub_emit
+    jz .sub_o19b
     cmp edx, 128
-    jge .sub_emit
+    jge .sub_o19b
     cmp byte [rcx+8],  0x00
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+9],  0x00
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+10], 0x00
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+11], 0x4C
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+12], 0x89
-    jne .sub_emit
+    jne .sub_o19b
     cmp byte [rcx+13], 0xD3
-    jne .sub_emit
+    jne .sub_o19b
     ; Match: rewind 14 bytes, emit lea rax,[r12-K] = 49 8D 44 24 <(256-K)&0xFF>
     sub rax, 14
     mov [out_idx], rax
@@ -1966,7 +2007,122 @@ codegen_emit_sub_rax_rbx:
     mov al, dl           ; edx preserved across emit_b
     call emit_b
     ret
+.sub_o19b:
+    ; O19b: frame-local r10 round-trip for sub (11 bytes) — mirrors add's O19.
+    ; If last 11 bytes = mov r10,rax (49 89 C2) + mov rax,[rsp+D] (48 8B 44 24 D)
+    ;   + mov rbx,r10 (4C 89 D3),
+    ; rewrite to: mov rbx,rax (48 89 C3) + mov rax,[rsp+D] (48 8B 44 24 D).
+    ; The subsequent .sub_emit then sees rbx=LHS, rax=[rsp+D]=RHS and can fuse.
+    mov rax, [out_idx]
+    cmp rax, 11
+    jl .sub_emit
+    lea rcx, [out_buffer]
+    add rcx, rax
+    sub rcx, 11
+    cmp byte [rcx+0],  0x49
+    jne .sub_emit
+    cmp byte [rcx+1],  0x89
+    jne .sub_emit
+    cmp byte [rcx+2],  0xC2        ; mov r10,rax
+    jne .sub_emit
+    cmp byte [rcx+3],  0x48
+    jne .sub_emit
+    cmp byte [rcx+4],  0x8B
+    jne .sub_emit
+    cmp byte [rcx+5],  0x44
+    jne .sub_emit
+    cmp byte [rcx+6],  0x24        ; mov rax,[rsp+D]
+    jne .sub_emit
+    ; [rcx+7] = D (disp8)
+    cmp byte [rcx+8],  0x4C
+    jne .sub_emit
+    cmp byte [rcx+9],  0x89
+    jne .sub_emit
+    cmp byte [rcx+10], 0xD3        ; mov rbx,r10
+    jne .sub_emit
+    ; Match: rewind 11 bytes, emit mov rbx,rax + mov rax,[rsp+D]
+    movzx edx, byte [rcx+7]        ; D (disp8)
+    sub rax, 11
+    mov [out_idx], rax
+    mov al, 0x48                   ; mov rbx,rax = 48 89 C3
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    mov al, 0x48                   ; mov rax,[rsp+D] = 48 8B 44 24 D
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    mov al, dl                     ; edx preserved across emit_b
+    call emit_b
+    ; fall through to .sub_emit
 .sub_emit:
+    ; O24b: memory-operand sub fusion (13-byte look-back).
+    ; If last 13 bytes = mov rax,[rsp+Da] (48 8B 44 24 Da) + mov rbx,rax (48 89 C3)
+    ;   + mov rax,[rsp+Db] (48 8B 44 24 Db),
+    ; rewind 13 bytes and emit: mov rax,[rsp+Da]; sub rax,[rsp+Db] (10 bytes).
+    ; Fires after O19b rewrites the frame-local r10 round-trip.
+    mov rax, [out_idx]
+    cmp rax, 13
+    jl .sub_o24b_skip
+    lea rcx, [out_buffer]
+    add rcx, rax
+    sub rcx, 13
+    cmp byte [rcx+0],  0x48        ; mov rax,[rsp+Da]
+    jne .sub_o24b_skip
+    cmp byte [rcx+1],  0x8B
+    jne .sub_o24b_skip
+    cmp byte [rcx+2],  0x44
+    jne .sub_o24b_skip
+    cmp byte [rcx+3],  0x24
+    jne .sub_o24b_skip
+    ; [rcx+4] = Da
+    cmp byte [rcx+5],  0x48        ; mov rbx,rax
+    jne .sub_o24b_skip
+    cmp byte [rcx+6],  0x89
+    jne .sub_o24b_skip
+    cmp byte [rcx+7],  0xC3
+    jne .sub_o24b_skip
+    cmp byte [rcx+8],  0x48        ; mov rax,[rsp+Db]
+    jne .sub_o24b_skip
+    cmp byte [rcx+9],  0x8B
+    jne .sub_o24b_skip
+    cmp byte [rcx+10], 0x44
+    jne .sub_o24b_skip
+    cmp byte [rcx+11], 0x24
+    jne .sub_o24b_skip
+    ; [rcx+12] = Db
+    movzx edx, byte [rcx+4]        ; Da (rdx preserved across emit_b)
+    movzx esi, byte [rcx+12]       ; Db (rsi preserved across emit_b)
+    sub rax, 13
+    mov [out_idx], rax
+    mov al, 0x48                   ; mov rax,[rsp+Da] = 48 8B 44 24 Da
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    mov al, dl
+    call emit_b
+    mov al, 0x48                   ; sub rax,[rsp+Db] = 48 2B 44 24 Db
+    call emit_b
+    mov al, 0x2B
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    mov al, sil                    ; rsi preserved across emit_b
+    call emit_b
+    ret
+.sub_o24b_skip:
     ; rbx - rax → rax: neg rax; add rax,rbx
     mov al, 0x48
     call emit_b
