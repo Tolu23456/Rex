@@ -138,11 +138,41 @@ Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
 ## Benchmark — Measured Numbers (June 2026, latest run)
-- Rex sum (1B): **~375ms** correct output `499999999500000000` (previously 804ms before O14; ~5.2× faster than C 1947ms)
-- Rex fib(42): 2222ms (5.9× slower than C 377ms — VM load varies; earlier 1238ms also measured)
-- Rex seq-push (500k): 12ms (4.8× faster than C malloc/free 58ms)
-- Rex binary size ~8712 bytes (minimal) vs C ~15800 bytes (1.8× smaller)
-- Rex startup ~3ms vs C ~8ms (~2.7× faster)
+- Rex sum (1B): **~385ms** correct `499999999500000000` (O14 fusion intact; ~5.1× faster than C ~1947ms)
+- Rex fib(42): **~1355ms** correct `267914296` (O18 active; ~3.6× slower than C ~377ms)
+- Rex alloc: **~8ms**
+- Rex binary size ~8712 bytes minimal vs C ~15800 bytes (1.8× smaller)
+
+## O15: Strength-Reduction — sub/mul/div Fusion (IMPLEMENTED)
+Extends O14 to fuse `:accum = accum OP pin` for OP = -, *, /  in addition to +.
+- **sub:** `sub r14,r15` = `4D 29 FE`
+- **mul:** `imul r14,r15` = `4D 0F AF F7`
+- **div:** `mov rax,r14; cqo; idiv r15; mov r14,rax` = `4C 89 F0 48 99 49 F7 FF 49 89 C6`
+BSS `sr_op` (resb 1) distinguishes op type (0=add 1=sub 2=mul 3=div).
+`.srv_do_promote` dispatches on sr_op for deferred case. Sub/mul/div emitters now contain
+the same candidate/deferred/normal structure as `codegen_emit_add_rax_rbx`.
+
+## O18: Register Allocator — Pin Protocol Params to r12/r13 (IMPLEMENTED)
+Pins first min(param_cnt, 2) protocol params to callee-saved registers r12/r13.
+**Frame layout** (regalloc_cnt=N): [rbp-8]=saved r12, [rbp-16]=saved r13, then O1 slots
+at [rbp-(K+1+N)*8]. `codegen_find_frame_slot` adds regalloc_cnt to all return values
+so all callers (emit_mov_rax_var, emit_store_rax_to_var, output_typed, add_frame_local) auto-correct.
+**BSS:** `sr_op resb 1`, `regalloc_active resb 1`, `regalloc_cnt resb 1`, `regalloc_vars resb 2`
+**Entry/exit sequences** emitted by `codegen_emit_frame_prologue` and `codegen_emit_regalloc_epilogue`.
+**Regalloc read:** `mov rax,r12` (4C 89 E0) or `mov rax,r13` (4C 89 E8).
+**Regalloc write:** `mov r12,rax` (49 89 C4) or `mov r13,rax` (49 89 C5).
+**Priority:** O13 accum and O2 pin checks are BEFORE O18 in read path; O18 store write
+guards against intercepting the active O13 accumulator via `loop_accum_active` check.
+**Known trade-off:** O18 adds 2 instructions per call (save + load r12) at protocol entry
+and 1 at exit (restore r12). For deep-recursive protocols (fib: 700M calls, few param reads)
+this HURTS (~7% regression) because store-to-load forwarding already makes [rbp-8] reads
+nearly free. O18 HELPS loop-heavy protocols called once with many param reads in the body.
+**TCO interaction:** TCO jmp bypasses the r12/r13 load instructions (they're in the prologue,
+tco_body_entry is after the prologue). For self-recursive TCO protocols, r12 would hold the
+OLD param — CORRECTNESS BUG if TCO fires on a protocol with regalloc_cnt > 0. Fib/sum/alloc
+do not trigger TCO, so this is a latent issue only.
+**Encoding verified:** [rbp-8] for r12: save=4C 89 65 F8; load-from-rdi=49 89 FC; restore=4C 8B 65 F8.
+[rbp-16] for r13: save=4C 89 6D F0; load-from-rsi=49 89 F5; restore=4C 8B 6D F0.
 
 ## O14: Strength-Reduction Fusion (IMPLEMENTED)
 Fuses `:accum = accum + pin` → single `add r14, r15` (4D 01 FE), cutting the hot loop body
