@@ -85,6 +85,9 @@ for_step_val:     resq 1
 for_rotation_end_val:  resq 1  ; end_val of the pinned loop (saved before r13 is clobbered)
 for_rotation_body_pc:  resq 1  ; out_idx of body_start (32-byte aligned, after guard padding)
 for_rotation_nop_cnt:  resb 1  ; temp: NOP count during body_start alignment
+; O23: 2×loop unrolling with dual accumulators (rax=sum_odd, rbx=odd_counter)
+for_rotation_from_val: resq 1  ; from_val saved in for_start (for even-iteration-count check)
+o23_active:            resb 1  ; 1 if O23 2×unroll was applied in for_end for this loop
 loop_else_flag_stack: resq 32
 loop_else_flag_depth: resq 1
 ; O1: stack frame for protocol params
@@ -689,6 +692,9 @@ codegen_emit_for_start:
     mov byte [sr_add_candidate], 0
     mov byte [sr_add_rhs_is_pin], 0
     mov byte [sr_add_done], 0
+    ; O23: save from_val (rsi) for even-iteration check, reset flag
+    mov [for_rotation_from_val], rsi
+    mov byte [o23_active], 0
     mov al, 0x4C
     call emit_b
     mov al, 0x8B
@@ -699,6 +705,20 @@ codegen_emit_for_start:
     call emit_b
     xor eax, eax
     call emit_d
+    ; O23: speculative init — xor eax,eax (sum_odd=0) and lea rbx,[r15+1] (odd_counter=from_val+1)
+    ; Emitted before the guard; harmless for non-O23 loops (rax/rbx unused in O14-only hot path)
+    mov al, 0x31        ; xor eax, eax = 31 C0
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x49        ; lea rbx, [r15+1] = 49 8D 5F 01
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x5F
+    call emit_b
+    mov al, 0x01
+    call emit_b
     call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]       ; loop cond start (after the init load)
     ; emit cmp r15,end_val = 49 81 FF <imm32>
@@ -792,7 +812,45 @@ codegen_emit_for_end:
     ; pinned: increment r15
     cmp r14, 1
     jne .fe_pin_step
-    ; inc r15 = 49 FF C7
+    ; O23: check if 2×unroll with dual accumulators applies
+    ; Conditions: O14 active (sr_add_done==1) AND (end-from) is even AND body==3 bytes
+    cmp byte [sr_add_done], 0
+    je .fe_no_o23
+    mov rax, [for_rotation_end_val]
+    sub rax, [for_rotation_from_val]
+    test rax, 1                    ; odd iteration count?
+    jnz .fe_no_o23
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 3                     ; body must be exactly 3 bytes (add r14,r15 only)
+    jne .fe_no_o23
+    ; O23 applies — emit: add rax,rbx + add r15,2 + add rbx,2  then fall to .fe_pin_jmp
+    mov byte [o23_active], 1
+    mov al, 0x48                   ; add rax, rbx = 48 01 D8
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xD8
+    call emit_b
+    mov al, 0x49                   ; add r15, 2 = 49 83 C7 02
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x02
+    call emit_b
+    mov al, 0x48                   ; add rbx, 2 = 48 83 C3 02
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    mov al, 0x02
+    call emit_b
+    jmp .fe_pin_jmp
+.fe_no_o23:
+    ; normal path: inc r15 = 49 FF C7
     mov al, 0x49
     call emit_b
     mov al, 0xFF
@@ -910,6 +968,16 @@ codegen_emit_for_end:
     call emit_d
 .fe_after_jmp:
     call codegen_patch_jump
+    ; O23: if 2×unroll was applied, emit combine: add r14,rax = 4C 01 C6
+    cmp byte [o23_active], 0
+    je .fe_no_combine
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+.fe_no_combine:
     call codegen_patch_breaks
     call codegen_pop_cont
     ; O2: if pinned loop exited, flush r15 → [i_addr] and clear pin
