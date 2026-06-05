@@ -1808,6 +1808,58 @@ codegen_emit_add_rax_rbx:
 .add_normal:
     mov byte [sr_add_candidate], 0
     mov byte [sr_add_rhs_is_pin], 0
+    ; O19: frame-relative r10 round-trip look-back (11 bytes)
+    ; If last 11 bytes = mov r10,rax (4989C2) + mov rax,[rsp+disp8] (488B4424 xx) + mov rbx,r10 (4C89D3),
+    ; rewind 11 bytes and emit mov rbx,rax (4889C3) + mov rax,[rsp+disp8] (488B4424 xx),
+    ; eliminating the r10 save/restore dependency chain.
+    mov rax, [out_idx]
+    cmp rax, 11
+    jl .add_emit
+    lea rcx, [out_buffer]
+    add rcx, rax
+    sub rcx, 11
+    cmp byte [rcx+0],  0x49
+    jne .add_emit
+    cmp byte [rcx+1],  0x89
+    jne .add_emit
+    cmp byte [rcx+2],  0xC2
+    jne .add_emit
+    cmp byte [rcx+3],  0x48
+    jne .add_emit
+    cmp byte [rcx+4],  0x8B
+    jne .add_emit
+    cmp byte [rcx+5],  0x44
+    jne .add_emit
+    cmp byte [rcx+6],  0x24
+    jne .add_emit
+    ; [rcx+7] = disp8 (any value)
+    cmp byte [rcx+8],  0x4C
+    jne .add_emit
+    cmp byte [rcx+9],  0x89
+    jne .add_emit
+    cmp byte [rcx+10], 0xD3
+    jne .add_emit
+    ; Match: rewind 11 bytes, emit mov rbx,rax + mov rax,[rsp+disp8]
+    movzx edx, byte [rcx+7]    ; disp8
+    sub rax, 11
+    mov [out_idx], rax
+    mov al, 0x48               ; mov rbx,rax = 48 89 C3
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    mov al, 0x48               ; mov rax,[rsp+disp8] = 48 8B 44 24 disp8
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    mov al, dl                 ; disp8 (edx preserved across emit_b)
+    call emit_b
+.add_emit:
     ; add rax,rbx = 48 01 D8
     mov al, 0x48
     call emit_b
@@ -1848,6 +1900,64 @@ codegen_emit_sub_rax_rbx:
 .sub_normal:
     mov byte [sr_add_candidate], 0
     mov byte [sr_add_rhs_is_pin], 0
+    ; O19: O18-minus-literal look-back (14 bytes)
+    ; If last 14 bytes = mov rax,r12 (4C89E0) + mov r10,rax (4989C2)
+    ;   + mov eax,K (B8 K 00 00 00, K in 1..127) + mov rbx,r10 (4C89D3),
+    ; rewind and emit lea rax,[r12-K] (5 bytes) instead of neg rax; add rax,rbx (6 bytes).
+    mov rax, [out_idx]
+    cmp rax, 14
+    jl .sub_emit
+    lea rcx, [out_buffer]
+    add rcx, rax
+    sub rcx, 14
+    cmp byte [rcx+0],  0x4C
+    jne .sub_emit
+    cmp byte [rcx+1],  0x89
+    jne .sub_emit
+    cmp byte [rcx+2],  0xE0
+    jne .sub_emit
+    cmp byte [rcx+3],  0x49
+    jne .sub_emit
+    cmp byte [rcx+4],  0x89
+    jne .sub_emit
+    cmp byte [rcx+5],  0xC2
+    jne .sub_emit
+    cmp byte [rcx+6],  0xB8
+    jne .sub_emit
+    movzx edx, byte [rcx+7]
+    test edx, edx
+    jz .sub_emit
+    cmp edx, 128
+    jge .sub_emit
+    cmp byte [rcx+8],  0x00
+    jne .sub_emit
+    cmp byte [rcx+9],  0x00
+    jne .sub_emit
+    cmp byte [rcx+10], 0x00
+    jne .sub_emit
+    cmp byte [rcx+11], 0x4C
+    jne .sub_emit
+    cmp byte [rcx+12], 0x89
+    jne .sub_emit
+    cmp byte [rcx+13], 0xD3
+    jne .sub_emit
+    ; Match: rewind 14 bytes, emit lea rax,[r12-K] = 49 8D 44 24 <(256-K)&0xFF>
+    sub rax, 14
+    mov [out_idx], rax
+    neg edx
+    and edx, 0xFF        ; dl = disp8 = byte(-K)
+    mov al, 0x49
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    mov al, dl           ; edx preserved across emit_b
+    call emit_b
+    ret
+.sub_emit:
     ; rbx - rax → rax: neg rax; add rax,rbx
     mov al, 0x48
     call emit_b
@@ -2013,7 +2123,72 @@ codegen_emit_imod_rbx_by_rax:
 
 codegen_emit_cmp_rbx_rax_setcc:
     ; rdi=setCC byte: emit cmp rbx,rax; setCC al; movzx rax,al
+    ; O19: look-back: if last 14 bytes = O18-minus-literal setup, emit cmp r12,K + setCC
     push rdi
+    mov rax, [out_idx]
+    cmp rax, 14
+    jl .cmp_normal
+    lea rcx, [out_buffer]
+    add rcx, rax
+    sub rcx, 14
+    cmp byte [rcx+0],  0x4C
+    jne .cmp_normal
+    cmp byte [rcx+1],  0x89
+    jne .cmp_normal
+    cmp byte [rcx+2],  0xE0
+    jne .cmp_normal
+    cmp byte [rcx+3],  0x49
+    jne .cmp_normal
+    cmp byte [rcx+4],  0x89
+    jne .cmp_normal
+    cmp byte [rcx+5],  0xC2
+    jne .cmp_normal
+    cmp byte [rcx+6],  0xB8
+    jne .cmp_normal
+    movzx edx, byte [rcx+7]
+    test edx, edx
+    jz .cmp_normal
+    cmp edx, 128
+    jge .cmp_normal
+    cmp byte [rcx+8],  0x00
+    jne .cmp_normal
+    cmp byte [rcx+9],  0x00
+    jne .cmp_normal
+    cmp byte [rcx+10], 0x00
+    jne .cmp_normal
+    cmp byte [rcx+11], 0x4C
+    jne .cmp_normal
+    cmp byte [rcx+12], 0x89
+    jne .cmp_normal
+    cmp byte [rcx+13], 0xD3
+    jne .cmp_normal
+    ; Match: rewind 14 bytes, emit cmp r12,K (49 83 FC K) + setCC al + movzx rax,al
+    sub rax, 14
+    mov [out_idx], rax
+    mov al, 0x49
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xFC
+    call emit_b
+    mov al, dl           ; K (edx preserved across emit_b)
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    pop rax              ; setCC byte (was rdi)
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xB6
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    ret
+.cmp_normal:
     mov al, 0x48
     call emit_b
     mov al, 0x39
@@ -3678,17 +3853,17 @@ codegen_peephole:
     mov eax, dword [rdi+12]
     add eax, 10
     mov dword [rdi+2], eax
-    ; [6..15]: fill with NOPs (10 bytes)
-    mov byte [rdi+6],  0x90
-    mov byte [rdi+7],  0x90
-    mov byte [rdi+8],  0x90
-    mov byte [rdi+9],  0x90
-    mov byte [rdi+10], 0x90
-    mov byte [rdi+11], 0x90
-    mov byte [rdi+12], 0x90
-    mov byte [rdi+13], 0x90
-    mov byte [rdi+14], 0x90
-    mov byte [rdi+15], 0x90
+    ; [6..15]: 7-byte NOP + 3-byte NOP (2 µops decode vs 10 for single-byte NOPs)
+    mov byte [rdi+6],  0x0F   ; 7-byte NOP: NOP DWORD PTR [rax+0x00000000]
+    mov byte [rdi+7],  0x1F
+    mov byte [rdi+8],  0x80
+    mov byte [rdi+9],  0x00
+    mov byte [rdi+10], 0x00
+    mov byte [rdi+11], 0x00
+    mov byte [rdi+12], 0x00
+    mov byte [rdi+13], 0x0F   ; 3-byte NOP: NOP DWORD PTR [rax]
+    mov byte [rdi+14], 0x1F
+    mov byte [rdi+15], 0x00
     add rbx, 6
     jmp .ph_loop
 ; ── Pattern E (14 bytes) ─────────────────────────────────────────────────────
@@ -3828,6 +4003,122 @@ codegen_peephole:
     add rbx, 3                  ; advance past add r14,r15 (3 bytes)
     jmp .ph_loop
 .ph_g_miss:
+; ── Pattern H (9 bytes) ──────────────────────────────────────────────────────
+; Fold: lea rax,[r12+disp8] + NOP + mov rdi,rax  →  lea rdi,[r12+disp8] + 4-byte NOP
+;       49 8D 44 24 xx        90    48 89 C7          49 8D 7C 24 xx       0F 1F 40 00
+; Fires when O19 sub look-back (lea rax) + O7 arg-pop (NOP+mov rdi,rax) combine.
+    cmp rdx, 9
+    jl .ph_k2
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi+0], 0x49
+    jne .ph_k2
+    cmp byte [rdi+1], 0x8D
+    jne .ph_k2
+    cmp byte [rdi+2], 0x44
+    jne .ph_k2
+    cmp byte [rdi+3], 0x24
+    jne .ph_k2
+    ; [rdi+4] = disp8, skip
+    cmp byte [rdi+5], 0x90
+    jne .ph_k2
+    cmp byte [rdi+6], 0x48
+    jne .ph_k2
+    cmp byte [rdi+7], 0x89
+    jne .ph_k2
+    cmp byte [rdi+8], 0xC7
+    jne .ph_k2
+    ; Match: change ModRM 0x44→0x7C (rax→rdi in lea), replace NOP+mov rdi,rax with 4-byte NOP
+    mov byte [rdi+2], 0x7C
+    mov byte [rdi+5], 0x0F   ; 4-byte NOP: NOP DWORD PTR [rax+0x0]
+    mov byte [rdi+6], 0x1F
+    mov byte [rdi+7], 0x40
+    mov byte [rdi+8], 0x00
+    add rbx, 5
+    jmp .ph_loop
+.ph_k2:
+; ── Pattern K2 (21 bytes) ────────────────────────────────────────────────────
+; Fold: mov[rsp+D1],rax + mov rax,[rsp+D2] + mov rbx,rax + mov rax,[rsp+D1] + add rax,rbx
+;       48 89 44 24 D1    48 8B 44 24 D2    48 89 C3        48 8B 44 24 D1     48 01 D8
+;   →   mov rbx,rax + mov rax,[rsp+D2] + add rax,rbx + 10-byte NOP (D1≠D2)
+;       48 89 C3         48 8B 44 24 D2   48 01 D8          66 2E 0F 1F 84 00 00 00 00 00
+; Fires after fib(n-2) result is stored then redundantly reloaded to compute a+b.
+; rax still holds b (store does not modify rax), so mov rbx,rax captures b correctly.
+    cmp rdx, 21
+    jl .ph_miss
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi+0],  0x48
+    jne .ph_miss
+    cmp byte [rdi+1],  0x89
+    jne .ph_miss
+    cmp byte [rdi+2],  0x44
+    jne .ph_miss
+    cmp byte [rdi+3],  0x24
+    jne .ph_miss
+    ; [rdi+4] = D1 (store disp8)
+    cmp byte [rdi+5],  0x48
+    jne .ph_miss
+    cmp byte [rdi+6],  0x8B
+    jne .ph_miss
+    cmp byte [rdi+7],  0x44
+    jne .ph_miss
+    cmp byte [rdi+8],  0x24
+    jne .ph_miss
+    ; [rdi+9] = D2 (load-a disp8, must differ from D1)
+    movzx eax, byte [rdi+4]   ; D1
+    movzx edx, byte [rdi+9]   ; D2 (rdx free now: size check passed)
+    cmp al, dl
+    je .ph_miss               ; D1 == D2? Not the store-then-reload pattern
+    cmp byte [rdi+10], 0x48
+    jne .ph_miss
+    cmp byte [rdi+11], 0x89
+    jne .ph_miss
+    cmp byte [rdi+12], 0xC3
+    jne .ph_miss
+    cmp byte [rdi+13], 0x48
+    jne .ph_miss
+    cmp byte [rdi+14], 0x8B
+    jne .ph_miss
+    cmp byte [rdi+15], 0x44
+    jne .ph_miss
+    cmp byte [rdi+16], 0x24
+    jne .ph_miss
+    cmp byte [rdi+17], al     ; [+17] must equal D1 (same slot reloaded)
+    jne .ph_miss
+    cmp byte [rdi+18], 0x48
+    jne .ph_miss
+    cmp byte [rdi+19], 0x01
+    jne .ph_miss
+    cmp byte [rdi+20], 0xD8
+    jne .ph_miss
+    ; Match! Rewrite 21 bytes in-place:
+    ;   [0..2]   → mov rbx,rax  = 48 89 C3  (b→rbx; rax=b before store, store leaves rax intact)
+    ;   [3..7]   → mov rax,[rsp+D2]  (load a)
+    ;   [8..10]  → add rax,rbx  (a+b)
+    ;   [11..20] → 10-byte NOP
+    ; [0] = 0x48 (unchanged)
+    ; [1] = 0x89 (unchanged)
+    mov byte [rdi+2],  0xC3   ; complete mov rbx,rax
+    mov byte [rdi+3],  0x48   ; mov rax,[rsp+D2]
+    mov byte [rdi+4],  0x8B
+    mov byte [rdi+5],  0x44
+    mov byte [rdi+6],  0x24
+    mov byte [rdi+7],  dl     ; D2
+    mov byte [rdi+8],  0x48   ; add rax,rbx
+    mov byte [rdi+9],  0x01
+    mov byte [rdi+10], 0xD8
+    mov byte [rdi+11], 0x66   ; 10-byte NOP: 66 2E 0F 1F 84 00 00 00 00 00
+    mov byte [rdi+12], 0x2E
+    mov byte [rdi+13], 0x0F
+    mov byte [rdi+14], 0x1F
+    mov byte [rdi+15], 0x84
+    mov byte [rdi+16], 0x00
+    mov byte [rdi+17], 0x00
+    mov byte [rdi+18], 0x00
+    mov byte [rdi+19], 0x00
+    mov byte [rdi+20], 0x00
+    add rbx, 11               ; advance past mov rbx,rax(3)+mov rax,[rsp+D2](5)+add(3)
+    jmp .ph_loop
+.ph_miss:
     inc rbx
     jmp .ph_loop
 .ph_done:
