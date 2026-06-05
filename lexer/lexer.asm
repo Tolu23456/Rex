@@ -703,11 +703,27 @@ lexer_classify:
     cmp byte [tok_ident+4], 0
     je .kstep
 .nstep:
-    ; "memo": m,e,m,o → dword 0x6F6D656D, then null
+    ; "memo" / "memo_reset": first dword = 0x6F6D656D ("memo")
     cmp eax, 0x6F6D656D
     jne .nmemo
     cmp byte [tok_ident+4], 0
     je .kmemo
+    ; check for "memo_reset" — byte[4]='_' bytes[5..9]="reset" byte[10]=0
+    cmp byte [tok_ident+4], '_'
+    jne .nmemo
+    cmp byte [tok_ident+5], 'r'
+    jne .nmemo
+    cmp byte [tok_ident+6], 'e'
+    jne .nmemo
+    cmp byte [tok_ident+7], 's'
+    jne .nmemo
+    cmp byte [tok_ident+8], 'e'
+    jne .nmemo
+    cmp byte [tok_ident+9], 't'
+    jne .nmemo
+    cmp byte [tok_ident+10], 0
+    jne .nmemo
+    jmp .kmemo_reset
 .nmemo:
     cmp eax, 0x656E6F4E
     jne .nkeyword
@@ -909,4 +925,7 @@ lexer_classify:
     ret
 .kmemo:
     mov byte [tok_type], TOK_MEMO
+    ret
+.kmemo_reset:
+    mov byte [tok_type], TOK_MEMO_RESET
     ret

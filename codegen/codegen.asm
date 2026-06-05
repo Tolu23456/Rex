@@ -56,7 +56,7 @@ global regalloc_cnt, regalloc_active
 global codegen_emit_regalloc_epilogue
 ; O21: push-style frame + @memo
 global push_style_frame
-global codegen_emit_memo_check, codegen_emit_memo_store
+global codegen_emit_memo_check, codegen_emit_memo_store, codegen_emit_memo_reset
 ; O6: register-based expression spill
 global codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
 global codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
@@ -4492,5 +4492,42 @@ codegen_emit_memo_store:
     mov al, 0xE3
     call emit_b
     ; .skip:
+    pop rbx
+    ret
+
+; ── @memo cache-invalidation: emit runtime reset of memo table ─────────────────
+; rdi = proto_idx
+; Emits a single store that writes NULL to the protocol's memo pointer slot.
+; The existing alloc path inside codegen_emit_memo_check re-allocates and
+; re-initialises the table (fills with -1) on the very next call, so this is
+; both correct and register-safe (no caller-saved registers are touched at all).
+;
+; Emitted instruction (10 bytes):
+;   mov qword [MEMO_PTR_BASE + proto_idx*8], 0
+;   48 C7 04 25 addr32 00 00 00 00
+;
+; Encoding:
+;   48        REX.W (64-bit operand)
+;   C7        MOV r/m64, imm32 (sign-extended)
+;   04        ModRM: mod=00 reg=000(/0) rm=100 (SIB follows)
+;   25        SIB:  scale=00 index=100(none) base=101(disp32 only)
+;   addr32    absolute address of the pointer slot
+;   00000000  immediate = 0 (zero-extended to 64 bits → NULL)
+codegen_emit_memo_reset:
+    push rbx
+    ; 48 C7 04 25 addr32 00000000
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    imul eax, edi, 8
+    add eax, MEMO_PTR_BASE          ; addr32 of pointer slot
+    call emit_d
+    mov eax, 0                      ; imm32 = 0 (NULL)
+    call emit_d
     pop rbx
     ret

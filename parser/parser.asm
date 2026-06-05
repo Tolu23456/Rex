@@ -53,6 +53,7 @@ extern codegen_set_for_step
 extern codegen_push_loop_else_flag, codegen_pop_loop_else_flag
 extern codegen_emit_each_start, codegen_emit_each_end
 extern codegen_emit_zero_var
+extern codegen_emit_memo_reset
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
 var_count:       resq 1
@@ -80,6 +81,7 @@ tco_body_entry:        resq 1       ; O4: out_idx of current protocol body start
 proto_is_self_recursive: resb 1    ; O20: 1 if current protocol calls itself
 proto_memo_active:     resb 1      ; @memo: 1 if current protocol is memoized
 next_proto_memo:       resb 1      ; @memo: pending flag set by 'memo' keyword
+proto_find_seq_idx:    resq 1      ; sequential index of last proto_find match (0,1,2...)
 for_start_tok:         resb 1       ; static-bounds: tok_type before start parse_expr
 for_end_tok:           resb 1       ; static-bounds: tok_type before end parse_expr
 for_start_val:         resq 1       ; static-bounds: tok_int before start parse_expr
@@ -957,6 +959,7 @@ proto_find:
     dec ecx
     jnz .cl
 .m:
+    mov [proto_find_seq_idx], r13   ; save sequential index for callers that need it
     mov rax, [rbx+32]
     movzx ecx, byte [rbx+47]
     mov [proto_ret_type], cl
@@ -1026,6 +1029,8 @@ parse_stmt:
     je .at
     cmp al, TOK_MEMO
     je .memo
+    cmp al, TOK_MEMO_RESET
+    je .memo_reset
     cmp al, TOK_USE
     je .use
     cmp al, TOK_ERR
@@ -1056,6 +1061,24 @@ parse_stmt:
     mov byte [next_proto_memo], 1
     call lexer_next
     call parse_stmt
+    jmp .done
+
+; ── memo_reset — clear a protocol's memo hash table at runtime ─────────────────
+; Syntax: memo_reset <proto_name>
+; Looks up the named protocol, then emits a rep-stosq reset of its 1024-entry
+; cache table.  Safe to call when the table has not been allocated yet (null guard
+; in the emitted runtime code makes it a no-op in that case).
+.memo_reset:
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .done
+    lea rdi, [tok_ident]
+    call proto_find
+    cmp rax, -1
+    je .done
+    mov rdi, [proto_find_seq_idx]   ; sequential proto index (not the out_idx body offset)
+    call codegen_emit_memo_reset
+    call lexer_next
     jmp .done
 
 ; ── type declarations ──────────────────────────────────────────────────────────

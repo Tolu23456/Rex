@@ -273,6 +273,23 @@ Parser: `next_proto_memo` BSS flag set on TOK_MEMO; latched into `proto_memo_act
   Table pointer reloaded from MEMO_PTR_BASE (not cached in register across calls).
 **MEMO_PTR_BASE=0x445000** (safe: var storage ends at 0x444000, no collision).
 **Performance:** @memo fib(40) ~3ms vs non-memo ~454ms — effectively O(n) instead of O(2^n).
+**Known limitation:** `ret expr` (direct expression return, e.g. `ret n*n`) returns -1 on first
+  cache miss (pre-existing); use `int x = expr; ret x` as workaround.
+
+## memo_reset: Cache Invalidation Keyword (IMPLEMENTED)
+Syntax: `memo_reset <proto_name>` — clears a protocol's memo cache at runtime.
+TOK_MEMO_RESET=87. Lexer: after "memo" dword match, checks byte[4]='_' then "reset\0".
+**Emitted runtime code (12 bytes):** `mov qword [MEMO_PTR_BASE + proto_idx*8], 0`
+  Encoding: `48 C7 04 25 addr32 00000000`. Nulls the pointer slot; the existing
+  alloc path in memo_check re-allocates and re-fills with -1 on the next call.
+  Register-safe: no caller-saved registers are touched.
+**proto_find returns out_idx (body offset), NOT sequential proto index.** proto_find now
+  also saves the sequential index to `proto_find_seq_idx` BSS at `.m` match site.
+  `.memo_reset` reads `[proto_find_seq_idx]` for the correct rdi to codegen_emit_memo_reset.
+  **Why:** using proto_find's rax (= out_idx ≈ 200+) as proto_idx computes
+  MEMO_PTR_BASE + out_idx*8 → address outside the mapped segment → segfault.
+**Null guard:** if the pointer slot is already 0 (table never allocated), the store is a no-op;
+  next call goes through the normal alloc path. Safe to call before any protocol call.
 
 ## Rex Protocol Call Syntax
 Rex uses `@name(args)` NOT `name(args)` for protocol calls. In parse_factor, `TOK_AT`
