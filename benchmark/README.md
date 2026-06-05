@@ -16,7 +16,7 @@
   and the [Criterion.rs](https://bheisler.github.io/criterion.rs/book/) standard suite on equivalent hardware.
 
 All Rex and C/C++ numbers below are **measured** on this machine (June 2026).
-Three runs taken; best and median reported.
+Three runs taken; best and median reported.  Last updated: June 2026 (post-O14/O15/O21/FLC).
 
 ---
 
@@ -38,20 +38,22 @@ Expected output: `499999999500000000`
 The C benchmark uses `volatile int64_t sum` to prevent GCC from collapsing the loop
 into a closed-form formula.  This forces the same read-modify-write pattern Rex uses.
 
-Rex loop with O2 + O13: i pinned to r15, sum promoted to r14 (accumulator register).
-Loop body: `mov rax,r14; save r10; mov rax,r15; restore rbx; add rax,rbx; mov r14,rax; inc r15`.
-All register ops — zero memory accesses inside the hot path.
+Rex loop with O14 strength-reduction fusion: `add r14,r15` collapses the entire
+hot loop body to 2 register ops (fused add + counter inc).  O13 retroactive-patch
+promotes the accumulator to r14 even when the variable is read before its first store.
+Zero memory accesses inside the hot path.
 
-| Language | Best (ms) | Median (ms) | Notes                                   |
-|----------|-----------|-------------|-----------------------------------------|
-| Rex      | **804**   | **812**     | O2 pin + O13 accum; all register ops    |
-| C        | 1947      | 1958        | GCC -O2, `volatile` sum prevents opt    |
-| C++      | 1948      | 1953        | G++ -O2, same `volatile` constraint     |
-| Rust     | ~340      | ~345        | rustc -O (LLVM back end)                |
+| Language | Best (ms) | Median (ms) | Notes                                          |
+|----------|-----------|-------------|------------------------------------------------|
+| Rex      | **356**   | **363**     | O14 fusion + O13 accum; 2-instruction hot loop |
+| C        | 1952      | 1956        | GCC -O2, `volatile` sum prevents opt           |
+| C++      | 1948      | 1953        | G++ -O2, same `volatile` constraint            |
+| Rust     | ~340      | ~345        | rustc -O (LLVM back end)                       |
 
-> Rex is **~2.4× faster** than C here.  The O2 optimisation pins the loop counter
-> to r15 and the O13 retroactive-patch optimisation promotes the accumulator to r14,
-> eliminating all memory traffic from the inner loop.
+> Rex is **~5.4× faster** than C here.  O14 strength-reduction fusion (added after
+> the previous table was written) collapses `:sum = sum + i` to a single `add r14,r15`
+> — matching what a hand-written assembler would produce.  C cannot reach this because
+> `volatile` forces a memory round-trip on every iteration.
 
 ---
 
@@ -80,22 +82,22 @@ Expected output: `267914296`
 Protocol parameters are stored in global `var_table` slots.  Recursive
 correctness is achieved by emitting `push qword [param_addr]` on protocol
 entry and `pop qword [param_addr]` (reverse order) before every `ret`.
-This is correct but expensive: each of the ~267 M calls pays two extra
-memory round-trips per parameter on top of the normal CALL/RET overhead.
+O21 push-style prologue + FLC (frameless calling convention) have eliminated the
+`push rbp; mov rbp,rsp` frame overhead and shortened the epilogue to `add rsp,N; ret`.
 
-| Language | Best (ms) | Median (ms) | Notes                                        |
-|----------|-----------|-------------|----------------------------------------------|
-| Rex      | 2222      | 2237        | push/pop per param per call; correct result  |
-| C        | **377**   | **381**     | GCC -O2                                      |
-| C++      | **380**   | **386**     | G++ -O2                                      |
-| Rust     | ~450      | ~460        | rustc -O                                     |
+| Language | Best (ms) | Median (ms) | Notes                                             |
+|----------|-----------|-------------|---------------------------------------------------|
+| Rex      | 1036      | 1046        | O21 push-style + FLC + O18 regalloc; correct result |
+| C        | **383**   | **387**     | GCC -O2                                           |
+| C++      | **380**   | **386**     | G++ -O2                                           |
+| Rust     | ~450      | ~460        | rustc -O                                          |
 
-> Rex is **~5.9× slower** than C here (VM load varies on shared hosts — earlier
-> sessions measured ~3.3×).  The bottleneck is `push qword [mem]` / `pop qword [mem]`
-> stack-frame emulation: two memory operations per parameter per call level.
-> Moving locals to rbp-relative stack slots (eliminating global-memory indirection)
-> is the single highest-impact optimisation available — estimated 3–4× speedup
-> on recursive workloads.
+> Rex is **~2.7× slower** than C here — down from **5.9×** in the prior table.
+> O21 (push-style prologue for 1-param protocols) and FLC (frameless convention)
+> together cut fib(42) from 2222 ms to 1036 ms.  The remaining gap is the
+> push/pop global-slot emulation: each of the ~267 M calls still pays one
+> `push qword [mem]` + `pop qword [mem]` per level.  Moving locals to
+> rsp-relative stack frames is the next highest-impact change — estimated ~2× gain.
 
 ---
 
@@ -146,14 +148,14 @@ memory ops into a hot cache line.  Grows happen only 15 times total (log₂ 5000
 
 | Language          | Best (ms) | Median (ms) | Notes                              |
 |-------------------|-----------|-------------|------------------------------------|
-| Rex (seq push)    | **12**    | **12**      | Bounds-check + store; 15 grows total |
-| C  (malloc/free)  | 58        | 61          | GCC -O2, glibc allocator (measured)|
+| Rex (seq push)    | **8**     | **9**       | Bounds-check + store; 15 grows total |
+| C  (malloc/free)  | 56        | 64          | GCC -O2, glibc allocator (measured)|
 | C++ (new/delete)  | 58        | 61          | G++ -O2, glibc allocator (measured)|
 | Rust (default)    | ~60       | ~65         | jemalloc back end                  |
 
-> Rex wins decisively here.  The hot path (no grow) is ~3 instructions;
-> C's `malloc` must traverse free-lists, update bookkeeping, and handle
-> thread-local arenas.  Rex is **~4.8× faster** than glibc.
+> Rex wins decisively here.  The hot path (no grow) is ~3 instructions into a hot
+> cache line; C's `malloc` must traverse free-lists, update bookkeeping, and handle
+> thread-local arenas.  Rex is **~7× faster** than glibc on this workload.
 
 ---
 
@@ -163,15 +165,17 @@ Minimal program (just `output 0` then exit).
 
 | Language  | Binary size (bytes) | Runtime deps            |
 |-----------|---------------------|-------------------------|
-| Rex       | **8,595**           | None — bare ELF64       |
-| C         | ~15,800             | glibc (dynamic link)    |
+| Rex sum   | **8,692**           | None — bare ELF64       |
+| Rex fib   | **8,775**           | None — bare ELF64       |
+| Rex alloc | **8,797**           | None — bare ELF64       |
+| C         | ~15,800–15,888      | glibc (dynamic link)    |
 | C++       | ~15,800             | glibc, libstdc++ (dyn.) |
 | Rust      | ~8,000              | musl or glibc (dyn.)    |
 
 Rex binaries embed the full runtime (printer, allocator, error handler) yet are
-still ~1.8× smaller than a minimal C binary.  A program with non-trivial logic
-(e.g. the fib benchmark) compiles to 8,720 bytes.  There is no `.plt`, `.got`,
-`_start` wrapper, or dynamic-linker segment.
+still ~1.8× smaller than a minimal C binary.  There is no `.plt`, `.got`,
+`_start` wrapper, or dynamic-linker segment.  Binary size is essentially flat
+regardless of program complexity — it grows only with code and string literals.
 
 ---
 
@@ -193,28 +197,29 @@ Startup cost on this VM floor is ~2–3 ms (kernel ELF loader + `execve` round-t
 
 ## Summary Table
 
-| Benchmark                       | Rex        | C (-O2)   | C++ (-O2) | Rust (-O) | Rex/C ratio |
-|---------------------------------|------------|-----------|-----------|-----------|-------------|
-| Sum 1B integers (ms)            | **804**    | 1947      | 1948      | ~340      | **0.41×**   |
-| Fibonacci fib(42) (ms)          | 2222       | **377**   | **380**   | ~450      | 5.9×        |
-| Bubble sort 20k (ms)            | N/A        | **1436**  | **1435**  | ~1430     | est. ~1.3×† |
-| Seq push 500k / malloc 500k (ms)| **12**     | 58        | 58        | ~60       | **0.21×**   |
-| Binary size (bytes)             | **8,595**  | ~15,800   | ~15,800   | ~8,000    | 0.54×       |
-| Process startup (ms)            | **~3**     | ~8        | ~9        | ~0.5      | 0.38×       |
+| Benchmark                       | Rex        | C (-O2)   | C++ (-O2) | Rust (-O) | Rex/C ratio    |
+|---------------------------------|------------|-----------|-----------|-----------|----------------|
+| Sum 1B integers (ms)            | **356**    | 1952      | 1948      | ~340      | **0.18× 🏆**  |
+| Fibonacci fib(42) (ms)          | 1036       | **383**   | **380**   | ~450      | 2.7×           |
+| Bubble sort 20k (ms)            | N/A        | **1436**  | **1435**  | ~1430     | est. ~1.3×†    |
+| Seq push 500k / malloc 500k (ms)| **8**      | 56        | 58        | ~60       | **0.14× 🏆**  |
+| Binary size (bytes)             | **~8,700** | ~15,820   | ~15,800   | ~8,000    | **0.55× 🏆**  |
+| Process startup (ms)            | **~3**     | ~8        | ~9        | ~0.5      | **0.38× 🏆**  |
 
 † Once index-write syntax lands (estimated based on instruction count).
 
 ### When Rex wins
-- **Volatile/memory-bound loops** — O2 pin + O13 accumulator register beats
-  `volatile`-constrained C (~2.4×)
-- **Append-heavy workloads** — seq push throughput beats glibc malloc/free (~4.8×)
-- **Startup-sensitive tools** — no dynamic linker, no ctors (~2.7× faster than C)
-- **Size-constrained targets** — no PLT/GOT/dynamic-linker segment (~1.8× smaller)
+- **Register-bound loops** — O14 fusion collapses `:sum = sum + i` to a single `add r14,r15`;
+  Rex beats volatile-constrained C by **5.4×** and matches Rust
+- **Append-heavy workloads** — seq push hot path is ~3 instructions; beats glibc malloc by **~7×**
+- **Startup-sensitive tools** — no dynamic linker, no ctors; **~2.7×** faster cold start than C
+- **Size-constrained targets** — no PLT/GOT/dynamic-linker segment; **~1.8×** smaller than C
 
 ### When C/C++/Rust win
-- **Recursive algorithms** — push/pop stack-frame emulation costs ~5.9× vs C on fib(42)
+- **Recursive algorithms** — global-slot push/pop costs **2.7×** vs C on fib(42);
+  rsp-relative stack frames are the next planned optimisation (est. ~2× gain)
 - **Ecosystem** — standard libraries, SIMD intrinsics, profiling toolchains
-- **Ultra-fast startup** — Rust's minimal runtime (~0.5 ms) beats Rex on raw exec speed
+- **Ultra-fast startup** — Rust's minimal runtime (~0.5 ms) beats Rex on raw `execve` latency
 
 ---
 
