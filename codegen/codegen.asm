@@ -3586,7 +3586,54 @@ codegen_emit_imul_rax_rbx:
 .mul_normal:
     mov byte [sr_add_candidate], 0
     mov byte [sr_add_rhs_is_pin], 0
-    ; imul rax,rbx
+    ; ── O31: small constant multiplier strength reduction ──────────────────────
+    ; Pattern: last 8 bytes = B8 <imm32> 4C 89 D3 (literal + r10 restore).
+    ; At runtime after save: r10 = LHS (multiplier was literal).
+    ; Emit 3-operand IMUL: imul rax, r10, imm  (no separate restore needed).
+    mov rax, [out_idx]
+    cmp rax, 8
+    jl .mul31_skip
+    lea rcx, [out_buffer]
+    add rcx, rax
+    cmp byte [rcx-8], 0xB8
+    jne .mul31_skip
+    cmp byte [rcx-3], 0x4C
+    jne .mul31_skip
+    cmp byte [rcx-2], 0x89
+    jne .mul31_skip
+    cmp byte [rcx-1], 0xD3
+    jne .mul31_skip
+    mov edx, dword [rcx-7]   ; edx = imm32 multiplier
+    test edx, edx
+    jz .mul31_skip            ; multiplier 0: skip (rare)
+    js .mul31_skip            ; > 0x7FFFFFFF: imm32 sign-extend issue
+    sub rax, 8               ; rewind past literal (5) + restore (3)
+    mov [out_idx], rax
+    cmp edx, 127
+    jg .mul31_imm32
+    ; imul rax, r10, imm8 = 49 6B C2 <imm8>
+    mov al, 0x49
+    call emit_b
+    mov al, 0x6B
+    call emit_b
+    mov al, 0xC2
+    call emit_b
+    mov al, dl
+    call emit_b
+    ret
+.mul31_imm32:
+    ; imul rax, r10, imm32 = 49 69 C2 <imm32>
+    mov al, 0x49
+    call emit_b
+    mov al, 0x69
+    call emit_b
+    mov al, 0xC2
+    call emit_b
+    mov eax, edx
+    call emit_d
+    ret
+.mul31_skip:
+    ; fallback: imul rax, rbx = 48 0F AF C3
     mov al, 0x48
     call emit_b
     mov al, 0x0F
@@ -3644,7 +3691,78 @@ codegen_emit_idiv_rbx_by_rax:
 .div_normal:
     mov byte [sr_add_candidate], 0
     mov byte [sr_add_rhs_is_pin], 0
-    ; rbx/rax → rax: mov rcx,rax; mov rax,rbx; cqo; idiv rcx
+    ; ── O30: power-of-2 division strength reduction ──────────────────────────
+    ; Pattern: last 8 bytes = B8 <imm32> 4C 89 D3 (literal + r10 restore).
+    ; At runtime after the save: rax = dividend = r10.  Use SAR-with-bias.
+    ; Signed formula: rax = (rax + (rax<0 ? 2^k-1 : 0)) >> k
+    mov rax, [out_idx]
+    cmp rax, 8
+    jl .div30_skip
+    lea rcx, [out_buffer]
+    add rcx, rax
+    cmp byte [rcx-8], 0xB8
+    jne .div30_skip
+    cmp byte [rcx-3], 0x4C
+    jne .div30_skip
+    cmp byte [rcx-2], 0x89
+    jne .div30_skip
+    cmp byte [rcx-1], 0xD3
+    jne .div30_skip
+    mov edx, dword [rcx-7]   ; edx = imm32 divisor
+    test edx, edx
+    jz .div30_skip
+    lea esi, [edx-1]
+    test esi, edx
+    jnz .div30_skip           ; not a power of 2
+    bsf ecx, edx             ; ecx = k  (divisor = 2^k)
+    lea esi, [edx-1]         ; esi = 2^k-1 = bias
+    sub rax, 8               ; rewind past literal (5) + restore (3)
+    mov [out_idx], rax
+    ; rax = dividend already (save left rax unchanged; only r10 was set)
+    ; sar rax, 63  (sign fill: 0 if positive, -1 if negative)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    mov al, 0x3F
+    call emit_b
+    ; and eax, (2^k-1)  [bias: fits in imm8 if ≤127]
+    cmp esi, 127
+    jle .div30_bias8
+    mov al, 0x25             ; and eax, imm32 = 25 <imm32>
+    call emit_b
+    mov eax, esi
+    call emit_d
+    jmp .div30_add
+.div30_bias8:
+    mov al, 0x83             ; and eax, imm8 = 83 E0 <imm8>
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov al, sil
+    call emit_b
+.div30_add:
+    ; add rax, r10  (rax = dividend + bias)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xD0
+    call emit_b
+    ; sar rax, k  (arithmetic shift = quotient)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    movzx eax, cl
+    call emit_b
+    ret
+.div30_skip:
+    ; fallback: rbx/rax → rax  (mov rcx,rax; mov rax,rbx; cqo; idiv rcx)
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -3670,7 +3788,106 @@ codegen_emit_idiv_rbx_by_rax:
     ret
 
 codegen_emit_imod_rbx_by_rax:
-    ; rbx%rax → rax (via rdx after idiv)
+    ; ── O30: power-of-2 modulo strength reduction ────────────────────────────
+    ; Pattern: last 8 bytes = B8 <imm32> 4C 89 D3 (literal + r10 restore).
+    ; At runtime after save: rax = n = r10 (dividend).
+    ; Formula (C semantics): n % 2^k = n - ((n + bias) & -(2^k))
+    ;   where bias = (n < 0) ? (2^k - 1) : 0
+    mov rax, [out_idx]
+    cmp rax, 8
+    jl .mod30_skip
+    lea rcx, [out_buffer]
+    add rcx, rax
+    cmp byte [rcx-8], 0xB8
+    jne .mod30_skip
+    cmp byte [rcx-3], 0x4C
+    jne .mod30_skip
+    cmp byte [rcx-2], 0x89
+    jne .mod30_skip
+    cmp byte [rcx-1], 0xD3
+    jne .mod30_skip
+    mov edx, dword [rcx-7]   ; edx = imm32 divisor
+    test edx, edx
+    jz .mod30_skip
+    lea esi, [edx-1]
+    test esi, edx
+    jnz .mod30_skip           ; not a power of 2
+    bsf ecx, edx             ; ecx = k
+    lea esi, [edx-1]         ; esi = 2^k - 1 = bias
+    neg edx                  ; edx = -(2^k) for mask step
+    sub rax, 8               ; rewind
+    mov [out_idx], rax
+    ; Step 1: sar rax, 63  (rax still = n from before the save)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    mov al, 0x3F
+    call emit_b
+    ; Step 2: and eax, (2^k-1)  [bias]
+    cmp esi, 127
+    jle .mod30_bias8
+    mov al, 0x25             ; and eax, imm32
+    call emit_b
+    mov eax, esi
+    call emit_d
+    jmp .mod30_after_bias
+.mod30_bias8:
+    mov al, 0x83
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov al, sil
+    call emit_b
+.mod30_after_bias:
+    ; Step 3: add rax, r10  (rax = n + bias)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xD0
+    call emit_b
+    ; Step 4: and rax, -(2^k)  [floor to multiple of 2^k]
+    cmp ecx, 7
+    jg .mod30_mask32
+    mov al, 0x48             ; and rax, imm8 = 48 83 E0 <dl>
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov al, dl               ; dl = low byte of -(2^k), valid imm8 for k≤7
+    call emit_b
+    jmp .mod30_after_mask
+.mod30_mask32:
+    mov al, 0x48             ; and rax, imm32 = 48 81 E0 <imm32>
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov eax, edx
+    call emit_d
+.mod30_after_mask:
+    ; Step 5: sub r10, rax  (r10 = n - floor = n mod 2^k)
+    mov al, 0x49
+    call emit_b
+    mov al, 0x29
+    call emit_b
+    mov al, 0xC2
+    call emit_b
+    ; Step 6: mov rax, r10
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xD0
+    call emit_b
+    ret
+.mod30_skip:
+    ; fallback: rbx%rax → rax (idiv, remainder in rdx → rax)
     mov al, 0x48
     call emit_b
     mov al, 0x89

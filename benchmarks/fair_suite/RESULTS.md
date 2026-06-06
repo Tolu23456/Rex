@@ -644,20 +644,21 @@ Both produce: `result=7988080` ✓
 
 | Run      | Rex internal (ms) | C internal (ms) |
 |----------|-------------------|-----------------|
-| Run 1    | 136               | 130.83          |
-| Run 2    | 137               | 130.71          |
-| Run 3    | 137               | 131.73          |
-| **Best** | **136**           | **130.71**      |
+| Run 1    | 143               | 130.71          |
+| Run 2    | 140               | 136.00          |
+| Run 3    | 138               | 138.39          |
+| **Best** | **138**           | **130.71**      |
 
-**Winner: C — ~1.04× faster. Near-parity: Rex within 4% of GCC.**
+**Winner: C — ~1.06× faster. Near-parity: Rex within 6% of GCC.**
 
-This is the closest runtime result in the entire suite. Rex achieves near-parity with GCC -O3 on this workload, showing only a 5 ms gap over 1 million GCD computations.
+This is the closest runtime result in the entire suite. Rex achieves near-parity with GCC -O3 on this workload, showing only an 8 ms gap over 1 million GCD computations.
 
 **Why Rex is competitive here:**
 
 1. **`idiv` dominance.** The Euclidean algorithm is bottlenecked by the `idiv` instruction, which takes ~20–40 clock cycles regardless of compiler. With both implementations executing the same number of `idiv` instructions, the instruction-count gap between Rex and GCC is minimised.
 2. **Variable-length inner loops reduce optimiser advantage.** The while loop exits after a variable number of Euclidean steps (1–20 steps per pair). GCC cannot unroll or vectorise a while loop with a data-dependent exit condition. Both compilers emit essentially equivalent `idiv` + compare + branch sequences.
 3. **Memory traffic is proportionally smaller.** Each outer iteration spends most time in `idiv` (~30 cycles). Rex's extra load/store traffic for `a`, `b`, `r` (3 extra memory ops at 4–5 cycles each) represents ~12–15 cycles overhead, diluted over 30+ cycles of `idiv`.
+4. **O31 fires for the LCG seed expressions.** `:a = k * 1234567 + 7654321` — the multiplier 1234567 is a literal constant > 127, so O31 emits `imul rax, r10, 1234567` (3-operand IMUL, 7 bytes) instead of a 2-operand `imul rax, rbx` preceded by a 5-byte literal load + 3-byte register restore (10 bytes total). This saves 3 bytes per multiply site and removes one dead register-move on the critical path. O30-mod does **not** fire for `:r = a % b` because both `a` and `b` are variable loads — the look-back pattern requires the RHS to be a compile-time literal constant.
 
 **Current Rex inner loop (while body):**
 
@@ -665,7 +666,7 @@ This is the closest runtime result in the entire suite. Rex achieves near-parity
 ; :r = a % b
 mov  rax, [a_slot]     ; load a
 cqo                    ; sign-extend rax → rdx:rax
-idiv qword [b_slot]    ; rdx = a % b
+idiv qword [b_slot]    ; rdx = a % b  (~25 cycles)
 mov  [r_slot], rdx     ; store r
 ; :a = b
 mov  rax, [b_slot]
@@ -675,13 +676,13 @@ mov  rax, [r_slot]
 mov  [b_slot], rax
 ```
 
-GCC's equivalent keeps `a`, `b`, and `r` in registers (`rax`, `rcx`, `rdx`) throughout the inner loop, eliminating all loads and stores. The ~4% gap is entirely explained by Rex's 6 extra memory operations per Euclidean step.
+GCC's equivalent keeps `a`, `b`, and `r` in registers (`rax`, `rcx`, `rdx`) throughout the inner loop, eliminating all loads and stores. The ~6% gap is explained by Rex's 6 extra memory operations per Euclidean step.
 
 **Binary sizes:**
 
 | Binary      | Rex     | C       | Rex/C |
 |-------------|---------|---------|-------|
-| b13_gcd     | 6,306 B | 15,800 B | **2.5× smaller** |
+| b13_gcd     | 6,296 B | 15,800 B | **2.5× smaller** |
 
 ---
 
@@ -717,18 +718,31 @@ Both produce: `result=213222809` ✓
 
 | Run      | Rex internal (ms) | C internal (ms) |
 |----------|-------------------|-----------------|
-| Run 1    | 672               | 68.55           |
-| Run 2    | 621               | 68.67           |
-| Run 3    | 733               | 103.46          |
-| **Best** | **621**           | **68.55**       |
+| Run 1    | 345               | 66.96           |
+| Run 2    | 283               | 68.13           |
+| Run 3    | 265               | 67.71           |
+| **Best** | **265**           | **66.96**       |
 
-**Winner: C — ~9.06× faster**
+*Pre-O30: 621 ms.  Post-O30: 265 ms — **57% faster**, ratio 9.06× → 3.96×.*
 
-Two independent factors drive this gap:
+**Winner: C — ~3.96× faster** *(was ~9.06× before O30)*
 
-1. **`idiv` vs strength-reduced shift.** For `n / 2`, GCC -O3 emits a strength-reduced shift (`sar rax, 1`) — a single 1-cycle instruction. Rex emits a full `idiv` (20–40 cycles). This alone accounts for most of the gap: 10M iterations × ~5 halvings each = ~50M divisions, each costing ~25 extra cycles ≈ ~540 ms extra at 2.3 GHz. Rex does not yet perform power-of-2 strength reduction for `/` in while-loop bodies.
+**O30 (SAR strength reduction) is now active for `:n = n / 2`.** The look-back
+pattern fires: the RHS literal `2` matches `B8 02 00 00 00 4C 89 D3`, so the
+8-byte sequence (literal load + register restore) is rewound and replaced with
+a 5-instruction SAR sequence that uses only arithmetic shifts and register
+operations — no division hardware at all.
 
-2. **Memory traffic for `n` and `total`.** Rex stores both variables in fixed var_table memory slots. Every while iteration loads `n`, halves it (via idiv), stores it back, then loads and increments `total`. GCC keeps `n` and `total` in registers throughout both loops.
+**What Rex now emits (inner while body, post-O30):**
+
+```asm
+; :n = n / 2  — O30 strength reduction (k=1, bias=1)
+mov  r10, rax          ; save n (from save instruction already in buffer)
+sar  rax, 63           ; sign mask: -1 if n<0, 0 if n≥0
+and  eax, 1            ; bias = 1 if negative, 0 if positive
+add  rax, r10          ; n + bias
+sar  rax, 1            ; arithmetic right shift → (n + bias) / 2 = trunc(n/2)
+```
 
 **What GCC emits (inner while body):**
 
@@ -740,31 +754,17 @@ Two independent factors drive this gap:
     jg   .while
 ```
 
-**What Rex emits (inner while body):**
+The remaining 3.96× gap vs C has two causes:
 
-```asm
-; :n = n / 2
-mov  rax, [n_slot]     ; load n
-cqo
-idiv qword [two_lit]   ; ~30 cycles
-mov  [n_slot], rax     ; store n
-; :total = total + 1
-mov  rax, [total_slot] ; load total
-add  rax, 1
-mov  [total_slot], rax ; store total
-; while condition
-mov  rax, [n_slot]
-cmp  rax, 1
-jg   .while
-```
+1. **Rex's SAR sequence is 5 instructions vs GCC's 1 instruction** (`sar rax, 1`). GCC's single SAR works because GCC exploits the fact that `n > 1` (the while condition) guarantees `n` is always positive in steady state — eliminating the need for bias correction entirely. Rex applies the correct signed-division formula for all possible inputs, emitting a 5-instruction sequence even though in this specific benchmark `n` is always positive. A future optimisation could detect the positive-range invariant from the while condition (`n > 1`) and emit a single `sar rax, k` for positive-only dividends.
 
-Implementing power-of-2 strength reduction for `/` in while-loop bodies (analogous to O14's add/sub strength reduction for `+` in for-loops) would close the majority of this gap.
+2. **Memory traffic for `n` and `total`.** Rex stores both variables in fixed var_table memory slots. Every while iteration loads `n`, applies the SAR sequence, stores it back, then loads and increments `total`. GCC keeps `n` and `total` in registers throughout both loops.
 
 **Binary sizes:**
 
 | Binary         | Rex     | C       | Rex/C |
 |----------------|---------|---------|-------|
-| b14_while_div  | 5,687 B | 15,800 B | **2.8× smaller** |
+| b14_while_div  | 5,678 B | 15,800 B | **2.8× smaller** |
 
 ---
 
