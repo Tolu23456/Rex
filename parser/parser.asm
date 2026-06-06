@@ -169,16 +169,13 @@ fatal:
     syscall
 
 ; ── variable table ────────────────────────────────────────────────────────────
-; O34: var_find — fast 8-byte prefix compare before full strcmp.
+; var_find: linear scan with byte-by-byte strcmp.
 ; VAR_ENTRY_SIZE=64=2^6, so index*64 = shl 6 (replaces imul).
-; Loading the first 8 bytes of the query name as a uint64 lets us skip
-; the per-byte compare for non-matching entries with one QWORD compare.
 var_find:
     push rbx
     push rcx
     push rsi
-    push rdi            ; [rsp] = original rdi (query name ptr)
-    mov r11, [rdi]      ; r11 = first 8 bytes of query name (64-byte bufs: safe)
+    push rdi
     xor rcx, rcx
 .l:
     cmp rcx, [var_count]
@@ -187,10 +184,6 @@ var_find:
     shl rax, 6          ; rax = rcx * 64 (VAR_ENTRY_SIZE = 64 = 2^6)
     lea rsi, [var_table]
     add rsi, rax
-    ; O34 fast path: compare 8 bytes at once — skips full strcmp on mismatch
-    cmp [rsi], r11
-    jne .nx             ; first 8 bytes differ → definitely not this variable
-    ; Possible match: full byte-by-byte verification (handles names >8 chars)
     mov rdi, [rsp]      ; restore query name pointer
 .c:
     movzx eax, byte [rdi]
