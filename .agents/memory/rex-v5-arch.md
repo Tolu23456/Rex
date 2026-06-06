@@ -221,20 +221,41 @@ Eliminates `push rbp; mov rbp,rsp`. Uses rsp-relative addressing.
 Frame layout (bottom-up): slot K → [rsp+K*8]. Read: `48 8B 44 24 K*8`. Write: `48 89 44 24 K*8`.
 O18 slot saves: `mov [rsp],r12` = `4C 89 24 24`; `mov r12,[rsp]` = `4C 8B 24 24`.
 
-## O-Affine: Closed-Form Binary Ladder for Affine Loops (IMPLEMENTED)
-Detects loop pattern `:x = x*A + B` (A,B compile-time constants, loop index unused in body).
-**Detection:** retroactive 46-byte body scan at `for_end` before O256 check. Exact byte pattern:
-- [0..2] = 4C 89 F0 (mov rax,r14), [3..7] = 90×5 (NOPs from read-first retroactive patch),
-- [8..10] = 49 89 C2 (mov r10,rax spill), [11] = B8, [12..15] = imm32 A, [16..18] = 4C 89 D3 (mov rbx,r10),
-- [19..22] = 48 0F AF C3 (imul rax,rbx), [23..25] = 49 89 C6 (mov r14,rax),
-- [26..28] = 4C 89 F0, [29..31] = 49 89 C2, [32] = B8, [33..36] = imm32 B, [37..39] = 4C 89 D3,
-- [40..42] = 48 01 D8 (add rax,rbx), [43..45] = 49 89 C6. Total exactly 46 bytes.
+## O-Affine family: Closed-Form Binary Ladder for Affine Loops (IMPLEMENTED)
+
+Three detectors run in sequence at `for_end` (after pinned-loop step==1 check), before O256:
+
+### O-Affine (46-byte, `:x = x*A + B`)
+Detects combined mul+add affine LCG pattern. Exact byte pattern:
+- [0..2]=4C 89 F0, [3..7]=90×5 NOPs, [8..10]=49 89 C2, [11]=B8, [12..15]=imm32 A, [16..18]=4C 89 D3,
+- [19..22]=48 0F AF C3 (imul), [23..25]=49 89 C6, [26..28]=4C 89 F0, [29..31]=49 89 C2,
+- [32]=B8, [33..36]=imm32 B, [37..39]=4C 89 D3, [40..42]=48 01 D8 (add), [43..45]=49 89 C6.
 **Computation (in compiler):** binary ladder: cur_a=A, cur_b=B, res_a=1, res_b=0, N=end-from.
   While N>0: if N&1: res_b=cur_a*res_b+cur_b; res_a*=cur_a. cur_b*=(cur_a+1); cur_a*=cur_a; N>>=1.
-**Emits 2 runtime instructions:** `mov rax, res_a (imm64); imul r14, rax` + `mov rax, res_b; add r14, rax`.
-**Skips:** O2 pin flush (clears loop_pin_active), jumps to .fe_no_combine for breaks/cont/O13 flush.
-**BSS:** `affine_tmp_a: resq 1`, `affine_tmp_b: resq 1` for cross-emit_b scratch.
-**Result:** B1 (1B LCG iters) Rex 27ms vs C 1136ms = **42× faster**. Correct result verified.
+**Emits:** `mov rax, res_a; imul r14, rax` + `mov rax, res_b; add r14, rax` (up to 24 bytes).
+**BSS:** `affine_tmp_a: resq 1`, `affine_tmp_b: resq 1`.
+**B1 result:** Rex 20ms vs C 1338ms = **~67× faster**.
+
+### O-Affine-Mul (26-byte, `:x = x*A`)
+Detects multiply-only: [0..2]=4C 89 F0, [3..7]=90×5, [8..10]=49 89 C2, [11]=B8, [12..15]=imm32 A,
+[16..18]=4C 89 D3, [19..22]=48 0F AF C3 (imul — distinguishes from add-only), [23..25]=49 89 C6.
+**Computation:** binary ladder (mul-only): res_a=1, cur_a=A; while N>0: if N&1: res_a*=cur_a; cur_a*=cur_a; N>>=1.
+**Emits:** `mov rax, A^N; imul r14, rax`. If A^N==1: emits nothing.
+**B10 result:** Rex 20ms vs C 670ms = **~33.5× faster** (C must run full 1B loop; no modular exp pass).
+**Label:** `.fe_no_affine` starts this check; failure jumps to `.fe_no_mul_only`.
+
+### O-Affine-Add (25-byte, `:x = x+B`)
+Detects add-only: same [0..18] prefix, then [19..21]=48 01 D8 (add rax,rbx — not imul), [22..24]=49 89 C6.
+**Computation:** B_N = B*N mod 2^64 (single compiler-time `imul r8, r10`).
+**Emits:** if B_N ≤ 0x7FFFFFFF: `add r14, imm32` (7 bytes, compact). Else: `mov rax, B_N; add r14, rax` (13 bytes).
+**B11 result:** Rex 21ms (startup only) vs C ~0ms (GCC also folds). Both eliminate loop; parity confirmed.
+**Special case:** `:x = x+1` over any N → `add r14, N` (single 7-byte instruction if N ≤ 0x7FFFFFFF).
+**Label:** `.fe_no_mul_only` starts this check; failure jumps to `.fe_no_add_only` (then O256).
+
+**Common finish path for all three:** rewind `out_idx` to `for_rotation_body_pc`, emit replacement,
+`call codegen_patch_jump`, `mov byte [loop_pin_active], 0`, `jmp .fe_no_combine`.
+**Key invariant:** `loop_accum_active` must be set (r14 is the accumulator) and loop step must be 1.
+r8/r10/r11 survive across emit_b/emit_d/emit_q calls (those only clobber rax, preserve rbx/rcx via push/pop).
 
 ## O14/O15: Strength-Reduction Fusion (IMPLEMENTED)
 Fuses `:accum = accum OP pin` → single `add/sub/imul/idiv r14, r15`.

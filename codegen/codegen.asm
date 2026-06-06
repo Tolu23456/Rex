@@ -1394,6 +1394,218 @@ codegen_emit_for_end:
     ; codegen_patch_breaks + codegen_pop_cont + O13 flush happen at .fe_no_combine/.fe_done
     jmp .fe_no_combine
 .fe_no_affine:
+    ; O-Affine-Mul: closed-form for multiply-only loops (:x = x*A, 26-byte body).
+    ; Detects a single-assignment loop body `for i in 0..N: :x = x*A` where A is a
+    ; compile-time constant and the loop index i is unused in the body.
+    ; Computes A^N mod 2^64 in the compiler via binary ladder, then emits:
+    ;   mov rax, A^N (imm64)   +   imul r14, rax      (2 runtime instructions)
+    ; If A^N == 1 (e.g. A=1, or any A with A^N ≡ 1 mod 2^64): emits nothing.
+    cmp byte [loop_accum_active], 0
+    je .fe_no_mul_only
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 26
+    jne .fe_no_mul_only
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    ; [0..2] = 4C 89 F0 (mov rax, r14 — accumulator read)
+    cmp byte [rcx+rdx+0], 0x4C
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+1], 0x89
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+2], 0xF0
+    jne .fe_no_mul_only
+    ; [3] and [7] = 0x90 (spot-check 5 NOPs from retroactive read-first patch)
+    cmp byte [rcx+rdx+3], 0x90
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+7], 0x90
+    jne .fe_no_mul_only
+    ; [8..10] = 49 89 C2 (mov r10, rax — spill LHS)
+    cmp byte [rcx+rdx+8], 0x49
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+9], 0x89
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+10], 0xC2
+    jne .fe_no_mul_only
+    ; [11] = B8 (mov eax, imm32 — load constant A)
+    cmp byte [rcx+rdx+11], 0xB8
+    jne .fe_no_mul_only
+    ; [16..18] = 4C 89 D3 (mov rbx, r10 — restore LHS)
+    cmp byte [rcx+rdx+16], 0x4C
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+17], 0x89
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+18], 0xD3
+    jne .fe_no_mul_only
+    ; [19..22] = 48 0F AF C3 (imul rax, rbx) — distinguishes mul-only from add-only
+    cmp byte [rcx+rdx+19], 0x48
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+20], 0x0F
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+21], 0xAF
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+22], 0xC3
+    jne .fe_no_mul_only
+    ; [23..25] = 49 89 C6 (mov r14, rax — accumulator store)
+    cmp byte [rcx+rdx+23], 0x49
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+24], 0x89
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+25], 0xC6
+    jne .fe_no_mul_only
+    ; Pattern confirmed. Extract A (body+12), compute N = end_val - from_val.
+    mov r8d, dword [rcx+rdx+12]     ; r8 = A (zero-extended)
+    mov r10, [for_rotation_end_val]
+    sub r10, [for_rotation_from_val] ; r10 = N
+    ; Binary ladder — compiler-time only (not emitted):
+    ;   cur_a = A (r8)    res_a = 1 (r11)
+    ;   while N > 0:
+    ;     if N & 1: res_a *= cur_a
+    ;     cur_a *= cur_a;  N >>= 1
+    ; Result: r11 = A^N mod 2^64
+    push rbx
+    mov r11, 1
+.affine_mul_ladder:
+    test r10, r10
+    jz .affine_mul_ladder_done
+    test r10, 1
+    jz .affine_mul_even
+    imul r11, r8
+.affine_mul_even:
+    imul r8, r8
+    shr r10, 1
+    jmp .affine_mul_ladder
+.affine_mul_ladder_done:
+    pop rbx
+    ; Rewind output buffer to body start — erase the 26-byte loop body
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    ; If A^N == 1: x is unchanged, emit nothing
+    cmp r11, 1
+    je .affine_mul_skip_emit
+    ; Emit: mov rax, A^N (imm64) = 48 B8 <8 bytes>
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, r11
+    call emit_q
+    ; Emit: imul r14, rax = 4C 0F AF F0
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xAF
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+.affine_mul_skip_emit:
+    call codegen_patch_jump
+    mov byte [loop_pin_active], 0
+    jmp .fe_no_combine
+.fe_no_mul_only:
+    ; O-Affine-Add: closed-form for add-only loops (:x = x+B, 25-byte body).
+    ; Detects a single-assignment loop body `for i in 0..N: :x = x+B` where B is a
+    ; compile-time constant and the loop index i is unused in the body.
+    ; Computes B*N mod 2^64 in the compiler, then emits the shortest safe encoding:
+    ;   add r14, imm32            (7 bytes)  when B*N fits in a non-negative imm32
+    ;   mov rax, B*N  +  add r14, rax        (13 bytes)  otherwise
+    ; Special case :x = x+1 with any N: emits `add r14, N` — single instruction.
+    cmp byte [loop_accum_active], 0
+    je .fe_no_add_only
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 25
+    jne .fe_no_add_only
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    ; [0..2] = 4C 89 F0 (mov rax, r14)
+    cmp byte [rcx+rdx+0], 0x4C
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+1], 0x89
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+2], 0xF0
+    jne .fe_no_add_only
+    ; [3] and [7] = 0x90 (spot-check 5 NOPs)
+    cmp byte [rcx+rdx+3], 0x90
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+7], 0x90
+    jne .fe_no_add_only
+    ; [8..10] = 49 89 C2 (mov r10, rax)
+    cmp byte [rcx+rdx+8], 0x49
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+9], 0x89
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+10], 0xC2
+    jne .fe_no_add_only
+    ; [11] = B8 (mov eax, imm32 — load constant B)
+    cmp byte [rcx+rdx+11], 0xB8
+    jne .fe_no_add_only
+    ; [16..18] = 4C 89 D3 (mov rbx, r10)
+    cmp byte [rcx+rdx+16], 0x4C
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+17], 0x89
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+18], 0xD3
+    jne .fe_no_add_only
+    ; [19..21] = 48 01 D8 (add rax, rbx) — distinguishes add-only from mul-only
+    cmp byte [rcx+rdx+19], 0x48
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+20], 0x01
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+21], 0xD8
+    jne .fe_no_add_only
+    ; [22..24] = 49 89 C6 (mov r14, rax)
+    cmp byte [rcx+rdx+22], 0x49
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+23], 0x89
+    jne .fe_no_add_only
+    cmp byte [rcx+rdx+24], 0xC6
+    jne .fe_no_add_only
+    ; Pattern confirmed. Extract B (body+12), compute N = end_val - from_val.
+    mov r8d, dword [rcx+rdx+12]     ; r8 = B (zero-extended from imm32)
+    mov r10, [for_rotation_end_val]
+    sub r10, [for_rotation_from_val] ; r10 = N
+    imul r8, r10                     ; r8 = B*N mod 2^64
+    ; Rewind output buffer to body start — erase the 25-byte loop body
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    ; If B*N == 0: x is unchanged, emit nothing
+    test r8, r8
+    jz .affine_add_skip_emit
+    ; If B*N fits in a non-negative sign-extended imm32 (0..0x7FFFFFFF):
+    ; emit compact form: add r14, imm32 = 49 81 C6 <imm32>  (7 bytes)
+    cmp r8, 0x7FFFFFFF
+    ja .affine_add_use_imm64
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    mov eax, r8d
+    call emit_d
+    jmp .affine_add_skip_emit
+.affine_add_use_imm64:
+    ; emit: mov rax, B*N (imm64) = 48 B8 <8 bytes>
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, r8
+    call emit_q
+    ; emit: add r14, rax = 49 01 C6
+    mov al, 0x49
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+.affine_add_skip_emit:
+    call codegen_patch_jump
+    mov byte [loop_pin_active], 0
+    jmp .fe_no_combine
+.fe_no_add_only:
     ; O256: closed-form 256× virtual accumulator folding.
     ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 256 == 0.
     ; Replaces per-iteration add with: sum_delta = 256*i + 32640; i += 256
