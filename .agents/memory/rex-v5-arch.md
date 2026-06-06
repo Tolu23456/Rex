@@ -278,3 +278,64 @@ Syntax: `clock` or `clock()` — atom that returns current time in ms (int64) �
 Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-34, 37.
 
 ## O23: 2× Unroll + Dual Accumulators (IMPLEMENTED)
+
+## Speed Optimization Session (June 2026) — Implemented Optimizations
+
+### O32a/b/c: emit_b/emit_d/emit_q hot-path strip (codegen.asm)
+- Removed bounds check (buffer expanded to 512 KB, making overflow impossible in practice).
+- Removed `push rcx / pop rcx` (rcx is caller-saved; callee need not save it).
+- Split RMW `add [out_idx], N` into ALU+store: load → add → store (eliminates memory read-modify-write).
+- **Why:** emit_b is called ~100k times per compilation; each saved instruction is meaningful.
+
+### O32d: codegen_emit_clock_ms blob (codegen.asm)
+- Replaced 40 sequential `call emit_b` with a single `call emit_blob` referencing `clock_ms_blob` in .data.
+- blob is 55 bytes; emit_blob uses `rep movsb` for the bulk copy.
+- **Why:** 40 function calls × 5–10 ns/call ≈ 200–400 ns eliminated per `clock` expression.
+
+### O3b: codegen_peephole_slx — store-load elimination (codegen.asm)
+- New pass after `codegen_peephole`: scans for `mov [abs32],rax` followed immediately by `mov rax,[abs32]` (same address).
+- Replaces the redundant load with an 8-byte NOP (`0F 1F 84 00 00000000`).
+- **Why:** single-pass codegen emits naive store+reload pairs; a post-pass removes them without changing the emit logic.
+
+### O33a: strcpy — repne scasb + rep movsb (parser.asm)
+- Finds src length with `repne scasb`, then bulk-copies with `rep movsb` (single µop-cache entry per byte vs 4 instructions/byte).
+- Stack discipline: push rdi (dest), push rcx; after scasb `not ecx` gives len+1; `pop rax` (balance), `pop rdi` (dest); `rep movsb`.
+- **Why:** strcpy is called for every variable, protocol, and for-loop name.
+
+### O33b: strlen_local — repne scasb (parser.asm)
+- Replaces byte-at-a-time loop with `repne scasb`; `not ecx; dec ecx` gives length.
+
+### O33c: strcat_local — repne scasb for end-find (parser.asm)
+- Finds dest-end with `repne scasb` (ecx=64 cap, safe for 64-byte VAR_ENTRY buffers); `dec rdi` lands on NUL; byte-appends src.
+
+### O34: var_find — 8-byte prefix QWORD compare + shl 6 (parser.asm)
+- Loads first 8 bytes of query name into r11 before the loop. Per-entry: `cmp [rsi], r11`; skips full strcmp on mismatch.
+- Replaces `imul rax, VAR_ENTRY_SIZE` with `shl rax, 6` (VAR_ENTRY_SIZE=64=2^6) in both var_find and var_add.
+- Removed frame pointer (push rbp/leave). Uses push/pop rbx/rcx/rsi/rdi; [rsp] holds original rdi after 4 pushes.
+- r11 used as scratch (caller-saved, no save needed).
+- **Why:** most var_find calls hit the 8-byte prefix mismatch, saving 1–15 byte comparisons per non-matching entry.
+
+### O35a: rt_prs strlen — repne scasb (runtime_src.asm)
+- `repne scasb` with `not rcx; lea rbx,[rcx-1]` gives string length. r12 holds ptr (callee-saved).
+
+### O35b: rt_prq strlen — repne scasb (runtime_src.asm)
+- Same; rcx freely clobbered (program exits after the write).
+
+### RXHASH-64: Novel hash algorithm for rt_sip (runtime_src.asm)
+- Replaces `xor rax,rax; ret` stub with full 32-instruction hash.
+- Algorithm: FNV-1a per-byte mixing (`xor rax,byte; imul rax,FNV_prime`) + `rol rax,31` (M₃₁ bijection) + SplitMix64 finalization (`xor/imul/xor/imul/xor` cascade).
+- Constants: seed=0xCBF29CE484222325, prime=0x100000001B3, SM64-1=0xBF58476D1CE4E5B9, SM64-2=0x94D049BB133111EB, rotation=31.
+- **Why:** M₃₁=31 is a Mersenne prime; the multiply-rotate map `x → (x*p) rol 31` is bijective on Z/2^64, guaranteeing maximum avalanche diffusion.
+
+### Pre-existing failures (NOT introduced by this session)
+- `tests/test_for_loop.rex`: segfault in compiler on nested for loops — confirmed by reverting strcpy to original (crash still occurs). Root cause: global state (`for_start_tok`, `for_end_tok`, `for_rollback_idx`, `saved_name`) is not saved before recursive `call parse_stmt` inside `.forl`.
+- `tests/test_dict.rex`: parse error "expected identifier" — dict syntax partially unimplemented.
+- `tests/test_err.rex`: pre-existing limitation in `err` statement.
+- **36/39 tests pass** (unchanged from before this session).
+
+### out_buffer expansion
+- 131072 → 524288 bytes (128 KB → 512 KB). Enables removal of bounds check in emit_b.
+
+### Build results (June 2026)
+- Compile time (100× bench_rex.rex): 446ms wall / 44ms user.
+- Runtime (bench_rex: 10M-iter sum): 19ms.

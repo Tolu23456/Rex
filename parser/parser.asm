@@ -102,57 +102,56 @@ le_name:   db "__le",0
 section .text
 
 ; ── string helpers ────────────────────────────────────────────────────────────
+; O33a: strcpy — find src length with repne scasb, bulk-copy with rep movsb
 strcpy:
-    push rbp
-    mov rbp, rsp
-    push rsi
+    ; rdi = dest, rsi = src
     push rdi
-.l:
+    push rcx
+    mov rdi, rsi        ; scan src for NUL
+    xor eax, eax
+    mov ecx, -1
+    cld
+    repne scasb         ; rdi past NUL; ecx = -(len+2) [as uint32: 0xFFFFFFFE-L]
+    not ecx             ; ecx = len+1 (zero-extends to rcx)
+    pop rax             ; discard saved rcx (stack balance; rcx = len+1 is in ecx)
+    pop rdi             ; restore dest
+    rep movsb           ; copy len+1 bytes src → dest
+    ret
+
+; O33b: strlen_local — repne scasb instead of byte-at-a-time loop
+strlen_local:
+    ; rdi = string → rax = length (NUL not counted)
+    push rcx
+    xor eax, eax        ; al = NUL byte to find
+    mov ecx, -1
+    cld
+    repne scasb         ; ecx = -(len+2)
+    not ecx             ; ecx = len+1
+    dec ecx             ; ecx = len
+    mov rax, rcx
+    pop rcx
+    ret
+
+; O33c: strcat_local — find dest-end with repne scasb, byte-copy src
+strcat_local:
+    ; rdi = dest, rsi = src
+    push rbx
+    push rcx
+    mov rbx, rdi        ; save original dest (callee-saved)
+    xor eax, eax
+    mov ecx, 64         ; max name length (always safe for our 64-byte buffers)
+    cld
+    repne scasb         ; rdi = one past NUL of dest
+    dec rdi             ; rdi = NUL position (append here)
+.cat_cp:
     movzx eax, byte [rsi]
     mov [rdi], al
-    inc rsi
     inc rdi
-    test al, al
-    jnz .l
-    pop rdi
-    pop rsi
-    leave
-    ret
-
-strlen_local:
-    push rbx
-    mov rbx, rdi
-    xor rax, rax
-.l:
-    cmp byte [rbx+rax], 0
-    je .d
-    inc rax
-    jmp .l
-.d:
-    pop rbx
-    ret
-
-strcat_local:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rdx
-    mov rbx, rdi
-.f:
-    cmp byte [rbx], 0
-    je .a
-    inc rbx
-    jmp .f
-.a:
-    movzx edx, byte [rsi]
-    mov [rbx], dl
-    inc rbx
     inc rsi
-    test dl, dl
-    jnz .a
-    pop rdx
+    test al, al
+    jnz .cat_cp
+    pop rcx
     pop rbx
-    leave
     ret
 
 fatal:
@@ -170,22 +169,29 @@ fatal:
     syscall
 
 ; ── variable table ────────────────────────────────────────────────────────────
+; O34: var_find — fast 8-byte prefix compare before full strcmp.
+; VAR_ENTRY_SIZE=64=2^6, so index*64 = shl 6 (replaces imul).
+; Loading the first 8 bytes of the query name as a uint64 lets us skip
+; the per-byte compare for non-matching entries with one QWORD compare.
 var_find:
-    push rbp
-    mov rbp, rsp
     push rbx
     push rcx
     push rsi
-    push rdi            ; original rdi saved at [rbp-32]
+    push rdi            ; [rsp] = original rdi (query name ptr)
+    mov r11, [rdi]      ; r11 = first 8 bytes of query name (64-byte bufs: safe)
     xor rcx, rcx
 .l:
     cmp rcx, [var_count]
     jge .nf
     mov rax, rcx
-    imul rax, VAR_ENTRY_SIZE
+    shl rax, 6          ; rax = rcx * 64 (VAR_ENTRY_SIZE = 64 = 2^6)
     lea rsi, [var_table]
     add rsi, rax
-    mov rdi, [rbp-32]
+    ; O34 fast path: compare 8 bytes at once — skips full strcmp on mismatch
+    cmp [rsi], r11
+    jne .nx             ; first 8 bytes differ → definitely not this variable
+    ; Possible match: full byte-by-byte verification (handles names >8 chars)
+    mov rdi, [rsp]      ; restore query name pointer
 .c:
     movzx eax, byte [rdi]
     movzx edx, byte [rsi]
@@ -209,7 +215,6 @@ var_find:
     pop rsi
     pop rcx
     pop rbx
-    leave
     ret
 
 var_add:
@@ -229,7 +234,7 @@ var_add:
     cmp rbx, VAR_MAX
     jge .full
     mov rax, rbx
-    imul rax, VAR_ENTRY_SIZE
+    shl rax, 6          ; rax = rbx * 64 (VAR_ENTRY_SIZE = 64 = 2^6)
     lea rdi, [var_table]
     add rdi, rax
     push rdi
@@ -241,7 +246,7 @@ var_add:
     mov rsi, r12
     call strcpy
     mov rax, rbx
-    imul rax, VAR_ENTRY_SIZE
+    shl rax, 6          ; rax = rbx * 64 (same shift)
     lea rdi, [var_table]
     add rdi, rax
     mov [rdi+32], r13

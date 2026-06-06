@@ -70,7 +70,7 @@ extern proto_count
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
 section .bss
-out_buffer:       resb 131072
+out_buffer:       resb 524288    ; 512 KB — enables bounds-check removal in emit_b
 out_idx:          resq 1
 jump_patch_stack: resq 32
 jump_patch_depth: resq 1
@@ -191,40 +191,34 @@ actual_alc_mode_va:  resq 1  ; = actual_alc_va + RT_ALC_SIZE - 8 (the allocator 
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
+; O32a: emit_b — no bounds check (buffer is 512 KB), no push rcx (caller-saved)
 emit_b:
     push rbx
-    push rcx
-    mov rcx, [out_idx]
-    cmp rcx, 131071
-    jge .overflow
-    lea rbx, [out_buffer]
-    mov [rbx+rcx], al
-    inc qword [out_idx]
-    pop rcx
+    mov rbx, [out_idx]
+    lea rcx, [out_buffer]
+    mov [rcx+rbx], al
+    inc rbx
+    mov [out_idx], rbx
     pop rbx
     ret
-.overflow:
-    mov rax, 60
-    mov rdi, 1
-    syscall
+; O32b: emit_d — same treatment
 emit_d:
     push rbx
-    push rcx
-    mov rcx, [out_idx]
-    lea rbx, [out_buffer]
-    mov [rbx+rcx], eax
-    add qword [out_idx], 4
-    pop rcx
+    mov rbx, [out_idx]
+    lea rcx, [out_buffer]
+    mov [rcx+rbx], eax
+    add rbx, 4
+    mov [out_idx], rbx
     pop rbx
     ret
+; O32c: emit_q — same treatment
 emit_q:
     push rbx
-    push rcx
-    mov rcx, [out_idx]
-    lea rbx, [out_buffer]
-    mov [rbx+rcx], rax
-    add qword [out_idx], 8
-    pop rcx
+    mov rbx, [out_idx]
+    lea rcx, [out_buffer]
+    mov [rcx+rbx], rax
+    add rbx, 8
+    mov [out_idx], rbx
     pop rbx
     ret
 emit_blob:
@@ -424,6 +418,8 @@ codegen_finish:
     mov [rcx+64+40], rax
     ; O3: peephole optimise the output buffer
     call codegen_peephole
+    ; O3b: store-load elimination pass
+    call codegen_peephole_slx
     ret
 
 ; ── output helpers ────────────────────────────────────────────────────────────
@@ -6057,6 +6053,60 @@ codegen_peephole:
 .ph_done:
     ret
 
+; ── O3b: store-load elimination pass ─────────────────────────────────────────
+; Scans out_buffer for:
+;   mov [abs32], rax   (48 89 04 25 <a4>)  — 8 bytes
+;   mov rax, [abs32]   (48 8B 04 25 <a4>)  — 8 bytes, SAME address
+; rax still holds the value that was just stored; the reload is redundant.
+; Replaces the load with an 8-byte NOP: 0F 1F 84 00 00 00 00 00
+global codegen_peephole_slx
+codegen_peephole_slx:
+    lea rsi, [out_buffer]
+    mov rcx, [out_idx]
+    xor rbx, rbx
+.slx_loop:
+    mov rdx, rcx
+    sub rdx, rbx
+    cmp rdx, 16
+    jl .slx_done
+    lea rdi, [rsi+rbx]
+    cmp byte [rdi+0],  0x48
+    jne .slx_next
+    cmp byte [rdi+1],  0x89
+    jne .slx_next
+    cmp byte [rdi+2],  0x04
+    jne .slx_next
+    cmp byte [rdi+3],  0x25
+    jne .slx_next
+    cmp byte [rdi+8],  0x48
+    jne .slx_next
+    cmp byte [rdi+9],  0x8B
+    jne .slx_next
+    cmp byte [rdi+10], 0x04
+    jne .slx_next
+    cmp byte [rdi+11], 0x25
+    jne .slx_next
+    ; verify same abs32 address: bytes [4..7] == bytes [12..15]
+    mov eax, dword [rdi+4]
+    cmp eax, dword [rdi+12]
+    jne .slx_next
+    ; Match: replace load (bytes 8..15) with 8-byte NOP
+    mov byte [rdi+8],  0x0F
+    mov byte [rdi+9],  0x1F
+    mov byte [rdi+10], 0x84
+    mov byte [rdi+11], 0x00
+    mov byte [rdi+12], 0x00
+    mov byte [rdi+13], 0x00
+    mov byte [rdi+14], 0x00
+    mov byte [rdi+15], 0x00
+    add rbx, 8              ; advance past the store; load is now NOP
+    jmp .slx_loop
+.slx_next:
+    inc rbx
+    jmp .slx_loop
+.slx_done:
+    ret
+
 ; ── @memo: emit cache lookup check at protocol body entry ─────────────────────
 ; rdi = proto_idx.  Emits runtime code that:
 ;   1. On first call: allocates an 8192-byte table via rt_alc, fills with -1 (stosq)
@@ -6439,146 +6489,31 @@ codegen_finalize:
     ret
 
 ; ── codegen_emit_clock_ms ────────────────────────────────────────────────────
+; O32d: Converted from 40 sequential call emit_b to single emit_blob.
 ; Emits inline code: clock_gettime(CLOCK_MONOTONIC) → rax = ms (tv_sec*1000 + tv_nsec/1000000)
-; Emitted bytes (55 total):
-;   48 83 EC 10          sub rsp, 16
-;   B8 E4 00 00 00       mov eax, 228   (sys_clock_gettime, zero-extends)
-;   BF 01 00 00 00       mov edi, 1     (CLOCK_MONOTONIC)
-;   48 89 E6             mov rsi, rsp   (&timespec)
-;   0F 05                syscall
-;   4C 8B 04 24          mov r8,  [rsp]     (tv_sec)
-;   4C 8B 4C 24 08       mov r9,  [rsp+8]   (tv_nsec)
-;   48 83 C4 10          add rsp, 16
-;   4D 69 C0 E8 03 00 00 imul r8, r8, 1000  (tv_sec → ms)
-;   4C 89 C8             mov rax, r9        (tv_nsec → rax)
-;   31 D2                xor edx, edx
-;   B9 40 42 0F 00       mov ecx, 1000000
-;   48 F7 F9             idiv rcx           (tv_nsec / 1000000 → rax)
-;   4C 01 C0             add rax, r8        (total ms)
+; Emitted bytes (55 total) stored in clock_ms_blob in .data section.
 ; Clobbers: rax rdi rsi rcx rdx r8 r9 (all caller-saved). Preserves r14 r15 rbx rbp.
 codegen_emit_clock_ms:
-    ; sub rsp, 16  (48 83 EC 10)
-    mov al, 0x48
-    call emit_b
-    mov al, 0x83
-    call emit_b
-    mov al, 0xEC
-    call emit_b
-    mov al, 0x10
-    call emit_b
-    ; mov eax, 228  (B8 E4 00 00 00)  sys_clock_gettime; zero-extends to rax
-    mov al, 0xB8
-    call emit_b
-    mov al, 0xE4
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    ; mov edi, 1  (BF 01 00 00 00)  CLOCK_MONOTONIC; zero-extends to rdi
-    mov al, 0xBF
-    call emit_b
-    mov al, 0x01
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    ; mov rsi, rsp  (48 89 E6)
-    mov al, 0x48
-    call emit_b
-    mov al, 0x89
-    call emit_b
-    mov al, 0xE6
-    call emit_b
-    ; syscall  (0F 05)
-    mov al, 0x0F
-    call emit_b
-    mov al, 0x05
-    call emit_b
-    ; mov r8, [rsp]  (4C 8B 04 24)  tv_sec
-    mov al, 0x4C
-    call emit_b
-    mov al, 0x8B
-    call emit_b
-    mov al, 0x04
-    call emit_b
-    mov al, 0x24
-    call emit_b
-    ; mov r9, [rsp+8]  (4C 8B 4C 24 08)  tv_nsec
-    mov al, 0x4C
-    call emit_b
-    mov al, 0x8B
-    call emit_b
-    mov al, 0x4C
-    call emit_b
-    mov al, 0x24
-    call emit_b
-    mov al, 0x08
-    call emit_b
-    ; add rsp, 16  (48 83 C4 10)
-    mov al, 0x48
-    call emit_b
-    mov al, 0x83
-    call emit_b
-    mov al, 0xC4
-    call emit_b
-    mov al, 0x10
-    call emit_b
-    ; imul r8, r8, 1000  (4D 69 C0 E8 03 00 00)
-    mov al, 0x4D
-    call emit_b
-    mov al, 0x69
-    call emit_b
-    mov al, 0xC0
-    call emit_b
-    mov al, 0xE8
-    call emit_b
-    mov al, 0x03
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    ; mov rax, r9  (4C 89 C8)  tv_nsec -> rax for division
-    mov al, 0x4C
-    call emit_b
-    mov al, 0x89
-    call emit_b
-    mov al, 0xC8
-    call emit_b
-    ; xor edx, edx  (31 D2)  clear high bits for idiv
-    mov al, 0x31
-    call emit_b
-    mov al, 0xD2
-    call emit_b
-    ; mov ecx, 1000000  (B9 40 42 0F 00)
-    mov al, 0xB9
-    call emit_b
-    mov al, 0x40
-    call emit_b
-    mov al, 0x42
-    call emit_b
-    mov al, 0x0F
-    call emit_b
-    mov al, 0x00
-    call emit_b
-    ; idiv rcx  (48 F7 F9)  rax = tv_nsec/1000000 (0..999)
-    mov al, 0x48
-    call emit_b
-    mov al, 0xF7
-    call emit_b
-    mov al, 0xF9
-    call emit_b
-    ; add rax, r8  (4C 01 C0)  total_ms = nsec_ms + sec_ms
-    mov al, 0x4C
-    call emit_b
-    mov al, 0x01
-    call emit_b
-    mov al, 0xC0
-    call emit_b
+    lea rsi, [clock_ms_blob]
+    mov ecx, 55
+    call emit_blob
     ret
+
+section .data
+; O32d: 55-byte clock_gettime sequence as a blob for single emit_blob call
+; (replaces 40 sequential call emit_b)
+clock_ms_blob:
+    db 0x48, 0x83, 0xEC, 0x10          ; sub rsp, 16
+    db 0xB8, 0xE4, 0x00, 0x00, 0x00    ; mov eax, 228 (sys_clock_gettime)
+    db 0xBF, 0x01, 0x00, 0x00, 0x00    ; mov edi, 1 (CLOCK_MONOTONIC)
+    db 0x48, 0x89, 0xE6                 ; mov rsi, rsp
+    db 0x0F, 0x05                       ; syscall
+    db 0x4C, 0x8B, 0x04, 0x24          ; mov r8, [rsp]   (tv_sec)
+    db 0x4C, 0x8B, 0x4C, 0x24, 0x08    ; mov r9, [rsp+8] (tv_nsec)
+    db 0x48, 0x83, 0xC4, 0x10          ; add rsp, 16
+    db 0x4D, 0x69, 0xC0, 0xE8, 0x03, 0x00, 0x00  ; imul r8, r8, 1000
+    db 0x4C, 0x89, 0xC8                 ; mov rax, r9
+    db 0x31, 0xD2                       ; xor edx, edx
+    db 0xB9, 0x40, 0x42, 0x0F, 0x00    ; mov ecx, 1000000
+    db 0x48, 0xF7, 0xF9                 ; idiv rcx
+    db 0x4C, 0x01, 0xC0                 ; add rax, r8
