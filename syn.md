@@ -45,20 +45,42 @@ swap x y            // swap — self-evidently a mutation, no sigil needed
 - At least one `:` write site → mutable. The compiler tracks this per variable.
 - Attempting to read an uninitialised variable (declared but never assigned) is a compile-time error.
 
+### Type inference 📋
+Omit the type annotation and Rex infers it from the initial value or expression.
+The `:` mutation rule still applies. Explicit types are always valid and preferred
+for protocol parameters and public interfaces.
+
+```rex
+x = 5               // infers int
+y = 3.14            // infers float
+z = "hello"         // infers str
+w = true            // infers bool
+result = @add(2, 3) // infers from protocol return type
+
+:x = x + 1          // mutation still requires :
+```
+
+If no initial value is provided, the type must be stated explicitly:
+```rex
+int total           // explicit — no value yet
+:total = 100
+```
+
 ---
 
 ## Data Types ✅
 
-| Type       | Syntax Example         | Notes                                                        |
-|------------|------------------------|--------------------------------------------------------------|
-| `int`      | `int a = 5`            | 64-bit signed integer                                        |
-| `float`    | `float b = 1.5`        | 64-bit double (IEEE 754, SSE2)                               |
-| `bool`     | `bool f = true`        | Tri-state: `true`, `false`, `unknown` (Kleene logic)         |
-| `str`      | `str s = "Rex"`        | Heap-managed UTF-8 string; `[cap][len][data]` layout         |
-| `char`     | `char c = 'R'`         | Single UTF-8 byte; lightweight alias over `byte`             |
-| `byte`     | `byte b = 0xFF`        | Raw unsigned 8-bit value; for binary data and I/O            |
-| `seq[T]`   | `seq[int] nums`        | Typed dynamic sequence (heap); push / pop / len / cap        |
-| `dict[T]`  | `dict[int] d`          | Typed SipHash map; keys are always `str`, value type is `T`  |
+| Type         | Syntax Example           | Notes                                                        |
+|--------------|--------------------------|--------------------------------------------------------------|
+| `int`        | `int a = 5`              | 64-bit signed integer                                        |
+| `float`      | `float b = 1.5`          | 64-bit double (IEEE 754, SSE2)                               |
+| `bool`       | `bool f = true`          | Tri-state: `true`, `false`, `unknown` (Kleene logic)         |
+| `str`        | `str s = "Rex"`          | Heap-managed UTF-8 string; `[cap][len][data]` layout         |
+| `char`       | `char c = 'R'`           | Single UTF-8 byte; lightweight alias over `byte`             |
+| `byte`       | `byte b = 0xFF`          | Raw unsigned 8-bit value; for binary data and I/O            |
+| `seq[T]`     | `seq[int] nums`          | Typed dynamic sequence (heap); full method API               |
+| `dict[T]`    | `dict[int] d`            | Typed SipHash map; keys always `str`, value type is `T`      |
+| `tup[T...]`  | `tup[int,str] t`         | Fixed heterogeneous tuple; positional, immutable by default  |
 
 > **`complex` removed from core.** It is a niche type with significant implementation cost. It will be available as a standard library import in a future release. Existing `complex` code continues to work in V0.1 but is considered deprecated in core.
 
@@ -657,68 +679,119 @@ each item in items:
 
 ---
 
-## Sequences ✅
+## Sequences ✅ / 📋
 
-Sequences are typed. The element type is declared in brackets. The compiler
-uses the type to size elements, enforce push/pop type safety, and optimise
-access patterns.
+Sequences are typed. The element type is declared in brackets. Method-call
+syntax is the primary API. Sequences grow automatically when capacity is exceeded.
 
 ```rex
 seq[int] nums
-push nums 10
-push nums 20
-push nums 30
+nums.push(10)
+nums.push(20)
+nums.push(30)
 
-int n
-:n = len nums       // length (runtime read from hidden header)
-output n
-
-int c
-:c = cap nums       // capacity (allocated slots)
-
-int v
-:v = pop nums       // LIFO pop — returns int
-output v
+output nums.len()       // 3
+output nums.cap()       // allocated capacity
+output nums.pop()       // 30 — LIFO pop
+output nums[0]          // 10 — index access
 ```
 
-Method-call syntax is also valid:
+### `seq[T]` method reference
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.push(val)` | — | Append to end; grows if needed |
+| `.pop()` | `T` | Remove and return last element |
+| `.get(i)` | `T` | Same as `s[i]`; index from 0 |
+| `.set(i, val)` | — | Same as `:s[i] = val` |
+| `.len()` | `int` | Current element count |
+| `.cap()` | `int` | Allocated capacity |
+| `.contains(val)` | `bool` | Linear scan for value |
+| `.remove(i)` | — | Remove element at index; shifts remaining |
+| `.sort()` | — | In-place ascending sort |
+| `.reverse()` | — | In-place reversal |
+| `.slice(start, end)` | `seq[T]` | New sub-sequence (non-mutating) |
+| `.map(fn)` | `seq[U]` | Transform every element via lambda |
+| `.filter(fn)` | `seq[T]` | Keep elements where `fn` returns `true` |
+| `.each(fn)` | — | Call `fn` for every element (forEach) |
+| `.clear()` | — | Remove all elements; keep allocation |
+
+### Examples
+
 ```rex
-seq[float] data
-data.push(1.5)
-data.push(2.7)
+seq[int] nums
+nums.push(3)
+nums.push(1)
+nums.push(4)
+nums.push(1)
+nums.push(5)
+
+nums.sort()                              // [1, 1, 3, 4, 5]
+nums.reverse()                           // [5, 4, 3, 1, 1]
+output nums.contains(4)                  // true
+
+seq[int] big = nums.filter(fn(int x) -> bool: x > 2)
+seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
+seq[int] part = nums.slice(1, 3)        // elements at index 1 and 2
+
+nums.each(fn(int x): output "{x}")      // print each
+output nums.len()
 ```
 
-Sequences grow automatically: if a `push` would exceed capacity, the runtime
-allocates a larger block, copies existing elements, and resumes. Growth is
-unbounded. A compile-time error is raised if you push an element whose type
-does not match the declared element type.
+A compile-time error is raised when pushing a value whose type mismatches `T`.
 
 ---
 
-## Dictionaries ✅
+## Dictionaries ✅ / 📋
 
-Dictionaries are typed by value. Keys are always `str`. The value type is
-declared in brackets.
+Dictionaries are typed by value. Keys are always `str`. Method-call syntax
+is the primary API.
 
 ```rex
-dict[int] d
-d["hello"] = 42
-d["world"] = 99
+dict[int] scores
+scores.set("alice", 95)
+scores.set("bob", 87)
 
-int v
-:v = d["hello"]
-output v
+output scores.get("alice")     // 95
+output scores.has("carol")     // false
+output scores.len()            // 2
 ```
+
+Bracket syntax is also supported for get and set:
+```rex
+scores["alice"] = 95
+output scores["alice"]
+```
+
+### `dict[T]` method reference
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.set(key, val)` | — | Insert or overwrite; same as `d[key] = val` |
+| `.get(key)` | `T` | Retrieve value; same as `d[key]` |
+| `.has(key)` | `bool` | Returns `true` if key exists |
+| `.remove(key)` | — | Delete key-value pair |
+| `.keys()` | `seq[str]` | All keys as a sequence |
+| `.values()` | `seq[T]` | All values as a sequence |
+| `.len()` | `int` | Number of entries |
+| `.clear()` | — | Remove all entries; keep allocation |
+
+### Examples
 
 ```rex
 dict[str] labels
-labels["en"] = "Hello"
-labels["es"] = "Hola"
-output labels["en"]
+labels.set("en", "Hello")
+labels.set("es", "Hola")
+labels.set("fr", "Bonjour")
+
+seq[str] langs = labels.keys()
+langs.each(fn(str k): output "{k}: {labels.get(k)}")
+
+labels.remove("fr")
+output labels.len()    // 2
 ```
 
-A compile-time error is raised if you assign a value whose type does not match
-the declared value type.
+A compile-time error is raised when a value's type mismatches `T`.
 
 ---
 
@@ -778,6 +851,42 @@ str n
 :n = str(3.14)
 ```
 
+### `str` method reference 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.len()` | `int` | Number of bytes |
+| `.upper()` | `str` | New uppercase copy |
+| `.lower()` | `str` | New lowercase copy |
+| `.trim()` | `str` | New copy with leading/trailing whitespace removed |
+| `.split(sep)` | `seq[str]` | Split by separator string |
+| `.contains(sub)` | `bool` | True if substring found |
+| `.starts_with(prefix)` | `bool` | True if string begins with prefix |
+| `.ends_with(suffix)` | `bool` | True if string ends with suffix |
+| `.replace(old, new)` | `str` | New copy with all occurrences replaced |
+| `.slice(start, end)` | `str` | New substring from index start to end |
+| `.to_int()` | `int` | Parse as integer |
+| `.to_float()` | `float` | Parse as float |
+| `.str()` | `str` | Identity (returns itself) |
+
+```rex
+str s = "  Hello, World!  "
+output s.trim()                       // "Hello, World!"
+output s.trim().lower()               // "hello, world!"
+output s.trim().contains("World")     // true
+output s.trim().replace("World", "Rex") // "Hello, Rex!"
+output s.trim().starts_with("Hello")  // true
+
+seq[str] parts = "a,b,c".split(",")  // ["a", "b", "c"]
+parts.each(fn(str p): output p)
+
+str name = "Rex"
+output "length: {name.len()}"        // length: 3
+output name.upper()                  // REX
+output name[0]                       // 'R'
+output name.slice(0, 2)              // "Re"
+```
+
 ---
 
 ## `char` Type 📋
@@ -834,17 +943,50 @@ float z
 output z
 ```
 
-### Rounding 📋
+### `float` method reference 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.ceil()` | `int` | Round up |
+| `.floor()` | `int` | Round down |
+| `.round()` | `int` | Round to nearest |
+| `.fract()` | `float` | Fractional part only |
+| `.abs()` | `float` | Absolute value |
+| `.min(other)` | `float` | Smaller of two |
+| `.max(other)` | `float` | Larger of two |
+| `.str()` | `str` | Convert to string |
+
 ```rex
 float f = 3.7
-float c
-:c = ceil(f)
+output f.ceil()     // 4
+output f.floor()    // 3
+output f.round()    // 4
+output f.fract()    // 0.7
+output f.abs()      // 3.7
 
-float fl
-:fl = floor(f)
+float a = 2.5
+float b = 4.0
+output a.min(b)     // 2.5
+output a.max(b)     // 4.0
+```
 
-float fr
-:fr = fract(f)      // fractional part only
+### `int` method reference 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.abs()` | `int` | Absolute value |
+| `.min(other)` | `int` | Smaller of two |
+| `.max(other)` | `int` | Larger of two |
+| `.str()` | `str` | Convert to string |
+| `.float()` | `float` | Convert to float |
+
+```rex
+int n = -5
+output n.abs()      // 5
+output n.min(0)     // -5
+output n.max(0)     // 0
+output n.str()      // "-5"
+output n.float()    // -5.0
 ```
 
 ---
@@ -1308,3 +1450,203 @@ bool coin
 :coin = unknown
 output coin           // prints: true, false, or unknown
 ```
+
+---
+
+## Comments
+
+### Line comments ✅
+`//` begins a line comment. Everything after it on that line is ignored.
+```rex
+int x = 5    // this is a constant
+:x = 10      // mutation — x is now mutable
+```
+
+### Block comments 📋
+`/* */` spans multiple lines. Useful for temporarily disabling code or long notes.
+```rex
+/*
+   This entire block is ignored by the compiler.
+   Useful for multi-line notes or disabling code.
+*/
+int y = 42
+```
+
+### Doc comments 📋
+`///` attaches documentation to the next `prot` definition. Tools and future
+language servers read these to generate documentation.
+```rex
+/// Computes the nth Fibonacci number.
+/// Uses memoization for O(n) performance.
+/// @param n — must be non-negative
+/// @returns the nth Fibonacci number
+#memo
+prot fib(int n) -> int:
+    if n <= 1:
+        return n
+    return @fib(n-1) + @fib(n-2)
+```
+
+---
+
+## Tuples — Standalone Type 📋
+
+Tuples are fixed-size, ordered, heterogeneous collections. They are immutable
+by default. Declared with `tup[T, T, ...]` and initialised with `(val, val, ...)`.
+
+### Declaration
+```rex
+tup[int, str, float] record = (1, "Alice", 9.5)
+tup[bool, int] status = (true, 200)
+```
+
+### Index access
+Use `.0`, `.1`, `.2` etc. to read fields positionally.
+```rex
+output record.0    // 1
+output record.1    // "Alice"
+output record.2    // 9.5
+```
+
+### Destructuring
+Unpack all fields into named variables in one line.
+```rex
+int id, str name, float score = record
+output "id={id} name={name} score={score}"
+```
+
+### Partial destructuring with `_`
+Use `_` to skip fields you don't need.
+```rex
+int id, _, float score = record    // skip the name
+```
+
+### Tuples as protocol return values
+The most common use. Protocols can return multiple typed values cleanly.
+```rex
+prot divmod(int a, int b) -> (int, int):
+    return a / b, a % b
+
+int q, int r = @divmod(17, 5)
+output "quotient={q} remainder={r}"
+```
+
+### Tuple method reference
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.len()` | `int` | Always fixed — known at compile time |
+| `.str()` | `str` | String representation of all fields |
+
+---
+
+## Lambdas / Anonymous Protocols — `fn` 📋
+
+Anonymous protocols are written with `fn`. They can be stored in variables,
+passed as arguments, and used with `.map()`, `.filter()`, `.each()`, and
+any protocol that accepts a protocol-typed parameter.
+
+### Syntax
+```rex
+fn(int x) -> int: x * 2              // single-expression body
+fn(int x, int y) -> int: x + y       // two params
+fn(str s) -> bool: s.len() > 3       // bool return
+fn(int x):                            // no return value (side-effect only)
+    output "item: {x}"
+```
+
+### Multi-line body
+```rex
+fn(int x) -> int:
+    int doubled = x * 2
+    return doubled + 1
+```
+
+### Storing in a variable
+The variable type is written as `prot(params -> return)`:
+```rex
+prot(int -> int) double = fn(int x) -> int: x * 2
+prot(int, int -> int) add = fn(int a, int b) -> int: a + b
+prot(str -> bool) long = fn(str s) -> bool: s.len() > 5
+
+int result = @double(7)     // 14
+output result
+```
+
+### Passing to higher-order protocols
+```rex
+seq[int] nums
+nums.push(1)
+nums.push(2)
+nums.push(3)
+nums.push(4)
+nums.push(5)
+
+seq[int] evens = nums.filter(fn(int x) -> bool: x % 2 == 0)
+seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
+nums.each(fn(int x): output "{x}")
+
+// Chaining
+seq[int] result = nums
+    .filter(fn(int x) -> bool: x > 2)
+    .map(fn(int x) -> int: x * 10)
+```
+
+### Writing protocols that accept lambdas
+Declare the parameter type as `prot(T -> U)`:
+```rex
+prot apply(seq[int] s, prot(int -> int) transform) -> seq[int]:
+    return s.map(transform)
+
+seq[int] result = @apply(nums, fn(int x) -> int: x * x)
+```
+
+---
+
+## Imports & Modules 📋
+
+Rex modules map to `.rex` source files. Import a module by name (no extension).
+The compiler searches the same directory first, then the standard library path.
+
+### Import a whole module
+```rex
+import math
+import utils
+
+:x = @math.sqrt(16.0)        // module-qualified call
+:s = @utils.read_file("x.txt")
+```
+
+### Import specific identifiers
+```rex
+from math import sqrt, floor, ceil
+from utils import @read_file, @write_file
+
+:x = @sqrt(16.0)             // directly available, no prefix
+:data = @read_file("x.txt")
+```
+
+### Import with alias
+```rex
+from math import sqrt as sq
+
+:x = @sq(25.0)
+```
+
+### Standard library modules (planned)
+
+| Module | Contents |
+|---|---|
+| `math` | `sqrt`, `pow`, `log`, `sin`, `cos`, `pi`, `e` |
+| `str_utils` | `format`, `pad`, `repeat`, `encode`, `decode` |
+| `io` | `read_file`, `write_file`, `read_lines`, `append_file` |
+| `os` | `args`, `env`, `exit`, `cwd`, `time` |
+| `complex` | `complex` type, `real`, `imag`, `conj`, `magnitude` |
+| `net` | Basic TCP/UDP socket primitives |
+| `json` | `parse`, `stringify` |
+
+### Module rules
+- Each `.rex` file is one module. Module name = filename without extension.
+- Protocols defined at the top level of a file are its public exports.
+- No explicit `export` keyword — everything top-level is public.
+- Circular imports are a compile-time error.

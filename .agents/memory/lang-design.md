@@ -63,3 +63,43 @@ This is Kleene strong three-valued logic — mathematically principled.
 - `warn` is unaffected (non-fatal, passes through try)
 - Nested try: inner catches first; `err` inside `except` propagates outward
 - Phase 2: guard conditions (`except msg if "x" in msg:`) — deferred
+
+## Method Call Syntax (Python-style)
+
+**Primary API for all types — method calls via `.method()`.**
+
+**`seq[T]`:** `.push(val)` `.pop()` `.get(i)` `.set(i,val)` `.len()` `.cap()` `.contains(val)` `.remove(i)` `.sort()` `.reverse()` `.slice(s,e)` `.map(fn)` `.filter(fn)` `.each(fn)` `.clear()`
+**`dict[T]`:** `.set(k,v)` `.get(k)` `.has(k)` `.remove(k)` `.keys()→seq[str]` `.values()→seq[T]` `.len()` `.clear()`
+**`str`:** `.len()` `.upper()` `.lower()` `.trim()` `.split(sep)` `.contains(sub)` `.starts_with(p)` `.ends_with(s)` `.replace(old,new)` `.slice(s,e)` `.to_int()` `.to_float()` `.str()`
+**`float`:** `.ceil()` `.floor()` `.round()` `.fract()` `.abs()` `.min(o)` `.max(o)` `.str()`
+**`int`:** `.abs()` `.min(o)` `.max(o)` `.str()` `.float()`
+
+## Tuples (standalone)
+
+`tup[int,str,float] t = (1,"Alice",9.5)` — fixed, heterogeneous, immutable by default.
+Access: `t.0`, `t.1`. Destructure: `int a, str b, float c = t`. Skip with `_`.
+Primary use: multi-value protocol returns.
+
+## Lambdas / `fn`
+
+`fn(int x) -> int: x * 2` — anonymous protocol, single-expression or multi-line body.
+Variable type: `prot(int -> int) f = fn(int x) -> int: x * 2`. Called with `@f(5)`.
+Used in `.map(fn)`, `.filter(fn)`, `.each(fn)`. Protocol params declared as `prot(T -> U)`.
+
+## Type Inference
+
+`x = 5` (no type annotation) → compiler infers from literal or return type.
+If no initial value provided, explicit type required: `int total`.
+Explicit types always valid and preferred for protocol params and public interfaces.
+
+## Comments
+
+`//` line comment (existing). `/* */` block comment. `///` doc comment (attaches to next prot).
+`#` is NOT a comment — it's the decorator sigil.
+
+## Imports & Modules
+
+`import math` — whole module. `from math import sqrt` — specific identifier.
+`from math import sqrt as sq` — aliased import. Module-qualified: `@math.sqrt(x)`.
+Module = one `.rex` file. Top-level prots are public. No explicit export keyword.
+Planned stdlib: `math`, `str_utils`, `io`, `os`, `complex`, `net`, `json`.
