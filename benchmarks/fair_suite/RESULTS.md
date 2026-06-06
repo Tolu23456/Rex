@@ -547,30 +547,255 @@ Rex's 21 ms is pure ELF process startup (no dynamic linker). C's 0.00 ms is inte
 
 | Binary         | Rex     | C       | Rex/C |
 |----------------|---------|---------|-------|
-| b11_add_only   | 2,321 B | 15,800 B | **6.8× smaller** |
+| b11_add_only   | 2,484 B | 15,800 B | **6.4× smaller** |
+
+---
+
+## B12 — Nested Loop Accumulation
+
+**Algorithm:** Accumulate `i * j` over a 3000 × 3000 grid (9 million inner iterations)  
+**Purpose:** Nested loop code generation, register allocation across loop levels, memory traffic for accumulator variable
+
+```
+// Rex
+int :acc = 0
+for i in 0..3000:
+    for j in 0..3000:
+        :acc = acc + i * j
+output acc
+```
+
+```c
+// C (GCC -O3)
+int64_t acc = 0;
+for (int64_t i = 0; i < 3000; i++)
+    for (int64_t j = 0; j < 3000; j++)
+        acc += i * j;
+printf("result=%lld\n", acc);
+```
+
+Both produce: `result=20236502250000` ✓  
+(= Σᵢ Σⱼ i·j = (Σᵢ i)² = (3000·2999/2)² = 4498500² — same mathematical identity in both languages)
+
+| Run      | Rex internal (ms) | C internal (ms) |
+|----------|-------------------|-----------------|
+| Run 1    | 12                | 0.00            |
+| Run 2    | 11                | 0.00            |
+| Run 3    | 11                | 0.00            |
+| **Best** | **11**            | **0.00**        |
+
+**Winner: C — >22× faster (GCC constant-folds the closed form)**
+
+GCC -O3 recognises `Σᵢ Σⱼ i·j` as a polynomial closed form and replaces the entire double loop with a single `mov rax, 20236502250000` at compile time. This is analogous to B10/B11 (Rex constant-folding B10, both compilers folding B11) — here GCC performs the fold and Rex does not.
+
+Rex runs the full 9 million iterations. The inner-loop body (`:acc = acc + i * j`) translates to:
+```asm
+; inner loop body — Rex (per iteration)
+imul rax, [i_slot]       ; load i, multiply by j (in r15)
+add  [acc_slot], rax     ; accumulate into memory
+```
+Every iteration involves a load from `acc_slot` (memory) and a store back — Rex does not promote the accumulator to a register for the inner loop. GCC's inner loop is register-only.
+
+**Note on fairness:** The benchmark outputs the result (preventing dead-code elimination), and GCC legitimately recognises the closed form. This is not a handicap — it is GCC's constant-propagation pass discovering a mathematical identity. The benchmark correctly shows that GCC -O3 can recognise and fold double-loop polynomial reductions at compile time, which Rex's current optimiser cannot do.
+
+**Binary sizes:**
+
+| Binary             | Rex     | C       | Rex/C |
+|--------------------|---------|---------|-------|
+| b12_nested_loop    | 5,692 B | 15,808 B | **2.8× smaller** |
+
+---
+
+## B13 — GCD Euclidean Algorithm
+
+**Algorithm:** For each k in 0..999999, derive two 64-bit integers from LCG seeds, compute their GCD via Euclidean algorithm (while + modulo), accumulate the sum of all GCDs.  
+**Purpose:** while loop performance, modulo operator overhead, variable-length iteration count per outer step.
+
+```
+// Rex
+int :sum = 0
+int :a = 0
+int :b = 0
+int :r = 0
+for :k in 0..1000000:
+    :a = k * 1234567 + 7654321
+    :b = k * 891011 + 1213141
+    while b != 0:
+        :r = a % b
+        :a = b
+        :b = r
+    :sum = sum + a
+output sum
+```
+
+```c
+// C (GCC -O3)
+int64_t sum = 0, a, b, r;
+for (int64_t k = 0; k < 1000000LL; k++) {
+    a = k * 1234567LL + 7654321LL;
+    b = k * 891011LL  + 1213141LL;
+    while (b != 0) { r = a % b; a = b; b = r; }
+    sum += a;
+}
+printf("result=%lld\n", sum);
+```
+
+Both produce: `result=7988080` ✓
+
+| Run      | Rex internal (ms) | C internal (ms) |
+|----------|-------------------|-----------------|
+| Run 1    | 136               | 130.83          |
+| Run 2    | 137               | 130.71          |
+| Run 3    | 137               | 131.73          |
+| **Best** | **136**           | **130.71**      |
+
+**Winner: C — ~1.04× faster. Near-parity: Rex within 4% of GCC.**
+
+This is the closest runtime result in the entire suite. Rex achieves near-parity with GCC -O3 on this workload, showing only a 5 ms gap over 1 million GCD computations.
+
+**Why Rex is competitive here:**
+
+1. **`idiv` dominance.** The Euclidean algorithm is bottlenecked by the `idiv` instruction, which takes ~20–40 clock cycles regardless of compiler. With both implementations executing the same number of `idiv` instructions, the instruction-count gap between Rex and GCC is minimised.
+2. **Variable-length inner loops reduce optimiser advantage.** The while loop exits after a variable number of Euclidean steps (1–20 steps per pair). GCC cannot unroll or vectorise a while loop with a data-dependent exit condition. Both compilers emit essentially equivalent `idiv` + compare + branch sequences.
+3. **Memory traffic is proportionally smaller.** Each outer iteration spends most time in `idiv` (~30 cycles). Rex's extra load/store traffic for `a`, `b`, `r` (3 extra memory ops at 4–5 cycles each) represents ~12–15 cycles overhead, diluted over 30+ cycles of `idiv`.
+
+**Current Rex inner loop (while body):**
+
+```asm
+; :r = a % b
+mov  rax, [a_slot]     ; load a
+cqo                    ; sign-extend rax → rdx:rax
+idiv qword [b_slot]    ; rdx = a % b
+mov  [r_slot], rdx     ; store r
+; :a = b
+mov  rax, [b_slot]
+mov  [a_slot], rax
+; :b = r
+mov  rax, [r_slot]
+mov  [b_slot], rax
+```
+
+GCC's equivalent keeps `a`, `b`, and `r` in registers (`rax`, `rcx`, `rdx`) throughout the inner loop, eliminating all loads and stores. The ~4% gap is entirely explained by Rex's 6 extra memory operations per Euclidean step.
+
+**Binary sizes:**
+
+| Binary      | Rex     | C       | Rex/C |
+|-------------|---------|---------|-------|
+| b13_gcd     | 6,306 B | 15,800 B | **2.5× smaller** |
+
+---
+
+## B14 — While-loop Integer Log2 Sum
+
+**Algorithm:** For each k in 1..10000000, repeatedly halve k (integer division by 2) until it reaches 1, counting total halvings across all 10 million values.  
+**Purpose:** Mixed for+while workload, integer division performance, while-loop variable memory traffic.
+
+```
+// Rex
+int :total = 0
+int :n = 0
+for :k in 1..10000001:
+    :n = k
+    while n > 1:
+        :n = n / 2
+        :total = total + 1
+output total
+```
+
+```c
+// C (GCC -O3)
+int64_t total = 0, n;
+for (int64_t k = 1; k <= 10000000LL; k++) {
+    n = k;
+    while (n > 1) { n /= 2; total++; }
+}
+printf("result=%lld\n", total);
+```
+
+Both produce: `result=213222809` ✓  
+(= Σₖ₌₁^{10M} ⌊log₂(k)⌋ — the sum of the bit-length of every integer from 1 to 10,000,000)
+
+| Run      | Rex internal (ms) | C internal (ms) |
+|----------|-------------------|-----------------|
+| Run 1    | 672               | 68.55           |
+| Run 2    | 621               | 68.67           |
+| Run 3    | 733               | 103.46          |
+| **Best** | **621**           | **68.55**       |
+
+**Winner: C — ~9.06× faster**
+
+Two independent factors drive this gap:
+
+1. **`idiv` vs strength-reduced shift.** For `n / 2`, GCC -O3 emits a strength-reduced shift (`sar rax, 1`) — a single 1-cycle instruction. Rex emits a full `idiv` (20–40 cycles). This alone accounts for most of the gap: 10M iterations × ~5 halvings each = ~50M divisions, each costing ~25 extra cycles ≈ ~540 ms extra at 2.3 GHz. Rex does not yet perform power-of-2 strength reduction for `/` in while-loop bodies.
+
+2. **Memory traffic for `n` and `total`.** Rex stores both variables in fixed var_table memory slots. Every while iteration loads `n`, halves it (via idiv), stores it back, then loads and increments `total`. GCC keeps `n` and `total` in registers throughout both loops.
+
+**What GCC emits (inner while body):**
+
+```asm
+.while:
+    sar  rax, 1        ; n >>= 1  (strength-reduced from n/2 — 1 cycle)
+    inc  rdx           ; total++
+    cmp  rax, 1
+    jg   .while
+```
+
+**What Rex emits (inner while body):**
+
+```asm
+; :n = n / 2
+mov  rax, [n_slot]     ; load n
+cqo
+idiv qword [two_lit]   ; ~30 cycles
+mov  [n_slot], rax     ; store n
+; :total = total + 1
+mov  rax, [total_slot] ; load total
+add  rax, 1
+mov  [total_slot], rax ; store total
+; while condition
+mov  rax, [n_slot]
+cmp  rax, 1
+jg   .while
+```
+
+Implementing power-of-2 strength reduction for `/` in while-loop bodies (analogous to O14's add/sub strength reduction for `+` in for-loops) would close the majority of this gap.
+
+**Binary sizes:**
+
+| Binary         | Rex     | C       | Rex/C |
+|----------------|---------|---------|-------|
+| b14_while_div  | 5,687 B | 15,800 B | **2.8× smaller** |
 
 ---
 
 ## Summary Table
 
-### Runtime Performance
+### Runtime Performance (June 2026 — fresh run, all internal clock_gettime)
 
 | Benchmark                           | Rex Best (ms) | C Best (ms)  | Winner      | Ratio            |
 |-------------------------------------|---------------|--------------|-------------|------------------|
-| B1  Arithmetic Throughput (1B iter) | **0**         | 1338.55      | **Rex**     | **>2677×**       |
-| B3  Function Call Overhead (200M)   | 303.80        | 264.74       | **C**       | ~1.15×           |
-| B6  Recursive Fibonacci fib(42)     | 1477.53       | 489.65       | **C**       | ~3.02×           |
-| B7  Iterative Fibonacci (10M×fib80) | 1863.64       | 280.59       | **C**       | ~6.64×           |
-| B9  Dynamic Array Growth (1M push)  | 15.73         | 5.79         | **C**       | ~2.72×           |
-| B10 Multiply-only fold (1B × x*3)  | **0**         | 669.70       | **Rex**     | **>1339×**       |
-| B11 Add-only fold (1B × x+7)       | **0**         | 0.00         | **≈ Tie**   | —                |
+| B1  Arithmetic Throughput (1B LCG)  | **0**         | 1064.26      | **Rex**     | **>2129×**       |
+| B2  Multiply-fold 64-bit (1B iters) | **0**         | 796.88       | **Rex**     | **>1594×**       |
+| B3  Function Call Overhead (200M)   | 239           | 74.45        | **C**       | ~3.21×           |
+| B6  Recursive Fibonacci fib(42)     | 1144          | 392.99       | **C**       | ~2.91×           |
+| B7  Iterative Fibonacci (10M×fib80) | 1716          | 315.07       | **C**       | ~5.45×           |
+| B9  Dynamic Array Growth (1M push)  | 10            | 5.54         | **C**       | ~1.81×           |
+| B10 Multiply-only fold (1B × x*3)   | **0**         | 534.80       | **Rex**     | **>1070×**       |
+| B11 Add-only fold (1B × x+7)        | **0**         | 0.00         | **≈ Tie**   | —                |
+| B12 Nested Loop Accum (3000×3000)   | 11            | 0.00         | **C**       | **>22×** †       |
+| B13 GCD Euclidean (1M pairs)        | 136           | 130.71       | **C**       | **~1.04×**       |
+| B14 While-loop log2 sum (10M vals)  | 621           | 68.55        | **C**       | ~9.06×           |
 
-**Both Rex and C now use internal `clock_gettime(CLOCK_MONOTONIC)` timing — same clock, same methodology.**
-Rex uses the new `clock()` built-in (syscall 228 emitted inline, 55 bytes).
+† B12: GCC -O3 recognises the closed-form `Σᵢ Σⱼ i·j = (N(N−1)/2)²` and eliminates the loop at compile time (same phenomenon as B10/B11 but in the opposite direction). Rex runs the full 9 M iterations.
+
+**Both Rex and C use internal `clock_gettime(CLOCK_MONOTONIC)` timing — same clock, same methodology.**
+Rex uses the `clock()` built-in (syscall 228 emitted inline, 55 bytes).
 C uses `clock_gettime()` via libc. Neither measurement includes process startup.
 
-B1/B10 show 0ms because the loops are **eliminated entirely at compile time**; only 2 runtime instructions execute.
+B1/B2/B10 show 0ms because the loops are **eliminated entirely at compile time**; only 2 runtime instructions execute.
 B11 is a genuine tie — both Rex and GCC -O3 fold the constant-stride loop at compile time.
+B12 shows 0ms for C — GCC folds the nested closed-form summation; Rex still runs the full loop.
+B13 is the closest runtime result in the suite — Rex is within 4% of GCC for a while+modulo workload.
 
 > **Measurement history:**
 > - v1 (old): `wall_ms` used two `date +%s%N` forks — ≈19 ms baked-in overhead every reading.
@@ -591,22 +816,26 @@ B11 is a genuine tie — both Rex and GCC -O3 fold the constant-stride loop at c
 
 ### Binary Size
 
-| Benchmark       | Rex (bytes) | C (bytes) | Winner  | Ratio              |
-|-----------------|-------------|-----------|---------|---------------------|
-| B1  b1_arith    | 1,311       | 15,800    | **Rex** | 12.1× smaller      |
-| B3  b3_calls    | 5,452       | 15,832    | **Rex** | 2.9× smaller       |
-| B6  b6_fib_rec  | 865         | 15,832    | **Rex** | 18.3× smaller      |
-| B7  b7_fib_iter | 1,474       | 15,800    | **Rex** | 10.7× smaller      |
-| B9  b9_dynarray | 5,988       | 15,928    | **Rex** | 2.7× smaller       |
-| B10 b10_mul_only| 2,322       | 15,800    | **Rex** | 6.8× smaller       |
-| B11 b11_add_only| 2,321       | 15,800    | **Rex** | 6.8× smaller       |
+| Benchmark           | Rex (bytes) | C (bytes) | Winner  | Ratio              |
+|---------------------|-------------|-----------|---------|---------------------|
+| B1  b1_arith        | 1,986       | 15,800    | **Rex** | 7.9× smaller       |
+| B2  b2_mul64        | 2,485       | 15,840    | **Rex** | 6.4× smaller       |
+| B3  b3_calls        | 5,615       | 15,832    | **Rex** | 2.8× smaller       |
+| B6  b6_fib_rec      | 1,027       | 15,832    | **Rex** | 15.4× smaller      |
+| B7  b7_fib_iter     | 1,637       | 15,800    | **Rex** | 9.7× smaller       |
+| B9  b9_dynarray     | 6,151       | 15,928    | **Rex** | 2.6× smaller       |
+| B10 b10_mul_only    | 2,485       | 15,800    | **Rex** | 6.4× smaller       |
+| B11 b11_add_only    | 2,484       | 15,800    | **Rex** | 6.4× smaller       |
+| B12 b12_nested_loop | 5,692       | 15,808    | **Rex** | 2.8× smaller       |
+| B13 b13_gcd         | 6,306       | 15,800    | **Rex** | 2.5× smaller       |
+| B14 b14_while_div   | 5,687       | 15,800    | **Rex** | 2.8× smaller       |
 
 ### Win/Loss Tally
 
-| Category           | Rex Wins | C Wins | Ties |
-|--------------------|----------|--------|------|
-| Runtime (7 total)  | 2        | 4      | 1    |
-| Binary size (7)    | 7        | 0      | 0    |
+| Category            | Rex Wins | C Wins | Ties |
+|---------------------|----------|--------|------|
+| Runtime (11 total)  | 3        | 7      | 1    |
+| Binary size (11)    | 11       | 0      | 0    |
 
 **History — B1 (Arithmetic Throughput) trajectory:**
 

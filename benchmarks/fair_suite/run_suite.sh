@@ -25,14 +25,17 @@ echo "[build] C binaries (GCC -O3)..."
 GCC=$(command -v gcc)
 echo "  GCC: $($GCC --version | head -1)"
 
-$GCC -O3 -o "$SUITE_DIR/b1_arith_c"    "$SUITE_DIR/b1_arith.c"
-$GCC -O3 -o "$SUITE_DIR/b2_mul64_c"    "$SUITE_DIR/b2_mul64.c"
-$GCC -O3 -o "$SUITE_DIR/b3_calls_c"    "$SUITE_DIR/b3_calls.c"
-$GCC -O3 -o "$SUITE_DIR/b6_fib_rec_c"  "$SUITE_DIR/b6_fib_rec.c"
-$GCC -O3 -o "$SUITE_DIR/b7_fib_iter_c" "$SUITE_DIR/b7_fib_iter.c"
-$GCC -O3 -o "$SUITE_DIR/b9_dynarray_c" "$SUITE_DIR/b9_dynarray.c"
-$GCC -O3 -o "$SUITE_DIR/b10_mul_only_c" "$SUITE_DIR/b10_mul_only.c"
-$GCC -O3 -o "$SUITE_DIR/b11_add_only_c" "$SUITE_DIR/b11_add_only.c"
+$GCC -O3 -o "$SUITE_DIR/b1_arith_c"       "$SUITE_DIR/b1_arith.c"
+$GCC -O3 -o "$SUITE_DIR/b2_mul64_c"       "$SUITE_DIR/b2_mul64.c"
+$GCC -O3 -o "$SUITE_DIR/b3_calls_c"       "$SUITE_DIR/b3_calls.c"
+$GCC -O3 -o "$SUITE_DIR/b6_fib_rec_c"     "$SUITE_DIR/b6_fib_rec.c"
+$GCC -O3 -o "$SUITE_DIR/b7_fib_iter_c"    "$SUITE_DIR/b7_fib_iter.c"
+$GCC -O3 -o "$SUITE_DIR/b9_dynarray_c"    "$SUITE_DIR/b9_dynarray.c"
+$GCC -O3 -o "$SUITE_DIR/b10_mul_only_c"   "$SUITE_DIR/b10_mul_only.c"
+$GCC -O3 -o "$SUITE_DIR/b11_add_only_c"   "$SUITE_DIR/b11_add_only.c"
+$GCC -O3 -o "$SUITE_DIR/b12_nested_loop_c" "$SUITE_DIR/b12_nested_loop.c"
+$GCC -O3 -o "$SUITE_DIR/b13_gcd_c"        "$SUITE_DIR/b13_gcd.c"
+$GCC -O3 -o "$SUITE_DIR/b14_while_div_c"  "$SUITE_DIR/b14_while_div.c"
 echo "[build] C OK"
 echo ""
 
@@ -45,14 +48,17 @@ compile_rex() {
     mv output "$dst"
     chmod +x "$dst"
 }
-compile_rex "$SUITE_DIR/b1_arith.rex"     "$SUITE_DIR/b1_arith_rex"
-compile_rex "$SUITE_DIR/b2_mul64.rex"     "$SUITE_DIR/b2_mul64_rex"
-compile_rex "$SUITE_DIR/b3_calls.rex"     "$SUITE_DIR/b3_calls_rex"
-compile_rex "$SUITE_DIR/b6_fib_rec.rex"   "$SUITE_DIR/b6_fib_rec_rex"
-compile_rex "$SUITE_DIR/b7_fib_iter.rex"  "$SUITE_DIR/b7_fib_iter_rex"
-compile_rex "$SUITE_DIR/b9_dynarray.rex"  "$SUITE_DIR/b9_dynarray_rex"
-compile_rex "$SUITE_DIR/b10_mul_only.rex" "$SUITE_DIR/b10_mul_only_rex"
-compile_rex "$SUITE_DIR/b11_add_only.rex" "$SUITE_DIR/b11_add_only_rex"
+compile_rex "$SUITE_DIR/b1_arith.rex"       "$SUITE_DIR/b1_arith_rex"
+compile_rex "$SUITE_DIR/b2_mul64.rex"       "$SUITE_DIR/b2_mul64_rex"
+compile_rex "$SUITE_DIR/b3_calls.rex"       "$SUITE_DIR/b3_calls_rex"
+compile_rex "$SUITE_DIR/b6_fib_rec.rex"     "$SUITE_DIR/b6_fib_rec_rex"
+compile_rex "$SUITE_DIR/b7_fib_iter.rex"    "$SUITE_DIR/b7_fib_iter_rex"
+compile_rex "$SUITE_DIR/b9_dynarray.rex"    "$SUITE_DIR/b9_dynarray_rex"
+compile_rex "$SUITE_DIR/b10_mul_only.rex"   "$SUITE_DIR/b10_mul_only_rex"
+compile_rex "$SUITE_DIR/b11_add_only.rex"   "$SUITE_DIR/b11_add_only_rex"
+compile_rex "$SUITE_DIR/b12_nested_loop.rex" "$SUITE_DIR/b12_nested_loop_rex"
+compile_rex "$SUITE_DIR/b13_gcd.rex"        "$SUITE_DIR/b13_gcd_rex"
+compile_rex "$SUITE_DIR/b14_while_div.rex"  "$SUITE_DIR/b14_while_div_rex"
 echo "[build] Rex OK"
 echo ""
 
@@ -61,7 +67,7 @@ echo "------------------------------------------------------------"
 echo " Binary Sizes"
 echo "------------------------------------------------------------"
 printf "%-30s %10s %10s\n" "Benchmark" "Rex (B)" "C (B)"
-for b in b1_arith b2_mul64 b3_calls b6_fib_rec b7_fib_iter b9_dynarray b10_mul_only b11_add_only; do
+for b in b1_arith b2_mul64 b3_calls b6_fib_rec b7_fib_iter b9_dynarray b10_mul_only b11_add_only b12_nested_loop b13_gcd b14_while_div; do
     rx=$(wc -c < "$SUITE_DIR/${b}_rex")
     cc=$(wc -c < "$SUITE_DIR/${b}_c")
     printf "%-30s %10d %10d\n" "$b" "$rx" "$cc"
@@ -152,6 +158,15 @@ run_bench 6 "B10 Multiply-only fold (1B iters x*3)" \
 run_bench 7 "B11 Add-only fold (1B iters x+7)" \
     "$SUITE_DIR/b11_add_only_rex" "$SUITE_DIR/b11_add_only_c"
 
+run_bench 8 "B12 Nested Loop Accum (3000x3000)" \
+    "$SUITE_DIR/b12_nested_loop_rex" "$SUITE_DIR/b12_nested_loop_c"
+
+run_bench 9 "B13 GCD Euclidean (1M pairs)" \
+    "$SUITE_DIR/b13_gcd_rex" "$SUITE_DIR/b13_gcd_c"
+
+run_bench 10 "B14 While-loop log2 sum (10M vals)" \
+    "$SUITE_DIR/b14_while_div_rex" "$SUITE_DIR/b14_while_div_c"
+
 # ── Summary table ─────────────────────────────────────────────────
 echo "============================================================"
 echo " Results Table (best-of-3, ms)"
@@ -162,7 +177,7 @@ printf "%-42s %10s %10s %10s %8s\n" "---------" "--------" "------" "------" "--
 
 rex_wins=0; c_wins=0; ties=0
 
-for i in 0 1 2 3 4 5 6 7; do
+for i in 0 1 2 3 4 5 6 7 8 9 10; do
     local_rex="${RT[$i]}"
     local_c="${CT[$i]}"
     name="${BN[$i]}"
