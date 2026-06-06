@@ -137,22 +137,36 @@ reverse at every ret path. Correct: fib(10)=55 verified.
 Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
-## Benchmark — Measured Numbers (June 2026, post-O26)
+## Benchmark — Measured Numbers (June 2026, post-O27+long-NOP)
 
-**Fair 5-benchmark suite (best-of-N wall-clock, Rex=wall-clock, C=internal clock):**
-- B1 Arith (1B LCG): Rex 1124ms / C 1158ms → **≈ tie** (Rex wins on pure computation)
-- B3 Calls (200M calls): Rex ~381ms / C ~170ms → **~2.2×** (was 3.4× pre-O26, 8.4× pre-V5.0)
-- B6 Fib-rec fib(42): Rex 1147ms / C 713ms → **1.61×** (was 1.70× pre-O26)
-- B7 Fib-iter (10M×80): Rex 1039ms / C 535ms → **1.94×**
-- B9 Dynarray (1M push): Rex 20ms / C 22ms → **Rex wins** (startup-overhead advantage)
+**Fair 5-benchmark suite (Rex=wall-clock, C=internal clock unless noted):**
+- B1 Arith (1B LCG): Rex 1125ms / C 1128ms (int) → **≈ tie**
+- B3 Calls (200M calls): Rex 247ms / C 104ms (int) → **~2.4×** (was 3.4× pre-O26, 2.2× pre-O27)
+- B6 Fib-rec fib(42): Rex 1091ms / C 407ms (int) → **~2.7×** (was 1147ms pre-O27)
+- B7 Fib-iter (10M×80): Rex 817ms / C 390ms (int) → **~2.1×** (was 1039ms pre-O27)
+- B9 Dynarray (1M push): Rex 20ms / C 22ms (wall) → **Rex wins**
 
-**B3 per-call cost:** Rex ~1.91 ns/call (was 2.95 ns pre-O26; 6.2 ns pre-V5.0).
+**B3 per-call cost:** Rex ~1.24 ns/call (was 1.91ns post-O26, 2.95ns post-global-elim, 6.2ns baseline).
 **Binary sizes:** Rex wins all 5 (2.9× to 19.7× smaller than GCC output).
+**Test suite:** 32/37 pass (5 known pre-existing failures: float_const, memo_reset_test, stage6_mm, test_err, test_mm_switch). The "FAIL test.rex" in `((pass++))` loops is a bash arithmetic false-negative when pass=0; use if/then instead.
 
 ## O26: Loop-Free Call-Site Pin-Save Skip (IMPLEMENTED)
 Proto table offset 46 = `has_loop` flag (byte). Set to 1 when a `for`/`while` is parsed inside the proto body; cleared to 0 at each proto definition start. At call sites (`.prt_do_normal`), if `proto_table[seq_idx*48+46]==0`, sets `codegen_skip_pin_save=1` so `codegen_emit_push_var_slot`/`_pop_var_slot` skip emitting `push r15`/`pop r15`. Flag cleared after `.prt_cr_done`.
 **Why:** callees with no loops cannot clobber r15 (the loop-pin register), making save/restore dead code. Confirmed: B3 binary shrank exactly 4 bytes (push r15=2B + pop r15=2B); B3 Rex 581ms→381ms (34% faster).
 **Safety:** loop-having callees still save r15 correctly (O26 does NOT fire). Verified: `sum_to(n)` with for loop + outer for loop produces correct result.
+
+## O27: Retroactive push/pop r12 Elision for Outer-Scope-Only Protos (IMPLEMENTED)
+Post-compile finalize pass `codegen_finalize()` called from `main.asm` after parse loop, before `codegen_finish`.
+BSS: `proto_push_r12_pos[64]` (qword per proto), `proto_pop_r12_pos[512]` (up to 8 epilogues per proto), `proto_pop_r12_cnt[64]` (byte per proto), `proto_needs_r12_save[64]` (byte per proto), `codegen_cur_proto_seq_idx` (qword).
+**Trigger:** `proto_needs_r12_save[idx]=1` is set at `.prt_do_normal` in parser.asm when `prot_body_depth > 0` — i.e. when a proto is called from inside another proto body.
+**Action:** for each proto with flag=0, NOP the push r12 (`41 54` → `66 90`) and all pop r12 (`41 5C` → `66 90`).
+**Safety:** fib calls itself recursively → flag=1 → O27 skips fib. push/pop r12 preserved. B3 increment has flag=0 → patched.
+**Impact:** B3 381ms → ~370ms alone; combined with long-NOP → 247ms (-35% from post-O26).
+`proto_count` exported as `global` from parser.asm BSS so codegen_finalize can iterate.
+
+## Long-NOP Optimization (IMPLEMENTED)
+Zero-local protos use 7×`90` (single-byte NOP ×7) as placeholder for `sub rsp, imm32` / `add rsp, imm32`. These decode as 7 µops each (14 µops total per call). When `codegen_patch_jump` detects frame_size==0, it now writes Intel's 7-byte long NOP `0F 1F 80 00000000` (1 µop) at both positions. Also: push/pop r12 (2 bytes each) → 2-byte NOP `66 90` (already done by O27 path). Combined µop reduction per call: ~19 → ~6 (-13 µops). At 4 µops/cycle decode: 4.75 cycles → 1.5 cycles theoretical.
+**Location:** `codegen.asm`, `codegen_patch_jump`, branch `.cf_check_nop`.
 
 ## data.push(val) Method-Call Syntax (IMPLEMENTED)
 New syntax: `seq.push(expr)` — method-call style for seq push. Old `push seq val` still works.

@@ -58,10 +58,14 @@ global codegen_emit_regalloc_epilogue
 ; O21: push-style frame + @memo
 global push_style_frame
 global codegen_emit_memo_check, codegen_emit_memo_store, codegen_emit_memo_reset
+; O27: push r12/pop r12 elision for loop-free outer-scope-only protos
+global codegen_cur_proto_seq_idx, proto_needs_r12_save
+global codegen_mark_r12_needed, codegen_finalize
 ; O6: register-based expression spill
 global codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
 global codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
 extern elf_header, program_header
+extern proto_count
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob
 section .bss
@@ -135,6 +139,12 @@ regalloc_vars:       resb 2
 push_style_frame:    resb 1
 ; O26: skip pin/accum reg save at call sites when called proto has no loops
 codegen_skip_pin_save: resb 1
+; O27: retroactive push/pop r12 elision for protos never called from inside another proto
+codegen_cur_proto_seq_idx: resq 1   ; seq idx of proto currently being compiled (set by parser)
+proto_push_r12_pos:  resq 64        ; out_buffer offset of each proto's push r12 (0=not push-style)
+proto_pop_r12_pos:   resq 512       ; flat [seq_idx*8 + epilogue_num] = offset of pop r12
+proto_pop_r12_cnt:   resb 64        ; count of pop r12 epilogues per proto
+proto_needs_r12_save: resb 64       ; 1 if proto is called from inside another proto (r12 may be live)
 ; @memo: positions for forward jump patching during memo check emission
 memo_jnz_patch:      resq 1
 memo_jge_patch:      resq 1
@@ -4121,18 +4131,20 @@ codegen_clear_frame:
     ; O21: if push-style and size==0, NOP out sub rsp and all add rsp epilogues
     test rax, rax
     jnz .cf_patch
-    ; NOP 7 bytes at (frame_size_patch_pos - 3) = the sub rsp instruction
+    ; Long-NOP 7 bytes at (frame_size_patch_pos - 3) = the sub rsp instruction
+    ; Use Intel-recommended 7-byte NOP (0F 1F 80 00000000) — decoded as 1 µop,
+    ; not 7, so it does not consume front-end bandwidth like 7 × 0x90 would.
     mov rcx, [frame_size_patch_pos]
     sub rcx, 3
     lea rdx, [out_buffer]
-    mov byte [rdx+rcx+0], 0x90
-    mov byte [rdx+rcx+1], 0x90
-    mov byte [rdx+rcx+2], 0x90
-    mov byte [rdx+rcx+3], 0x90
-    mov byte [rdx+rcx+4], 0x90
-    mov byte [rdx+rcx+5], 0x90
-    mov byte [rdx+rcx+6], 0x90
-    ; NOP each add rsp epilogue (7 bytes at leave_patch_list[i] - 3)
+    mov byte [rdx+rcx+0], 0x0F
+    mov byte [rdx+rcx+1], 0x1F
+    mov byte [rdx+rcx+2], 0x80
+    mov byte [rdx+rcx+3], 0x00
+    mov byte [rdx+rcx+4], 0x00
+    mov byte [rdx+rcx+5], 0x00
+    mov byte [rdx+rcx+6], 0x00
+    ; Long-NOP each add rsp epilogue (7 bytes at leave_patch_list[i] - 3)
     movzx rbx, byte [leave_patch_cnt]
     test rbx, rbx
     jz .cf_clear
@@ -4143,13 +4155,13 @@ codegen_clear_frame:
     mov r8, [leave_patch_list + rcx*8]
     sub r8, 3
     lea rdx, [out_buffer]
-    mov byte [rdx+r8+0], 0x90
-    mov byte [rdx+r8+1], 0x90
-    mov byte [rdx+r8+2], 0x90
-    mov byte [rdx+r8+3], 0x90
-    mov byte [rdx+r8+4], 0x90
-    mov byte [rdx+r8+5], 0x90
-    mov byte [rdx+r8+6], 0x90
+    mov byte [rdx+r8+0], 0x0F
+    mov byte [rdx+r8+1], 0x1F
+    mov byte [rdx+r8+2], 0x80
+    mov byte [rdx+r8+3], 0x00
+    mov byte [rdx+r8+4], 0x00
+    mov byte [rdx+r8+5], 0x00
+    mov byte [rdx+r8+6], 0x00
     inc rcx
     jmp .cf_nop_loop
 .cf_patch:
@@ -4209,6 +4221,10 @@ codegen_emit_frame_prologue:
     ; O21: push-style for 1-param protocols → push r12 + mov r12,rdi + sub rsp placeholder
     cmp byte [push_style_frame], 0
     je .fp_standard
+    ; O27: record position of push r12 for retroactive elision in codegen_finalize
+    mov rcx, [codegen_cur_proto_seq_idx]
+    mov rax, [out_idx]
+    mov [proto_push_r12_pos + rcx*8], rax
     ; push r12 = 41 54
     mov al, 0x41
     call emit_b
@@ -4324,6 +4340,21 @@ codegen_emit_regalloc_epilogue:
     call emit_b
     jmp .re_done
 .re_pop_r12:
+    ; O27: record position of pop r12 for retroactive elision in codegen_finalize
+    push rcx
+    push rdx
+    mov rcx, [codegen_cur_proto_seq_idx]
+    movzx edx, byte [proto_pop_r12_cnt + rcx]
+    cmp edx, 7                          ; max 8 epilogues tracked per proto
+    jge .re_skip_record
+    imul rax, rcx, 64                   ; base offset in flat array (proto_idx * 8 * 8)
+    lea r8, [proto_pop_r12_pos + rax]
+    mov rax, [out_idx]
+    mov [r8 + rdx*8], rax               ; store position BEFORE emitting pop r12
+    inc byte [proto_pop_r12_cnt + rcx]
+.re_skip_record:
+    pop rdx
+    pop rcx
     ; O21 push-style: pop r12 = 41 5C
     mov al, 0x41
     call emit_b
@@ -5052,5 +5083,66 @@ codegen_emit_memo_reset:
     call emit_d
     mov eax, 0                      ; imm32 = 0 (NULL)
     call emit_d
+    pop rbx
+    ret
+
+; ── O27: mark a proto as requiring r12 save (called from inside another proto) ──
+; rdi = proto seq_idx
+codegen_mark_r12_needed:
+    mov byte [proto_needs_r12_save + rdi], 1
+    ret
+
+; ── O27: post-compile finalize — NOP push r12/pop r12 for outer-scope-only protos ──
+; Called from main.asm after the parse loop, before codegen_finish.
+; For every push-style proto that is NEVER called from inside another proto,
+; the callee's push r12 / pop r12 are dead — r12 is not live in the caller.
+; Eliding them removes 2 µops from the serial critical path of tight call loops.
+codegen_finalize:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r14, [proto_count]      ; total number of defined protos
+    xor r12, r12                ; r12 = proto index iterator
+.fin_loop:
+    cmp r12, r14
+    jge .fin_done
+    ; skip non-push-style protos (proto_push_r12_pos[i] == 0)
+    mov rax, [proto_push_r12_pos + r12*8]
+    test rax, rax
+    jz .fin_next
+    ; skip protos called from inside another proto (r12 may be live there)
+    movzx rcx, byte [proto_needs_r12_save + r12]
+    test rcx, rcx
+    jnz .fin_next
+    ; Long-NOP the 2-byte push r12 (41 54) → 66 90 (Intel 2-byte NOP, 1 µop)
+    lea rbx, [out_buffer]
+    mov byte [rbx + rax],     0x66
+    mov byte [rbx + rax + 1], 0x90
+    ; Long-NOP each pop r12 (41 5C) for this proto's epilogues → 66 90
+    movzx r13, byte [proto_pop_r12_cnt + r12]
+    test r13, r13
+    jz .fin_next
+    imul r15, r12, 64           ; r15 = r12 * 8_epilogues * 8_bytes = flat array base offset
+    lea rcx, [proto_pop_r12_pos + r15]   ; rcx = base of this proto's pop r12 list
+    xor edx, edx                ; edx = epilogue counter
+.fin_pop_loop:
+    cmp rdx, r13
+    jge .fin_next
+    mov rax, [rcx + rdx*8]     ; pop r12 position in out_buffer
+    lea rbx, [out_buffer]
+    mov byte [rbx + rax],     0x66
+    mov byte [rbx + rax + 1], 0x90
+    inc rdx
+    jmp .fin_pop_loop
+.fin_next:
+    inc r12
+    jmp .fin_loop
+.fin_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
     pop rbx
     ret

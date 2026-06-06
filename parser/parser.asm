@@ -55,10 +55,12 @@ extern codegen_emit_each_start, codegen_emit_each_end
 extern codegen_emit_zero_var
 extern codegen_emit_memo_reset
 extern codegen_skip_pin_save
+extern codegen_cur_proto_seq_idx, proto_needs_r12_save, codegen_mark_r12_needed
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
 var_count:       resq 1
 proto_table:     resb PROTO_ENTRY_SIZE * 32
+global proto_count
 proto_count:     resq 1
 prot_body_depth: resq 1
 saved_name:      resb 64
@@ -467,6 +469,12 @@ parse_factor:
     movzx eax, byte [rdx + rax + 46]   ; proto_has_loop flag (0=no loops, 1=has loops)
     xor al, 1                           ; invert: no_loop→skip=1, has_loop→skip=0
     mov [codegen_skip_pin_save], al
+    ; O27: if this call is from inside another proto, mark callee as needing r12 save
+    cmp qword [prot_body_depth], 0
+    je .o27_outer_call
+    mov rdi, [cur_call_proto_seq_idx]
+    call codegen_mark_r12_needed        ; proto_needs_r12_save[rdi] = 1
+.o27_outer_call:
     ; O6: save r10/r11 if live as expression spill regs (noop when depth=0)
     call codegen_emit_expr_spill_save
     ; ── Gap-1 fix: caller-save all in-scope vars before call ─────────────────
@@ -1643,6 +1651,7 @@ parse_stmt:
     mov byte [r13+47], 0
     mov rax, [proto_count]
     mov [cur_proto_idx], rax
+    mov [codegen_cur_proto_seq_idx], rax   ; O27: tell codegen which proto we are compiling
     inc qword [proto_count]
     ; O20: reset self-recursive flag for this protocol
     mov byte [proto_is_self_recursive], 0

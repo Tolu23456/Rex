@@ -2,6 +2,7 @@ default rel
 %include "include/rex_defs.inc"
 global _start
 extern lexer_init, lexer_next, parse_stmt, codegen_write_headers, codegen_init, codegen_finish
+extern codegen_finalize
 extern out_buffer, out_idx, out_name, tok_type
 section .bss
 src_buffer: resb 65536
@@ -52,6 +53,7 @@ _start:
     call lexer_next
     jmp .l
 .d:
+    call codegen_finalize   ; O27: retroactively NOP push/pop r12 for outer-scope-only protos
     call codegen_finish
     mov rax, 87
     lea rdi, [out_name]

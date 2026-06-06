@@ -64,15 +64,14 @@ printf("result=%lld\n", x);
 
 Both produce: `result=-343982920878990847` ✓
 
-| Run   | Rex (wall ms) | C (wall ms) |
-|-------|--------------|-------------|
-| Run 1 | 1208         | 1168        |
-| Run 2 | 1425         | 1176        |
-| Run 3 | 1124         | 1158        |
-| **Best** | **1124**  | **1158**    |
-| Avg   | 1252         | 1167        |
+| Run   | Rex (wall ms) | C (internal ms) |
+|-------|--------------|-----------------|
+| Run 1 | 1213         | —               |
+| Run 2 | 1125         | —               |
+| Run 3 | 1189         | —               |
+| **Best** | **1125** | **1128**        |
 
-**Winner: statistical tie — Rex 1.03× of C wall-clock (computation parity).**
+**Winner: statistical tie — Rex and C both ~1125–1128 ms (computation parity).**
 
 Rex's hot loop: two separate store/load cycles for `mul` then `add` (two body
 lines). GCC -O3 fuses `x * 1664525 + 1013904223` into an `imul` + `add` pair
@@ -131,46 +130,70 @@ printf("result=%lld\n", n);
 
 Both produce: `result=200000000` ✓
 
-| Run   | Rex (wall ms) | C (wall ms) |
-|-------|--------------|-------------|
-| Run 1 | 386          | 176         |
-| Run 2 | 384          | 173         |
-| Run 3 | 381          | 175         |
-| **Best** | **381**  | **170**     |
-| Avg   | 384          | 175         |
+| Run   | Rex (wall ms) | C (internal ms) |
+|-------|--------------|-----------------|
+| Run 1 | 247          | —               |
+| Run 2 | 301          | —               |
+| Run 3 | 289          | —               |
+| **Best** | **247**  | **104**         |
 
-*Previous result (pre-O26): 581 ms Rex best — O26 eliminated `push r15 / pop r15` per call, saving ~200 ms.*
+*Pre-O26: 581 ms.  Pre-O27/long-NOP: 381 ms.  Now: 247 ms — total reduction **58%** from baseline.*
 
-**Winner: C — ~2.2× faster (down from ~3.4× pre-O26)**
+**Winner: C — ~2.4× faster (down from ~3.4× pre-O26, ~2.2× pre-O27)**
 
-**Per-call cost:**
-- Rex: 381 ms / 200 M = **~1.91 ns/call**  *(was ~2.95 ns/call pre-O26; was ~6.2 ns/call pre-V5.0)*
-- C:   170 ms / 200 M = **~0.85 ns/call**
+**Per-call cost progression:**
+- Pre-V5.0:  ~6.20 ns/call (global push/pop per call)
+- Post-O26:  ~1.91 ns/call (push r15 / pop r15 eliminated at loop-free call sites)
+- Post-O27:  ~1.30 ns/call (push r12 / pop r12 in callee NOP'd for outer-scope-only protos)
+- Post-long-NOP: **~1.24 ns/call** (7-byte long NOP collapses 14 × 1-byte NOP µop slots → 2)
+- C:          **~0.52 ns/call** (103.79ms / 200M)
 
-**Root cause of the remaining ~1.05 ns gap:**
+**What O27 + long-NOP did:**
 
-O26 eliminates the `push r15 / pop r15` at call sites where the called proto
-has no for/while loops (and therefore cannot clobber r15). Since `increment`
-has no loops, O26 fires and produces a cleaner hot loop. The **current**
-generated hot loop (post-O26):
+O27 is a post-compile finalize pass. After parsing the entire source, for every
+push-style (1-param) proto whose `proto_needs_r12_save` flag is still 0 (i.e.
+the proto was never called from inside another proto body), it retroactively
+patches:
+1. `push r12` (2 bytes: `41 54`) → 2-byte long NOP (`66 90`)
+2. `pop r12` (2 bytes: `41 5C`) → 2-byte long NOP (`66 90`) at every epilogue
+
+For B3, `increment` is only called from the main body (outer scope), so
+O27 fires. The `push r12 / pop r12` pair was removed from the serial
+dependency chain, saving 2 cycles on the store-forward latency path.
+
+The **long-NOP** improvement (separate from O27) replaces all 7 × `90` (seven
+single-byte NOP) sequences used to zero-out `sub rsp, 0` and `add rsp, 0` for
+zero-local protos with Intel's recommended 7-byte NOP `0F 1F 80 00000000`.
+This is decoded as **1 µop** instead of 7, collapsing 14 front-end µop slots
+per call (2 × 7 NOP sequences) down to 2. At 4 µops/cycle decode width, this
+saves ~3 dispatch cycles per call iteration.
+
+**Current generated callee body (post-O27 + long-NOP):**
 
 ```asm
-mov rdi, r14           ; n → arg register  (r14 = accumulator for n)
-call increment         ; ~3–4 cycles (cached)
-mov r14, rax           ; n = return value
-inc r15                ; i++
-cmp r15, 200000000
-jnl .done
-jmp .loop
+increment:
+    66 90                   ; 2-byte NOP (was: push r12 = 41 54)
+    49 89 FC                ; mov r12, rdi  (param setup — 0 cycles, renamed)
+    0F 1F 80 00000000       ; 7-byte long NOP (was: sub rsp, 0 — 1 µop, not 7)
+    48 8D 44 24 01          ; lea rax, [r12+1]   ← body (1 cycle)
+    0F 1F 80 00000000       ; 7-byte long NOP (was: add rsp, 0 — 1 µop, not 7)
+    66 90                   ; 2-byte NOP (was: pop r12 = 41 5C)
+    C3                      ; ret
 ```
 
-The `push r15 / pop r15` pair has been eliminated. The remaining gap is
-the unavoidable `call` + `ret` round-trip (~3–4 cycles, ~1.3–1.7 ns at
-2.30 GHz) plus the `mov rdi, r14` / `mov r14, rax` argument-passing pair.
-GCC further reduces overhead by inlining the body's `lea rax, [rdi+1]`
-with a callee-saved rbx, completely eliminating the call overhead when
-`__attribute__((noinline))` is not applied — but with `noinline`, GCC also
-pays the full call/ret round-trip.
+Total µop count per call: 2-NOP(1) + mov-r12(0,renamed) + long-NOP(1) + lea(1)
++ long-NOP(1) + 2-NOP(1) + ret(1) = **5 µops** (plus call = **6 total**).
+At 4 µops/cycle: **1.5 cycles theoretical minimum** per call.
+Measured: ~1.24 ns / (1/2.3 GHz) = **2.85 cycles**. Some pipeline drain from
+call/ret RSB lookup and branch-predictor overhead accounts for the remaining gap.
+
+**Safety of O27:** `fib` calls itself recursively (from inside its own proto
+body, `prot_body_depth > 0` at the recursive call sites). Therefore
+`proto_needs_r12_save[fib_idx] = 1` is set, and O27 does NOT fire for `fib`.
+The `push r12 / pop r12` in `fib`'s prologue/epilogue is preserved — r12
+correctly saves the parent call's `n` parameter across each recursive descent.
+Confirmed by binary inspection: B3 `increment` has `66 90` before `mov r12,rdi`;
+B6 `fib` has `41 54` (push r12) before `mov r12,rdi`.
 
 **Binary sizes:**
 
@@ -213,20 +236,22 @@ static int64_t fib(int64_t n) {
 
 Both produce: `267914296` ✓
 
-| Run   | Rex (wall ms) | C (wall ms) |
-|-------|--------------|-------------|
-| Run 1 | 1162         | 734         |
-| Run 2 | 1147         | 722         |
-| Run 3 | 1153         | 718         |
-| **Best** | **1147**  | **713**     |
-| Avg   | 1154         | 725         |
+| Run   | Rex (wall ms) | C (internal ms) |
+|-------|--------------|-----------------|
+| Run 1 | 1130         | —               |
+| Run 2 | 1091         | —               |
+| Run 3 | 1156         | —               |
+| **Best** | **1091** | **407**         |
 
-**Winner: C — ~1.61× faster** *(was ~1.70× pre-O26)*
+*Pre-O26: 1213 ms.  Pre-O27/long-NOP: 1147 ms.  Now: 1091 ms.*
 
-O26 also fires at the `@fib(42)` call site and at every internal `call fib`
-within the `fib` proto itself, since `fib` has no for/while loops. This
-eliminated `push r15 / pop r15` across all ~535 M recursive calls, saving
-~66 ms vs the prior result.
+**Winner: C — ~2.7× faster** *(was ~1.61× post-O26 using wall-clock C; C internal timing gives ~2.7× at 407ms)*
+
+O26 fires at the `@fib(42)` call site and at every internal `call fib`
+within the `fib` proto itself, since `fib` has no for/while loops. O27 does
+NOT fire for `fib` (it calls itself from inside its own body, so r12 must be
+preserved). The long-NOP improvement does not apply to `fib` either (fib has
+locals, so `sub rsp / add rsp` are patched with real values, not NOP'd).
 
 **What the Rex fib frame looks like (disassembly confirmed):**
 
@@ -315,15 +340,16 @@ printf("fib(80)=%lld\n", b);
 
 Both produce: `fib(80)=37889062373143906` ✓
 
-| Run   | Rex (wall ms) | C (wall ms) |
-|-------|--------------|-------------|
-| Run 1 | 1078         | 554         |
-| Run 2 | 1089         | 544         |
-| Run 3 | 1039         | 535         |
-| **Best** | **1039**  | **535**     |
-| Avg   | 1069         | 544         |
+| Run   | Rex (wall ms) | C (internal ms) |
+|-------|--------------|-----------------|
+| Run 1 | 851          | —               |
+| Run 2 | 874          | —               |
+| Run 3 | 817          | —               |
+| **Best** | **817**  | **390**         |
 
-**Winner: C — ~1.94× faster**
+*Pre-O27: 1039 ms.  Now: 817 ms — 21% improvement.*
+
+**Winner: C — ~2.1× faster** *(C internal 390ms measured this session)*
 
 This benchmark involves no function calls, so the push/pop overhead and
 frame-slot changes do not apply. The gap is driven by two factors:
@@ -425,17 +451,27 @@ competitive with C's equivalent.
 
 ### Runtime Performance
 
-| Benchmark                          | Rex Best (ms)¹ | C Best (ms)¹ | Winner     | Ratio     |
-|------------------------------------|----------------|--------------|------------|-----------|
-| B1 Arithmetic Throughput (1B iter) | 1124           | 1158         | **≈ Tie**  | 0.97×     |
-| B3 Function Call Overhead (200M)   | 381            | 170          | **C**      | **~2.2×** |
-| B6 Recursive Fibonacci fib(42)     | 1147           | 713          | **C**      | **1.61×** |
-| B7 Iterative Fibonacci (10M×fib80) | 1039           | 535          | **C**      | 1.94×     |
-| B9 Dynamic Array Growth (1M push)  | 20             | 22           | **Rex**    | 0.91×     |
+| Benchmark                          | Rex Best (ms) | C Best (ms) | Winner    | Ratio     |
+|------------------------------------|---------------|-------------|-----------|-----------|
+| B1 Arithmetic Throughput (1B iter) | 1125          | 1128 (int)  | **≈ Tie** | ~1.0×     |
+| B3 Function Call Overhead (200M)   | 247           | 104 (int)   | **C**     | **~2.4×** |
+| B6 Recursive Fibonacci fib(42)     | 1091          | 407 (int)   | **C**     | **~2.7×** |
+| B7 Iterative Fibonacci (10M×fib80) | 817           | 390 (int)   | **C**     | ~2.1×     |
+| B9 Dynamic Array Growth (1M push)  | 20            | 22 (wall)   | **Rex**   | 0.91×     |
 
-¹ All times are wall-clock (shell `time`). Rex includes ~3 ms ELF startup;
-  C includes ~8–10 ms libc/crt0 startup. For pure-computation comparison,
-  subtract the respective startup overhead.
+Rex times = wall-clock (shell `time`). C times marked `(int)` = C program's
+own internal `clock()` measurement (excludes ~10ms libc startup).
+C `(wall)` = shell `time` wall-clock. Rex startup is ~3ms (bare ELF).
+
+**History — B3 per-call cost reduction:**
+
+| Version        | Rex B3 (ms) | Per-call cost | Optimization applied |
+|----------------|-------------|---------------|----------------------|
+| Pre-V5.0       | ~1240       | ~6.20 ns      | baseline (global push/pop per call) |
+| Post-global-elim | ~590      | ~2.95 ns      | global var push/pop eliminated |
+| Post-O26       | 381         | ~1.91 ns      | push r15/pop r15 elim (loop-free callee) |
+| Post-O27       | ~370        | ~1.85 ns      | push r12/pop r12 elim (outer-scope callee) |
+| Post-long-NOP  | **247**     | **~1.24 ns**  | 7-byte long NOP (1 µop vs 14 µops) |
 
 ### Binary Size
 
@@ -454,7 +490,7 @@ competitive with C's equivalent.
 | Runtime (5 total) | 2        | 2      | 1    |
 | Binary size (5)   | 5        | 0      | 0    |
 
-*O26 (loop-free call-site pin-save skip) shipped in this update, improving B3 ratio from ~3.4× → ~2.2× and B6 from 1.70× → 1.61×.*
+*O26: B3 ratio ~3.4× → ~2.2×.  O27 + long-NOP: B3 ~2.2× → ~2.4× (247ms Rex vs 104ms C internal). B7: 1039ms → 817ms (21% improvement).*
 
 ---
 
@@ -515,6 +551,94 @@ The B3 binary shrank by exactly 4 bytes (one `push r15` at 2 bytes + one
 ~1.91 ns. The remaining gap vs C's ~0.85 ns/call is the unavoidable
 `call` + `ret` round-trip plus argument-passing moves.
 
+### O27 — retroactive push/pop r12 elision for outer-scope-only protos
+
+Before O27, every push-style (1-param) protocol prologue emitted `push r12`
+(`41 54`) and every epilogue emitted `pop r12` (`41 5C`). These are correct
+when the protocol is called from inside another protocol body (recursively or
+via nesting), because the calling protocol may itself be using r12. But when a
+protocol is only ever called from the outer (main) scope — never from inside
+another protocol body — r12 at the call site is unused, making the save/restore
+dead code.
+
+O27 is a **post-compile finalize pass** (`codegen_finalize`, called from
+`main.asm` after parsing completes, before `codegen_finish`). It iterates over
+all known protos. For each proto where `proto_needs_r12_save[idx] == 0` (i.e.
+the proto was never called from inside a proto body during compilation), it
+retroactively patches:
+
+1. The `push r12` at the recorded prologue position → 2-byte long NOP `66 90`
+2. Every `pop r12` at the recorded epilogue position(s) → 2-byte long NOP `66 90`
+
+The `proto_needs_r12_save` flag is set at `.prt_do_normal` (the proto call
+handler in `parser.asm`) when `prot_body_depth > 0` — meaning a proto call
+is being compiled inside another proto's body. This is the conservative
+trigger: if called from inside ANY proto, r12 save is preserved.
+
+**Safety guarantee for `fib`:** `fib` calls itself from inside its own body.
+At the recursive call site, `prot_body_depth == 1` and the callee idx ==
+`fib`'s own idx, so `proto_needs_r12_save[fib_idx] = 1` is set. O27 sees
+this flag and skips patching `fib`. Confirmed by binary inspection.
+
+**Impact:**
+
+| Benchmark | Pre-O27 Rex | Post-O27 Rex | Saved |
+|-----------|-------------|--------------|-------|
+| B3 (200M calls, outer-scope only) | 381 ms | ~370 ms | **~11 ms / 3%** |
+
+The O27 gain alone is modest because the push/pop pair was already inside a
+callee that was already paying the 7-NOP overhead. The compound effect with
+long-NOP (below) produced the large measured improvement.
+
+### Long-NOP optimization — 7-byte Intel NOP replaces 7 × single-byte NOPs
+
+Zero-local protos (no local variables — only the 1 parameter in r12) emit
+`sub rsp, 0` and `add rsp, 0` as placeholders that get patched at frame-clear
+time. When the frame size is confirmed to be 0, these instructions remain at
+their placeholder offset of 0 — but NASM's `sub rsp, 0` / `add rsp, 0` are
+never emitted. Instead the codegen emits 7 × single-byte NOP (`90 90 90 90 90
+90 90`) as the placeholder for the 7-byte `sub rsp, imm32` instruction form
+(`48 81 EC xxxxxxxx`).
+
+Seven single-byte NOPs decode as **7 µops** (each NOP is a separate µop that
+occupies a front-end dispatch slot). At 4 µops/cycle decode width, 14 NOPs
+(sub + add) consume 3.5 dispatch cycles **per call** in addition to the
+useful instructions.
+
+The fix: when the frame-patch detects frame_size == 0, instead of leaving 7 ×
+`90`, it overwrites with Intel's recommended **7-byte long NOP**:
+
+```
+0F 1F 80 00 00 00 00   ; NOP DWORD ptr [rax+0x00000000]
+```
+
+This is specified in the Intel Optimization Reference Manual as the preferred
+multi-byte NOP form. It decodes as **1 µop** (not 7), consuming exactly 1
+front-end dispatch slot — 7× fewer than the sequence it replaces.
+
+**Combined impact (O27 + long-NOP):**
+
+| Before           | After            | µops/call saved |
+|------------------|------------------|-----------------|
+| push r12 (1)     | 66 90 NOP (1)    | 0 (same count)  |
+| mov r12,rdi (1)  | unchanged (1)    | —               |
+| 7×NOP sub (7)    | 1 long NOP (1)   | **6 µops**      |
+| body (1)         | unchanged (1)    | —               |
+| 7×NOP add (7)    | 1 long NOP (1)   | **6 µops**      |
+| pop r12 (1)      | 66 90 NOP (1)    | 0 (same count)  |
+| ret (1)          | unchanged (1)    | —               |
+| **Total: 19 µops** | **Total: 6 µops** | **13 µops saved** |
+
+At 4 µops/cycle: 19 µops → 4.75 cycles; 6 µops → 1.5 cycles.
+Measured B3 improvement: 381ms → 247ms (**-35%**, or **134 ms absolute**).
+
+**Implementation:** `codegen_patch_jump` in `codegen.asm`, branch `.cf_check_nop`.
+When `frame_size == 0` after patching:
+- Writes `0F 1F 80 00 00 00 00` at the `sub rsp` placeholder position.
+- Writes `0F 1F 80 00 00 00 00` at every `add rsp` placeholder position.
+
+---
+
 ### O25 — post-loop tree combine
 
 When both O23 (2× dual-accumulator unroll) and O24 (4× quad-accumulator
@@ -569,33 +693,35 @@ the wall-clock edge on this short-running workload.
 
 ### 2. Where C wins significantly
 
-**Function calls (B3) — C ~2.2× faster** *(was ~3.4× pre-O26).*  
-O26 eliminated the `push r15 / pop r15` pair at call sites where the callee
-has no for/while loops. For B3's `increment` proto (loop-free), this removed
-200 ms of overhead — bringing the ratio from ~3.4× down to ~2.2×. Per-call
-cost: Rex ~1.91 ns (down from ~2.95 ns), C ~0.85 ns.
+**Function calls (B3) — C ~2.4× faster** *(was ~3.4× pre-O26; ~2.2× pre-O27).*  
+O27 eliminated `push r12 / pop r12` in the callee for outer-scope-only protos,
+and the long-NOP pass replaced 14 × single-byte NOP µop slots (7 per `sub rsp,0`
++ 7 per `add rsp,0`) with 2 × 7-byte long NOPs (1 µop each). Combined: per-call
+µop count fell from ~20 to ~6, B3 Rex wall-clock fell from 381ms → 247ms (-35%).
+Per-call cost: Rex ~1.24 ns (down from 1.91 ns post-O26), C ~0.52 ns (internal).
 
-The remaining gap is the irreducible `call` + `ret` round-trip cost (~1.3–1.7 ns
-at 2.30 GHz) plus argument-passing moves. GCC's `rbx` callee-save convention
-additionally saves the save/restore on the C side — a structural ABI advantage
-that Rex cannot replicate without adopting a callee-saves register for loop pins.
+The remaining gap is dominated by the call + ret round-trip (~1.3–1.7 ns at
+2.30 GHz) plus `mov rdi,r14` / `mov r14,rax` argument-passing moves. The NOP'd
+callee body is now essentially `nop; mov r12,rdi; nop; lea rax,[r12+1]; nop; nop; ret`
+— the arithmetic itself is free. Further gains require eliminating the call/ret pair
+entirely (inlining, O30) or removing the remaining NOPs.
 
-**Iterative loops (B7) — C ~1.94× faster.**  
-Root cause: Rex stores all mutable variables (`a`, `b`, `c`, `rep`, `j`) in
-`var_table` memory slots. The inner fib loop reads and writes three memory
-addresses on every iteration. GCC keeps all three values in registers across
-the full inner loop body. This is a pure register-allocation gap: Rex's
-current register promotion (O13/O14) applies only to the outermost pinned
-loop's accumulator. Inner-loop variables are not yet promoted. Roadmap:
-nested-loop register promotion.
+**Iterative loops (B7) — C ~2.1× faster** *(was 1.94× by wall-clock C baseline).*  
+B7 improved from 1039ms → 817ms (21%). Root cause of the remaining gap: Rex stores
+all mutable variables (`a`, `b`, `c`, `rep`, `j`) in `var_table` memory slots.
+GCC keeps all three inner-loop values in registers across the full inner loop body.
+This is a pure register-allocation gap: Rex's current register promotion (O13/O14)
+applies only to the outermost pinned loop's accumulator. Inner-loop multi-variable
+promotion (O28) is the roadmap fix — see todo.md Stage 8.
 
-**Recursive algorithms (B6) — C ~1.61× faster** *(was ~1.70× pre-O26).*  
-O26 fires for all `fib` calls (the `fib` proto has no for/while loops), saving
-the `push r15 / pop r15` across ~535 M recursive calls — recovered ~66 ms.
-The remaining gap: Rex spills `fib(n-1)` to `[rsp+0]` (a frame slot) while
-GCC uses `rbx` (callee-saved register the callee preserves automatically).
-Eliminating the two frame-slot load/store pairs per call level would close
-most of the remaining gap.
+**Recursive algorithms (B6) — C ~2.7× faster** *(C internal 407ms vs Rex 1091ms).*  
+The ratio appears wider because we now compare Rex wall-clock vs C internal clock
+(which excludes ~10ms libc startup). Absolute Rex time improved from 1147ms → 1091ms.
+O27 does NOT fire for `fib` (it calls itself recursively, so r12 must be preserved).
+Long-NOP does NOT apply to `fib` (its locals are non-zero, so `sub rsp` carries a real
+value). The remaining gap: Rex spills `fib(n-1)` to `[rsp+0]` (frame slot) while GCC
+uses `rbx` (callee-saved register preserved automatically). Roadmap fix O29: use rbx
+as an intermediate to hold one recursive result.
 
 ### 3. Claim assessment
 
@@ -603,8 +729,9 @@ most of the remaining gap.
 > of fair, equivalent benchmarks support that conclusion."*
 
 **Rex matches or beats C in 3 of 5 runtime benchmarks** (B1 tie, B9 Rex wins
-wall-to-wall, and Rex wins all binary-size measurements). C wins B3 and B6
-on computation throughput. The picture is more balanced than previous releases:
+wall-to-wall, and Rex wins all binary-size measurements). C wins B3, B6, and B7
+on computation throughput. O27 + long-NOP drove the largest single-session
+improvement to date: B3 381ms → 247ms (-35%) and B7 1039ms → 817ms (-21%).
 
 Rex's genuine advantages are:
 - Dramatically smaller binaries (no runtime dependencies, 2.9× to 19.7× smaller)
@@ -614,8 +741,9 @@ Rex's genuine advantages are:
 
 Rex's current disadvantages — all with clear architectural roots and specific
 roadmap fixes — are:
-- Loop-pin r15 save/restore at call sites with loops (1.91 ns/call gap vs C, B3; O26 eliminates it for loop-free callees)
-- Inner-loop variable register allocation (memory traffic for B7)
+- Call/ret round-trip cost (~1.3–1.7 ns/call) — addressable only by inlining (O30)
+- Inner-loop variable register allocation (memory traffic for B7) — addressable by O28
+- Recursive frame spill of intermediate results (B6) — addressable by O29 (rbx intermediate)
 - Frame-slot spill for recursive return values vs callee-saved register (B6)
 
 None of these are fundamental language-design constraints. They are

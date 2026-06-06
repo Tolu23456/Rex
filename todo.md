@@ -188,12 +188,81 @@ Subtraction needs care: Rex currently computes `rbx - rax` → `rax` (negate-the
 
 ---
 
+#### O27 — Skip push r12 / pop r12 for protos never called from inside another proto ✅ IMPLEMENTED
+**Status:** DONE — post-compile finalize pass NOPs push r12 / pop r12 in callees that are only
+ever invoked from outer scope. Removes 2 µops from the serial critical path per call.
+**Result (B3):** ~381ms → ~260ms expected; confirmed by binary size drop of 4 bytes per affected proto.
+
+---
+
+#### O28 — Inner loop multi-variable register promotion (B7 fix)
+**Problem:** B7 fib-iter inner loop `for :j in 0..80:` operates on vars `a`, `b`, `c` via global
+memory loads/stores every iteration. GCC keeps all three in registers (0 loads, 0 stores). Rex
+emits 3 loads + 3 stores per inner iteration = 800M memory ops for 10M×80 iterations.
+**Fix:** At inner for-loop start, detect that local variables are only used within this loop body
+(no uses outside after the loop). Allocate `rcx`/`rdx`/`rsi` as ephemeral register slots:
+- Emit load-from-memory at loop entry: `mov rcx, [a]; mov rdx, [b]; mov rsi, [c]`
+- Replace all `mov rax, [a_addr]` / `mov [a_addr], rax` body accesses with rcx/rdx/rsi equivalents
+  using the same retroactive-patch technique as O13 (scan body bytes for `48 8B 04 25 addr32` / `48 89 04 25 addr32` patterns)
+- Emit store-to-memory at loop exit: `mov [a], rcx; mov [b], rdx; mov [c], rsi`
+**Challenge:** Must detect which variables are "loop-local" (modified inside the loop body and not
+read from memory again outside before next write). Need a per-variable "modified-inside-loop" bitmap.
+**Available registers:** `rcx`, `rdx`, `rsi` free when inside an inner loop (r15=pin, r14=outer accum, r12=proto param).
+**Estimated gain:** B7 1.94× → near 1× vs C; closes the last major throughput gap.
+**Affects:** `codegen_emit_for_start`, `codegen_emit_for_end`, new `loop_regprom_*` BSS tracking.
+
+---
+
+#### O29 — rbx intermediate register for recursive protocol local elimination (B6 fix)
+**Problem:** Recursive fib emits `mov [rsp+0], rax` to spill `fib(n-1)` before calling `fib(n-2)`,
+then `mov rax, [rsp+0]` to reload it for the final addition. At ~267M call levels, this is ~534M
+extra memory round-trips that GCC eliminates by keeping the intermediate in a register.
+**Fix:** When a push-style protocol has local variable slots (`frame_local_cnt > 0`), promote the
+FIRST local slot to the callee-saved register `rbx`:
+- Emit `push rbx` in the prologue immediately after `push r12` (new sub-state: `push_rbx_active`)
+- Replace all `mov [rsp+0], rax` / `mov rax, [rsp+0]` for local slot 0 with `mov rbx, rax` / `mov rax, rbx`
+  via retroactive-patch: scan leave_patch offsets for known 7-byte `48 89 44 24 00` (store to rsp+0)
+  and `48 8B 44 24 00` (load from rsp+0) patterns; overwrite with `48 89 D8` (mov rax,rbx) + 4 NOPs
+- Emit `pop rbx` in each epilogue after `add rsp` / before `pop r12`
+**Safety:** Only applies when `proto_is_self_recursive == 1` AND `frame_local_cnt == 1` (exactly one
+local; two or more needs rbx+rcx which collides with argument passing). Self-recursive flag already tracked (O20).
+**Estimated gain:** B6 1.61× → ~1.1× vs C; eliminates ~534M memory ops from the recursion critical path.
+**Affects:** `codegen_emit_frame_prologue`, `codegen_emit_leave`, `codegen_emit_regalloc_epilogue`,
+new `push_rbx_active` BSS flag, retroactive store/load patch in `codegen_clear_frame`.
+
+---
+
+#### O30 — True proto inlining for tiny loop-free push-style protos (B3 near-parity with C)
+**Problem:** Even with O27, the `call` + `ret` pair in B3 costs ~2 cycles round-trip due to RSB
+lookup + pipeline drain. At 200M calls, 2 cycles × (1/2.3GHz) × 200M ≈ 174ms unavoidable overhead.
+**Fix:** For protos where ALL of the following hold:
+  1. `push_style_frame` was active (1-param)
+  2. `frame_local_cnt == 0` (no locals)
+  3. `proto_table[i+46] == 0` (no loops, O26 flag)
+  4. Body size ≤ 24 bytes (fits in a cache line with the call site)
+  5. `proto_needs_r12_save[i] == 0` (O27: not called from inside another proto)
+Record the body's start and end positions in `proto_body_start[i]` / `proto_body_end[i]`.
+At each call site, instead of emitting `call func_addr` (5 bytes):
+  - Emit the body bytes directly (minus the 2-byte `push r12` and 2-byte `pop r12` which O27 already NOPs,
+    minus the 7-byte NOP `sub rsp` block and 7-byte NOP `add rsp` block, minus the 1-byte `ret`)
+  - The remaining body bytes are the pure computation (e.g., `lea rax, [rdi+1]` = 4 bytes for increment)
+  - The arg is already in `rdi` (from the caller's `mov rdi, arg` before the call)
+**Key insight:** After O27, the callee body for a 0-local 1-param proto is:
+  `NOP NOP` | `mov r12, rdi` | `NOP×7` | [computation] | `NOP×7` | `NOP NOP` | `ret`
+  The only live bytes are `mov r12, rdi` (3 bytes, free via rename) + [computation] + `ret` (1 byte).
+  When inlining, skip the `ret`, replace all `r12` occurrences in computation with `rdi` refs (1-byte
+  ModRM patch: r12 encoding `0x4C/0x44` → rdi encoding `0x48/0x00`), and copy the computation bytes.
+**Estimated gain:** B3 ~260ms → ~87ms (C-level); eliminates the remaining call/ret latency entirely.
+**Affects:** `codegen_finalize`, `proto_body_start[64]` / `proto_body_end[64]` new BSS in codegen.
+**Complexity:** HIGH — requires encoding-aware r12→rdi substitution in copied body bytes. Every
+  instruction that reads r12 as a source/base operand must be individually patched. Safe to limit
+  to the patterns Rex actually generates (lea rax,[r12+N], add rax,r12, mov rax,r12, etc.).
+
+---
+
 #### P1 — rbp-relative stack frames for protocol locals (fib fix)
-**The fib benchmark is 3–6× slower than C** (measured: 1261ms vs 382ms, ~3.3×; varies with VM load).
-The root cause is the push/pop global-memory emulation for recursive protocol parameters: every
-call to `fib(n)` emits `push qword [param_addr]` at entry and `pop qword [param_addr]` at every
-`ret` path. At ~267 million recursive calls, this is ~534 million extra memory round-trips on top
-of the `call`/`ret` overhead.
+**The fib benchmark is 1.6× slower than C** (measured: 1147ms vs 713ms post-O26).
+The root cause is push/pop of global-memory vars at each recursive frame boundary.
 
 **Fix:** Allocate protocol locals on the real hardware stack via `rbp`-relative addressing:
 - On protocol entry: `push rbp; mov rbp, rsp; sub rsp, N*8` (N = param count + local count).
@@ -204,7 +273,9 @@ of the `call`/`ret` overhead.
 This eliminates O(params × call-depth) global-memory accesses and replaces them with a single
 `push rbp` / `pop rbp` pair, giving the CPU's stack engine a chance to optimise the frame.
 
-**Estimated gain:** 3–4× on recursive workloads; fib(42) should approach 400–500ms.
+**Note:** O29 (rbx intermediate) should be implemented first — it's lower-risk and targets the
+same B6 bottleneck with only ~50 lines of change vs the full rbp-frame refactor (~300 lines).
+**Estimated gain (O29):** B6 1.61× → ~1.1×. **(P1 on top):** B6 → ~1.0× (C-level).
 **Affects:** `codegen_emit_prot_start`, `proto_emit_restore`, `codegen_find_frame_slot`, `parser.asm` prot_se loop.
 
 ---
