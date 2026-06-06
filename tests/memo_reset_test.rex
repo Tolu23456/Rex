@@ -1,6 +1,7 @@
-memo proto sq(n):
-  int x = n * n
-  ret x
+#memo
+prot sq(n):
+    int x = n * n
+    return x
 
 // First run: cache miss, computes 25, caches it
 output @sq(5)

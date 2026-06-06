@@ -407,7 +407,7 @@ output hi
 Tuple return values are positional. The types on the left side must match the
 declared return tuple exactly — a mismatch is a compile-time error.
 
-### Protocol decorators — `#` 📋
+### Protocol decorators — `#` ✅
 
 Decorators annotate a protocol with compiler directives. They use the `#` sigil
 and stack **one per line** directly above the `prot` keyword.

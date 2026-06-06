@@ -151,6 +151,12 @@ memo_jge_patch:      resq 1
 memo_je_patch:       resq 1
 ; O24: 4× loop unrolling with 4 accumulators (rdx=sum2,r8=cnt2,rcx=sum3,r9=cnt3)
 o24_active:          resb 1
+; O29: r13 protocol expr-spill register — inside a 1-param push-style proto,
+; dedicate r13 (callee-saved) as the depth-0 expression spill register instead of
+; the caller-saved r10. Eliminates push r10/pop r10 around nested protocol calls
+; (e.g. fib(n-1) + fib(n-2)), replacing them with the cheaper mov r13,rax / mov rbx,r13.
+o29_active:          resb 1    ; 1 inside a push-style 1-param proto
+proto_has_o29:       resb 64   ; 1 if proto[i] emitted push r13 in its prologue
 ; O28: inner-loop register promotion — retroactive byte-patching for nested loops
 ; Promotes up to 2 global variables (r12=slot0, r13=slot1) accessed in an inner loop.
 ; Condition: regalloc_active==0 (r12/r13 free from O18) and loop_pin_depth==1→2.
@@ -1224,6 +1230,74 @@ codegen_emit_for_end:
     ; pinned: increment r15
     cmp r14, 1
     jne .fe_pin_step
+    ; O64: closed-form 64× accumulator folding.
+    ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 64 == 0.
+    ; Replaces per-iteration add with: sum_delta = 64*i + 2016; i += 64
+    ; where 2016 = 0+1+...+63 = sum of 64 consecutive integers starting from 0.
+    ; Each outer iteration covers 64 logical loop iterations in 5 instructions.
+    cmp byte [loop_accum_active], 0
+    je .fe_no_o64
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    cmp byte [rcx+rdx+0], 0x4D        ; add r14,r15 byte 0
+    jne .fe_no_o64
+    cmp byte [rcx+rdx+1], 0x01        ; add r14,r15 byte 1
+    jne .fe_no_o64
+    cmp byte [rcx+rdx+2], 0xFE        ; add r14,r15 byte 2
+    jne .fe_no_o64
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 3                         ; body must be exactly 3 bytes
+    jne .fe_no_o64
+    mov rax, [for_rotation_end_val]
+    sub rax, [for_rotation_from_val]
+    test rax, 63                       ; (end-from) % 64 == 0?
+    jnz .fe_no_o64
+    ; O64 applies — rewind out_idx to for_rotation_body_pc and emit closed-form.
+    ; Hot loop body: mov rax,r15 + shl rax,6 + add rax,2016 + add r14,rax + add r15,64
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    ; mov rax, r15 = 4C 89 F8
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    ; shl rax, 6 = 48 C1 E0 06  (rax *= 64)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov al, 0x06
+    call emit_b
+    ; add rax, 2016 = 48 05 E0 07 00 00  (0+1+...+63 = 2016)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    mov eax, 2016
+    call emit_d
+    ; add r14, rax = 4B 01 C6  (REX.W=1,R=0,B=1; mod=11 reg=000=rax rm=110=r14)
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    ; add r15, 64 = 49 83 C7 40
+    mov al, 0x49
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x40
+    call emit_b
+    jmp .fe_pin_jmp        ; emit cmp r15,end; jl body_start
+.fe_no_o64:
     ; O23: check if 2×unroll with dual accumulators applies
     ; Conditions: accumulator promoted (loop_accum_active==1) AND body is exactly
     ; "add r14,r15" (4D 01 FE, 3 bytes) AND (end-from) is even
@@ -1950,6 +2024,20 @@ codegen_emit_expr_save_rax:
     pop rbx
     ret
 .esr_d0:
+    ; O29: inside a 1-param push-style proto, use callee-saved r13 instead of r10.
+    ; mov r13, rax = 49 89 C5  (r13 is preserved across the inner call automatically)
+    cmp byte [o29_active], 0
+    je .esr_d0_r10
+    mov al, 0x49
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC5
+    call emit_b
+    inc byte [expr_spill_depth]
+    pop rbx
+    ret
+.esr_d0_r10:
     ; mov r10, rax = 49 89 C2
     mov al, 0x49 & 0xFF
     call emit_b
@@ -1988,6 +2076,19 @@ codegen_emit_expr_restore_rbx:
     pop rbx
     ret
 .err_d0:
+    ; O29: if r13 was used for depth-0 spill, restore from r13 instead of r10.
+    ; mov rbx, r13 = 4C 89 EB
+    cmp byte [o29_active], 0
+    je .err_d0_r10
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xEB
+    call emit_b
+    pop rbx
+    ret
+.err_d0_r10:
     ; mov rbx, r10 = 4C 89 D3
     mov al, 0x4C
     call emit_b
@@ -2010,10 +2111,17 @@ codegen_emit_expr_restore_rbx:
 
 codegen_emit_expr_spill_save:
     ; Before a protocol call: if r10/r11 are live spill regs, push them.
+    ; O29: when o29_active=1 and depth=1, depth-0 used r13 (callee-saved) — no push needed.
     ; For most programs (expr_spill_depth=0 at call sites) this emits nothing.
     movzx rax, byte [expr_spill_depth]
     test rax, rax
     jz .ess_done
+    ; O29: if depth=1 and o29_active, depth-0 slot is r13 (callee-saved by callee) → skip push r10
+    cmp rax, 1
+    jne .ess_push_r10
+    cmp byte [o29_active], 0
+    jne .ess_done        ; r13 is callee-saved; nested call preserves it automatically
+.ess_push_r10:
     ; push r10 = 41 52
     mov al, 0x41
     call emit_b
@@ -2031,16 +2139,23 @@ codegen_emit_expr_spill_save:
 
 codegen_emit_expr_spill_restore:
     ; After a protocol call: restore r10/r11 if they were saved.
+    ; O29: when o29_active=1 and depth=1, depth-0 used r13 — skip pop r10.
     movzx rax, byte [expr_spill_depth]
     test rax, rax
     jz .esr2_done
     cmp rax, 2
-    jl .esr2_one
+    jl .esr2_check_r10
     ; pop r11 = 41 5B
     mov al, 0x41
     call emit_b
     mov al, 0x5B
     call emit_b
+.esr2_check_r10:
+    ; O29: if depth=1 and o29_active, depth-0 slot was r13 — no pop r10 needed
+    cmp rax, 1
+    jne .esr2_one
+    cmp byte [o29_active], 0
+    jne .esr2_done
 .esr2_one:
     ; pop r10 = 41 5A
     mov al, 0x41
@@ -4475,6 +4590,7 @@ codegen_clear_frame:
     mov byte [regalloc_cnt], 0
     mov byte [leave_patch_cnt], 0    ; FLC: clear leave patch count
     mov byte [push_style_frame], 0   ; O21: clear push-style flag
+    mov byte [o29_active], 0         ; O29: clear r13-spill flag
     pop rbx
     ret
 
@@ -4517,6 +4633,15 @@ codegen_emit_frame_prologue:
     call emit_b
     mov al, 0x54
     call emit_b
+    ; O29: push r13 (callee-saved) as dedicated expr-spill register for depth-0 calls.
+    ; Set o29_active=1 and proto_has_o29[idx]=1 so codegen_finalize can NOP it if O27 fires.
+    mov al, 0x41
+    call emit_b
+    mov al, 0x55
+    call emit_b
+    mov byte [o29_active], 1
+    mov rcx, [codegen_cur_proto_seq_idx]
+    mov byte [proto_has_o29 + rcx], 1
     ; mov r12, rdi = 49 89 FC
     mov al, 0x49
     call emit_b
@@ -4627,19 +4752,30 @@ codegen_emit_regalloc_epilogue:
     call emit_b
     jmp .re_done
 .re_pop_r12:
-    ; O27: record position of pop r12 for retroactive elision in codegen_finalize
+    ; O29: emit pop r13 FIRST (LIFO: r13 pushed after r12, so popped before r12).
+    ; Must happen BEFORE the O27 recording so pop_r12_pos records the pop r12 position,
+    ; not the pop r13 position (otherwise O27 finalize NOPs the wrong instruction).
+    cmp byte [o29_active], 0
+    je .re_record_r12
+    ; pop r13 = 41 5D
+    mov al, 0x41
+    call emit_b
+    mov al, 0x5D
+    call emit_b
+.re_record_r12:
+    ; O27: record position of pop r12 AFTER any O29 pop r13 has been emitted
     push rcx
     push rdx
     mov rcx, [codegen_cur_proto_seq_idx]
     movzx edx, byte [proto_pop_r12_cnt + rcx]
-    cmp edx, 7                          ; max 8 epilogues tracked per proto
-    jge .re_skip_record
-    imul rax, rcx, 64                   ; base offset in flat array (proto_idx * 8 * 8)
+    cmp edx, 7
+    jge .re_skip_record2
+    imul rax, rcx, 64
     lea r8, [proto_pop_r12_pos + rax]
     mov rax, [out_idx]
-    mov [r8 + rdx*8], rax               ; store position BEFORE emitting pop r12
+    mov [r8 + rdx*8], rax
     inc byte [proto_pop_r12_cnt + rcx]
-.re_skip_record:
+.re_skip_record2:
     pop rdx
     pop rcx
     ; O21 push-style: pop r12 = 41 5C
@@ -5410,19 +5546,38 @@ codegen_finalize:
     ; Long-NOP each pop r12 (41 5C) for this proto's epilogues → 66 90
     movzx r13, byte [proto_pop_r12_cnt + r12]
     test r13, r13
-    jz .fin_next
+    jz .fin_o29_check     ; 0 epilogues: skip pop loop but still NOP push r13 if O29
     imul r15, r12, 64           ; r15 = r12 * 8_epilogues * 8_bytes = flat array base offset
     lea rcx, [proto_pop_r12_pos + r15]   ; rcx = base of this proto's pop r12 list
     xor edx, edx                ; edx = epilogue counter
 .fin_pop_loop:
     cmp rdx, r13
-    jge .fin_next
+    jge .fin_o29_check
     mov rax, [rcx + rdx*8]     ; pop r12 position in out_buffer
     lea rbx, [out_buffer]
     mov byte [rbx + rax],     0x66
     mov byte [rbx + rax + 1], 0x90
+    ; O29: also NOP the pop r13 that precedes pop r12 (2 bytes earlier)
+    movzx r15, byte [proto_has_o29 + r12]
+    test r15, r15
+    jz .fin_pop_loop_next
+    lea rbx, [out_buffer]
+    sub rax, 2                  ; pop r13 is emitted 2 bytes before pop r12
+    mov byte [rbx + rax],     0x66
+    mov byte [rbx + rax + 1], 0x90
+.fin_pop_loop_next:
     inc rdx
     jmp .fin_pop_loop
+.fin_o29_check:
+    ; O29: NOP the push r13 (2 bytes after push r12 at proto_push_r12_pos+2)
+    movzx r15, byte [proto_has_o29 + r12]
+    test r15, r15
+    jz .fin_next
+    mov rax, [proto_push_r12_pos + r12*8]
+    add rax, 2                  ; push r13 immediately follows push r12 (2 bytes)
+    lea rbx, [out_buffer]
+    mov byte [rbx + rax],     0x66
+    mov byte [rbx + rax + 1], 0x90
 .fin_next:
     inc r12
     jmp .fin_loop

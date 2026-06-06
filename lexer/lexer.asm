@@ -187,6 +187,8 @@ lexer_next:
     je .epl
     cmp al, '-'
     je .emi
+    cmp al, '#'
+    je .ehash
     inc qword [lex_pos]
     jmp .r
 .elb:
@@ -563,6 +565,77 @@ lexer_next:
     leave
     ret
 
+; ── #decorator handler (local to lexer_next) ─────────────────────────────────
+; Reached when dispatch sees '#'. Reads the following identifier word.
+; "memo" → TOK_MEMO, "memo_reset" → TOK_MEMO_RESET, else skip to end of line.
+; On entry: rcx = position of '#', rdi = lex_src base.
+.ehash:
+    inc rcx                    ; skip '#'
+    xor rbx, rbx              ; tok_ident index
+.ehash_word:
+    cmp rcx, [lex_len]
+    jge .ehash_done
+    movzx eax, byte [rdi+rcx]
+    cmp al, 'a'
+    jl .ehash_chk_upper
+    cmp al, 'z'
+    jle .ehash_store
+.ehash_chk_upper:
+    cmp al, 'A'
+    jl .ehash_chk_us
+    cmp al, 'Z'
+    jle .ehash_store
+.ehash_chk_us:
+    cmp al, '_'
+    jne .ehash_done
+.ehash_store:
+    cmp rbx, 63
+    jge .ehash_done
+    mov [tok_ident+rbx], al
+    inc rbx
+    inc rcx
+    jmp .ehash_word
+.ehash_done:
+    mov byte [tok_ident+rbx], 0
+    mov [lex_pos], rcx
+    cmp dword [tok_ident], 0x6F6D656D  ; "memo" LE
+    jne .ehash_chk_mr
+    cmp byte [tok_ident+4], 0
+    jne .ehash_chk_mr
+    mov byte [tok_type], TOK_MEMO
+    jmp .done
+.ehash_chk_mr:
+    cmp dword [tok_ident], 0x6F6D656D
+    jne .ehash_skip_line
+    cmp byte [tok_ident+4], '_'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+5], 'r'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+6], 'e'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+7], 's'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+8], 'e'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+9], 't'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+10], 0
+    jne .ehash_skip_line
+    mov byte [tok_type], TOK_MEMO_RESET
+    jmp .done
+.ehash_skip_line:
+    mov rcx, [lex_pos]
+.ehash_sl_loop:
+    cmp rcx, [lex_len]
+    jge .ehash_sl_done
+    movzx eax, byte [rdi+rcx]
+    inc rcx
+    cmp al, 0x0A
+    jne .ehash_sl_loop
+.ehash_sl_done:
+    mov [lex_pos], rcx
+    jmp .r
+
 lexer_classify:
     mov eax, dword [tok_ident]
     cmp eax, 0x6c6f6f62
@@ -704,12 +777,12 @@ lexer_classify:
     cmp byte [tok_ident+4], 0
     je .kstep
 .nstep:
-    ; "memo" / "memo_reset": first dword = 0x6F6D656D ("memo")
+    ; "memo_reset": bare statement keyword kept; bare "memo" removed (use #memo).
+    ; dword "memo" = 0x6F6D656D (LE). "memo_reset" has '_' at [4].
     cmp eax, 0x6F6D656D
     jne .nmemo
     cmp byte [tok_ident+4], 0
-    je .kmemo
-    ; check for "memo_reset" — byte[4]='_' bytes[5..9]="reset" byte[10]=0
+    je .nmemo          ; plain "memo" — not a keyword; fall to ident
     cmp byte [tok_ident+4], '_'
     jne .nmemo
     cmp byte [tok_ident+5], 'r'
@@ -930,3 +1003,4 @@ lexer_classify:
 .kmemo_reset:
     mov byte [tok_type], TOK_MEMO_RESET
     ret
+
