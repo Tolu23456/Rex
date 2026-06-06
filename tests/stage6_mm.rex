@@ -1,4 +1,4 @@
-use mm pool gc ref_count:
+use mm pool:
     int x = 10
     output x
 output 42

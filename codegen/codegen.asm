@@ -7,7 +7,7 @@ global codegen_begin_protos, codegen_end_protos
 global codegen_emit_for_start, codegen_emit_for_end
 global codegen_emit_while_start, codegen_emit_while_end
 global codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
-global codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
+global codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_mov_rax_imm64, codegen_emit_call_prot
 global codegen_emit_push_var_slot, codegen_emit_pop_var_slot
 global codegen_skip_pin_save
 global codegen_emit_assign_var, codegen_emit_zero_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
@@ -404,7 +404,7 @@ codegen_finish:
     lea rcx, [out_buffer]
     mov [rcx+64+32], rax
     mov rax, [out_idx]
-    add rax, 0x44000
+    add rax, 0x46000    ; BSS: var_table (0x44000) + memo_ptr_base (0x1000) + tables (0x1000)
     mov [rcx+64+40], rax
     ; O3: peephole optimise the output buffer
     call codegen_peephole
@@ -1790,6 +1790,18 @@ codegen_emit_mov_eax_imm32:
     call emit_b
     mov eax, edi
     call emit_d
+    ret
+
+codegen_emit_mov_rax_imm64:
+    ; rdi=imm64: emit movabs rax, imm64 (48 B8 + 8 bytes)
+    ; Used for float literals which carry 64-bit IEEE 754 bit patterns.
+    push rdi
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    pop rax
+    call emit_q
     ret
 
 codegen_set_for_step:

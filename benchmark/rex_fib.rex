@@ -1,8 +1,8 @@
-// rex_fib.rex — recursive Fibonacci benchmark
-// Rex compiles each prot to a direct CALL/RET pair with no prologue overhead
-// beyond the SysV ABI register stores emitted for the two parameters.
+// rex_fib_memo.rex — memoized recursive Fibonacci benchmark
+// #memo caches each fib(n) result after first computation.
+// Recursive tree of 2^42 calls collapses to O(n) distinct lookups.
 
-prot fib(n):
+memo prot fib(n):
     if n <= 1:
         return n
     int a

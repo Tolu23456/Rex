@@ -8,7 +8,7 @@ extern codegen_begin_protos, codegen_end_protos
 extern codegen_emit_for_start, codegen_emit_for_end
 extern codegen_emit_while_start, codegen_emit_while_end
 extern codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
-extern codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
+extern codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_mov_rax_imm64, codegen_emit_call_prot
 extern codegen_emit_push_var_slot, codegen_emit_pop_var_slot
 extern codegen_emit_assign_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
 extern codegen_emit_mm_switch, codegen_emit_gc_switch, out_idx
@@ -316,8 +316,8 @@ parse_factor:
     call lexer_next
     jmp .done
 .flt:
-    mov rdi, [tok_int]
-    call codegen_emit_mov_eax_imm32
+    mov rdi, [tok_int]          ; tok_int holds full 64-bit IEEE 754 bit pattern
+    call codegen_emit_mov_rax_imm64  ; movabs rax, imm64 — preserve all 64 bits
     mov byte [cur_type], TYPE_FLOAT
     call lexer_next
     jmp .done

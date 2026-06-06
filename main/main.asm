@@ -110,6 +110,21 @@ prescan_blobs:
     jne .psb_nq
     or eax, 0x02
 .psb_nq:
+    ; single-byte check: digit followed by '.' → float literal → PRF
+    ; e.g. "3.14" — check current byte is digit AND next byte is '.'
+    movzx ecx, byte [r12+rbx]
+    cmp ecx, '0'
+    jl .psb_nfl
+    cmp ecx, '9'
+    jg .psb_nfl
+    mov r8, r13
+    sub r8, rbx
+    cmp r8, 2
+    jl .psb_nfl
+    cmp byte [r12+rbx+1], '.'
+    jne .psb_nfl
+    or eax, 0x08
+.psb_nfl:
     ; multi-byte keyword checks: need at least 4 bytes remaining
     mov r8, r13
     sub r8, rbx
@@ -152,7 +167,19 @@ prescan_blobs:
     cmp r8d, 0x706D6F63
     jne .p9
     or eax, 0x10
-.p9:; 3-byte patterns (safe since >= 4 bytes remain)
+.p9:; "memo" → ALC : m(6D) e(65) m(6D) o(6F) → 0x6F6D656D
+    cmp r8d, 0x6F6D656D
+    jne .pe
+    or eax, 0x40
+.pe:; "err " → PRQ : e(65) r(72) r(72) space(20) → 0x20727265
+    cmp r8d, 0x20727265
+    jne .pf2
+    or eax, 0x80
+.pf2:; "use " → ALC : u(75) s(73) e(65) space(20) → 0x20657375
+    cmp r8d, 0x20657375
+    jne .pb
+    or eax, 0x40
+.pb:; 3-byte patterns (safe since >= 4 bytes remain)
     ; "str" → PRS : low 3 bytes = s(73) t(74) r(72) → 0x00727473
     mov ecx, r8d
     and ecx, 0x00FFFFFF
