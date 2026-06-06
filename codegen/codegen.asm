@@ -43,6 +43,7 @@ global codegen_emit_inc_var, codegen_emit_dec_var
 global codegen_emit_swap_vars
 global codegen_emit_abs_rax
 global codegen_emit_cap_rax
+global codegen_emit_clock_ms
 global codegen_set_for_step, for_step_val
 global codegen_emit_exit1
 global codegen_push_loop_else_flag, codegen_pop_loop_else_flag, codegen_peek_loop_else_flag
@@ -6105,4 +6106,149 @@ codegen_finalize:
     pop r13
     pop r12
     pop rbx
+    ret
+
+; ── codegen_emit_clock_ms ────────────────────────────────────────────────────
+; Emits inline code: clock_gettime(CLOCK_MONOTONIC) → rax = ms (tv_sec*1000 + tv_nsec/1000000)
+; Emitted bytes (55 total):
+;   48 83 EC 10          sub rsp, 16
+;   B8 E4 00 00 00       mov eax, 228   (sys_clock_gettime, zero-extends)
+;   BF 01 00 00 00       mov edi, 1     (CLOCK_MONOTONIC)
+;   48 89 E6             mov rsi, rsp   (&timespec)
+;   0F 05                syscall
+;   4C 8B 04 24          mov r8,  [rsp]     (tv_sec)
+;   4C 8B 4C 24 08       mov r9,  [rsp+8]   (tv_nsec)
+;   48 83 C4 10          add rsp, 16
+;   4D 69 C0 E8 03 00 00 imul r8, r8, 1000  (tv_sec → ms)
+;   4C 89 C8             mov rax, r9        (tv_nsec → rax)
+;   31 D2                xor edx, edx
+;   B9 40 42 0F 00       mov ecx, 1000000
+;   48 F7 F9             idiv rcx           (tv_nsec / 1000000 → rax)
+;   4C 01 C0             add rax, r8        (total ms)
+; Clobbers: rax rdi rsi rcx rdx r8 r9 (all caller-saved). Preserves r14 r15 rbx rbp.
+codegen_emit_clock_ms:
+    ; sub rsp, 16  (48 83 EC 10)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xEC
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; mov eax, 228  (B8 E4 00 00 00)  sys_clock_gettime; zero-extends to rax
+    mov al, 0xB8
+    call emit_b
+    mov al, 0xE4
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ; mov edi, 1  (BF 01 00 00 00)  CLOCK_MONOTONIC; zero-extends to rdi
+    mov al, 0xBF
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ; mov rsi, rsp  (48 89 E6)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xE6
+    call emit_b
+    ; syscall  (0F 05)
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    ; mov r8, [rsp]  (4C 8B 04 24)  tv_sec
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    ; mov r9, [rsp+8]  (4C 8B 4C 24 08)  tv_nsec
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x24
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; add rsp, 16  (48 83 C4 10)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC4
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ; imul r8, r8, 1000  (4D 69 C0 E8 03 00 00)
+    mov al, 0x4D
+    call emit_b
+    mov al, 0x69
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0xE8
+    call emit_b
+    mov al, 0x03
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ; mov rax, r9  (4C 89 C8)  tv_nsec -> rax for division
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC8
+    call emit_b
+    ; xor edx, edx  (31 D2)  clear high bits for idiv
+    mov al, 0x31
+    call emit_b
+    mov al, 0xD2
+    call emit_b
+    ; mov ecx, 1000000  (B9 40 42 0F 00)
+    mov al, 0xB9
+    call emit_b
+    mov al, 0x40
+    call emit_b
+    mov al, 0x42
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ; idiv rcx  (48 F7 F9)  rax = tv_nsec/1000000 (0..999)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xF7
+    call emit_b
+    mov al, 0xF9
+    call emit_b
+    ; add rax, r8  (4C 01 C0)  total_ms = nsec_ms + sec_ms
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC0
+    call emit_b
     ret

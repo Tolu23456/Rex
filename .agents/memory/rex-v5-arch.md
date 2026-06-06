@@ -261,6 +261,19 @@ r8/r10/r11 survive across emit_b/emit_d/emit_q calls (those only clobber rax, pr
 Fuses `:accum = accum OP pin` → single `add/sub/imul/idiv r14, r15`.
 BSS: `sr_add_candidate`, `sr_add_rhs_is_pin`, `sr_add_done`, `sr_add_patch_pos`, `sr_op`.
 
+## clock() built-in (IMPLEMENTED — TOK_CLOCK = 89)
+Syntax: `clock` or `clock()` — atom that returns current time in ms (int64) → rax.
+**Lexer:** dword "cloc" = 0x636F6C63 at tok_ident[0..3], then [4]='k', [5]=0. Jumps to `.kclock`.
+**Parser:** `.clockx` in parse_primary — consumes `clock`, optionally consumes `()`, calls `codegen_emit_clock_ms`, sets cur_type=TYPE_INT.
+**Codegen:** `codegen_emit_clock_ms` emits 55-byte inline sequence:
+  `sub rsp,16 | mov eax,228 | mov edi,1 | mov rsi,rsp | syscall`
+  `| mov r8,[rsp] | mov r9,[rsp+8] | add rsp,16`
+  `| imul r8,r8,1000 | mov rax,r9 | xor edx,edx | mov ecx,1000000 | idiv rcx | add rax,r8`
+  Result = tv_sec×1000 + tv_nsec/1000000. Clobbers rax/rdi/rsi/rcx/rdx/r8/r9; preserves r14/r15/rbx.
+**No prescan blob needed** — fully inline, no runtime blob dependency.
+**CRITICAL NASM BUG TO AVOID:** `mov al, 0xXX; call emit_b` is a comment after `;`. Every instruction must be on its own line. See rex-v5-arch NASM Semicolon Bug entry.
+**Benchmark use:** B1/B10/B11 .rex files use `int :t0 = clock()` ... `output t1 - t0` as last line. run_suite.sh uses `run3_rex_internal` (extracts `tail -1`) for those benchmarks.
+
 ## edgecases/ folder
 Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-34, 37.
 

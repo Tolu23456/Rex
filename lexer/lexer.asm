@@ -861,6 +861,15 @@ lexer_classify:
     cmp byte [tok_ident+3], 0
     je .kcap
 .ncap:
+    ; "clock" → "cloc"=0x636F6C63 + 'k'=0x6B at [4], null at [5]
+    cmp eax, 0x636F6C63
+    jne .nclock
+    cmp byte [tok_ident+4], 'k'
+    jne .nclock
+    cmp byte [tok_ident+5], 0
+    jne .nclock
+    jmp .kclock
+.nclock:
     cmp eax, 0x00007369
     jne .nis
     cmp byte [tok_ident+2], 0
@@ -1087,6 +1096,9 @@ lexer_classify:
     ret
 .kcap:
     mov byte [tok_type], TOK_CAP
+    ret
+.kclock:
+    mov byte [tok_type], TOK_CLOCK
     ret
 .kis:
     mov byte [tok_type], TOK_IS

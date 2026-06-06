@@ -49,6 +49,7 @@ extern codegen_emit_inc_var, codegen_emit_dec_var
 extern codegen_emit_swap_vars
 extern codegen_emit_abs_rax
 extern codegen_emit_cap_rax
+extern codegen_emit_clock_ms
 extern codegen_set_for_step
 extern codegen_push_loop_else_flag, codegen_pop_loop_else_flag
 extern codegen_emit_each_start, codegen_emit_each_end
@@ -304,6 +305,8 @@ parse_factor:
     je .absx
     cmp al, TOK_CAP
     je .capx
+    cmp al, TOK_CLOCK
+    je .clockx
     ; default: zero + advance past unknown token (#35)
     call lexer_next
     mov rdi, 0
@@ -634,6 +637,19 @@ parse_factor:
     call codegen_emit_cap_rax
     mov byte [cur_type], TYPE_INT
     call lexer_next
+    jmp .done
+.clockx:
+    ; clock / clock() — emit inline clock_gettime(CLOCK_MONOTONIC) → ms in rax
+    call lexer_next                     ; consume 'clock'
+    cmp byte [tok_type], TOK_LPAREN
+    jne .clock_noparen
+    call lexer_next                     ; consume '('
+    cmp byte [tok_type], TOK_RPAREN
+    jne .clock_noparen
+    call lexer_next                     ; consume ')'
+.clock_noparen:
+    call codegen_emit_clock_ms
+    mov byte [cur_type], TYPE_INT
     jmp .done
 .done:
     pop r13

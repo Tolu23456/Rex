@@ -83,6 +83,12 @@ c_time_ms() {
     "$bin" 2>/dev/null | grep -oP '(?<=time=)[\d.]+' | head -1
 }
 
+# For Rex programs that print their internal elapsed ms as the last output line.
+rex_int_ms() {
+    local bin="$1"
+    "$bin" 2>/dev/null | tail -1
+}
+
 # Run 3 times, print each, export REX_BEST / REX_AVG (float strings).
 run3_rex() {
     local label="$1" bin="$2"
@@ -94,6 +100,21 @@ run3_rex() {
     local best avg
     best=$(echo "$t1 $t2 $t3" | awk '{b=$1; if($2<b)b=$2; if($3<b)b=$3; printf "%.2f",b}')
     avg=$(echo  "$t1 $t2 $t3" | awk '{printf "%.2f",($1+$2+$3)/3}')
+    echo "    best=${best} ms  avg=${avg} ms"
+    REX_BEST=$best; REX_AVG=$avg
+}
+
+# Rex programs with internal clock() timing — reads last output line as ms.
+run3_rex_internal() {
+    local label="$1" bin="$2"
+    echo "  Rex — $label (internal clock)"
+    local t1 t2 t3
+    t1=$(rex_int_ms "$bin"); echo "    run1: ${t1} ms"
+    t2=$(rex_int_ms "$bin"); echo "    run2: ${t2} ms"
+    t3=$(rex_int_ms "$bin"); echo "    run3: ${t3} ms"
+    local best avg
+    best=$(echo "$t1 $t2 $t3" | awk '{b=$1; if($2<b)b=$2; if($3<b)b=$3; printf "%.0f",b}')
+    avg=$(echo  "$t1 $t2 $t3" | awk '{printf "%.0f",($1+$2+$3)/3}')
     echo "    best=${best} ms  avg=${avg} ms"
     REX_BEST=$best; REX_AVG=$avg
 }
@@ -120,11 +141,15 @@ run3_c() {
 declare -a BN RT CT RB CB
 
 run_bench() {
-    local idx=$1 name="$2" rex_bin="$3" c_bin="$4"
+    local idx=$1 name="$2" rex_bin="$3" c_bin="$4" rex_mode="${5:-wall}"
     echo "------------------------------------------------------------"
     echo " Benchmark $name"
     echo "------------------------------------------------------------"
-    run3_rex "$name" "$rex_bin"
+    if [ "$rex_mode" = "internal" ]; then
+        run3_rex_internal "$name" "$rex_bin"
+    else
+        run3_rex "$name" "$rex_bin"
+    fi
     run3_c   "$name" "$c_bin"
     BN[$idx]="$name"
     RT[$idx]=$REX_BEST
@@ -133,7 +158,7 @@ run_bench() {
 }
 
 run_bench 0 "B1 Arithmetic Throughput (1B iters)" \
-    "$SUITE_DIR/b1_arith_rex" "$SUITE_DIR/b1_arith_c"
+    "$SUITE_DIR/b1_arith_rex" "$SUITE_DIR/b1_arith_c" internal
 
 run_bench 1 "B3 Function Call Overhead (200M calls)" \
     "$SUITE_DIR/b3_calls_rex" "$SUITE_DIR/b3_calls_c"
@@ -148,10 +173,10 @@ run_bench 4 "B9 Dynamic Array Growth (1M pushes)" \
     "$SUITE_DIR/b9_dynarray_rex" "$SUITE_DIR/b9_dynarray_c"
 
 run_bench 5 "B10 Multiply-only fold (1B iters x*3)" \
-    "$SUITE_DIR/b10_mul_only_rex" "$SUITE_DIR/b10_mul_only_c"
+    "$SUITE_DIR/b10_mul_only_rex" "$SUITE_DIR/b10_mul_only_c" internal
 
 run_bench 6 "B11 Add-only fold (1B iters x+7)" \
-    "$SUITE_DIR/b11_add_only_rex" "$SUITE_DIR/b11_add_only_c"
+    "$SUITE_DIR/b11_add_only_rex" "$SUITE_DIR/b11_add_only_c" internal
 
 # ── Summary table ─────────────────────────────────────────────────
 echo "============================================================"
@@ -169,16 +194,13 @@ for i in 0 1 2 3 4 5 6; do
 
     # Determine winner and ratio using awk
     result=$(awk -v r="$local_rex" -v c="$local_c" 'BEGIN {
-        if (r+0 == 0 || c+0 == 0) { print "tie 1.00x"; exit }
-        if (r < c) {
-            ratio = c / r
-            printf "Rex %.2fx\n", ratio
-        } else if (c < r) {
-            ratio = r / c
-            printf "C %.2fx\n", ratio
-        } else {
-            print "tie 1.00x"
-        }
+        r = r+0; c = c+0
+        if (r == 0 && c == 0) { print "tie 1.00x"; exit }
+        if (r == 0 && c > 0)  { printf "Rex >%.0fx\n", c/0.5; exit }
+        if (c == 0 && r > 0)  { printf "C >%.0fx\n",   r/0.5; exit }
+        if (r < c) { printf "Rex %.2fx\n", c/r; exit }
+        if (c < r) { printf "C %.2fx\n",   r/c; exit }
+        print "tie 1.00x"
     }')
     winner=$(echo "$result" | awk '{print $1}')
     ratio=$(echo "$result" | awk '{print $2}')
