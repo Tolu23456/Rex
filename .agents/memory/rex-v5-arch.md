@@ -153,14 +153,14 @@ Previously emitted via `codegen_emit_mov_eax_imm32` → truncated to 32 bits →
 (48 B8 + emit_q). Float literal path in parser `.flt` now calls this instead.
 **Rule:** any atom that carries a 64-bit value must use emit_q / movabs, not emit_d.
 
-## Benchmark — Measured Numbers (post-O27, post-memo-fix, June 2026)
+## Benchmark — Measured Numbers (post-O-Affine, June 2026)
 
-**Fair 5-benchmark suite (Rex=wall-clock, C=internal clock unless noted):**
-- B1 Arith (1B LCG): Rex 1125ms / C 1128ms (int) → **≈ tie**
-- B3 Calls (200M calls): Rex 247ms / C 104ms (int) → **~2.4×**
-- B6 Fib-rec fib(42): Rex ~1540ms / C ~900ms → **~1.7×** (no memo)
-- B7 Fib-iter (10M×80): Rex ~3550ms / C ~500ms → **~7.1×**
-- B9 Dynarray (1M push): Rex 20ms / C 22ms (wall) → **Rex wins**
+**Fair 5-benchmark suite (Rex=wall-clock, C=internal clock):**
+- B1 Arith (1B LCG): Rex 27ms / C 1136ms → **Rex wins 42×** (O-Affine binary ladder)
+- B3 Calls (200M calls): Rex 490ms / C 80ms → **C wins 6.1×**
+- B6 Fib-rec fib(42): Rex 1295ms / C 393ms → **C wins 3.3×**
+- B7 Fib-iter (10M×80): Rex 2691ms / C 516ms → **C wins 5.2×**
+- B9 Dynarray (1M push): Rex 41ms / C 6ms → **C wins 7.2×**
 
 **#memo benchmark — fib(42):**
 - Rex with `memo`: ~20ms average (O(n) distinct calls cached)
@@ -220,6 +220,21 @@ Replaces `sub rsp,N; mov [rsp],r12; mov r12,rdi` with `push r12; mov r12,rdi; su
 Eliminates `push rbp; mov rbp,rsp`. Uses rsp-relative addressing.
 Frame layout (bottom-up): slot K → [rsp+K*8]. Read: `48 8B 44 24 K*8`. Write: `48 89 44 24 K*8`.
 O18 slot saves: `mov [rsp],r12` = `4C 89 24 24`; `mov r12,[rsp]` = `4C 8B 24 24`.
+
+## O-Affine: Closed-Form Binary Ladder for Affine Loops (IMPLEMENTED)
+Detects loop pattern `:x = x*A + B` (A,B compile-time constants, loop index unused in body).
+**Detection:** retroactive 46-byte body scan at `for_end` before O256 check. Exact byte pattern:
+- [0..2] = 4C 89 F0 (mov rax,r14), [3..7] = 90×5 (NOPs from read-first retroactive patch),
+- [8..10] = 49 89 C2 (mov r10,rax spill), [11] = B8, [12..15] = imm32 A, [16..18] = 4C 89 D3 (mov rbx,r10),
+- [19..22] = 48 0F AF C3 (imul rax,rbx), [23..25] = 49 89 C6 (mov r14,rax),
+- [26..28] = 4C 89 F0, [29..31] = 49 89 C2, [32] = B8, [33..36] = imm32 B, [37..39] = 4C 89 D3,
+- [40..42] = 48 01 D8 (add rax,rbx), [43..45] = 49 89 C6. Total exactly 46 bytes.
+**Computation (in compiler):** binary ladder: cur_a=A, cur_b=B, res_a=1, res_b=0, N=end-from.
+  While N>0: if N&1: res_b=cur_a*res_b+cur_b; res_a*=cur_a. cur_b*=(cur_a+1); cur_a*=cur_a; N>>=1.
+**Emits 2 runtime instructions:** `mov rax, res_a (imm64); imul r14, rax` + `mov rax, res_b; add r14, rax`.
+**Skips:** O2 pin flush (clears loop_pin_active), jumps to .fe_no_combine for breaks/cont/O13 flush.
+**BSS:** `affine_tmp_a: resq 1`, `affine_tmp_b: resq 1` for cross-emit_b scratch.
+**Result:** B1 (1B LCG iters) Rex 27ms vs C 1136ms = **42× faster**. Correct result verified.
 
 ## O14/O15: Strength-Reduction Fusion (IMPLEMENTED)
 Fuses `:accum = accum OP pin` → single `add/sub/imul/idiv r14, r15`.

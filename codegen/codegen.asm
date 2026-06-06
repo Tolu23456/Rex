@@ -157,6 +157,9 @@ memo_jge_patch:      resq 1
 memo_je_patch:       resq 1
 ; O24: 128× loop unrolling with 128 virtual accumulators (closed-form: 128·i + 8128 per pass)
 o24_active:          resb 1
+; O-Affine: closed-form binary ladder for affine loops (:x = x*A + B, no loop-index use)
+affine_tmp_a:        resq 1   ; binary ladder result A^N mod 2^64
+affine_tmp_b:        resq 1   ; binary ladder result B*(A^N-1)/(A-1) mod 2^64
 ; O29: r13 protocol expr-spill register — inside a 1-param push-style proto,
 ; dedicate r13 (callee-saved) as the depth-0 expression spill register instead of
 ; the caller-saved r10. Eliminates push r10/pop r10 around nested protocol calls
@@ -1215,6 +1218,182 @@ codegen_emit_for_end:
     call codegen_patch_for_skips
     cmp r14, 1
     jne .fe_pin_step
+    ; O-Affine: closed-form binary ladder for affine loops.
+    ; Detects the 46-byte body pattern: `:x = x*A + B` (A,B compile-time constants,
+    ; loop index not used). Computes x_N = A^N*x_0 + B*(A^N-1)/(A-1) mod 2^64 via
+    ; binary ladder in the compiler, then emits 2 runtime instructions replacing the loop.
+    cmp byte [loop_accum_active], 0
+    je .fe_no_affine
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 46
+    jne .fe_no_affine
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    ; Verify: [0..2] = 4C 89 F0 (mov rax, r14 — O13 accumulator read)
+    cmp byte [rcx+rdx+0], 0x4C
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+1], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+2], 0xF0
+    jne .fe_no_affine
+    ; [3..7] = 90 90 90 90 90 (5 NOPs from retroactive read-first patch)
+    cmp byte [rcx+rdx+3], 0x90
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+7], 0x90
+    jne .fe_no_affine
+    ; [8..10] = 49 89 C2 (mov r10, rax — spill LHS before loading literal)
+    cmp byte [rcx+rdx+8], 0x49
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+9], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+10], 0xC2
+    jne .fe_no_affine
+    ; [11] = B8 (mov eax, imm32 — load constant A)
+    cmp byte [rcx+rdx+11], 0xB8
+    jne .fe_no_affine
+    ; [16..18] = 4C 89 D3 (mov rbx, r10 — restore LHS to rbx)
+    cmp byte [rcx+rdx+16], 0x4C
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+17], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+18], 0xD3
+    jne .fe_no_affine
+    ; [19..22] = 48 0F AF C3 (imul rax, rbx)
+    cmp byte [rcx+rdx+19], 0x48
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+20], 0x0F
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+21], 0xAF
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+22], 0xC3
+    jne .fe_no_affine
+    ; [23..25] = 49 89 C6 (mov r14, rax — O13 accumulator store)
+    cmp byte [rcx+rdx+23], 0x49
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+24], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+25], 0xC6
+    jne .fe_no_affine
+    ; [26..28] = 4C 89 F0 (mov rax, r14 — second accumulator read)
+    cmp byte [rcx+rdx+26], 0x4C
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+27], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+28], 0xF0
+    jne .fe_no_affine
+    ; [29..31] = 49 89 C2 (mov r10, rax — spill)
+    cmp byte [rcx+rdx+29], 0x49
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+30], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+31], 0xC2
+    jne .fe_no_affine
+    ; [32] = B8 (mov eax, imm32 — load constant B)
+    cmp byte [rcx+rdx+32], 0xB8
+    jne .fe_no_affine
+    ; [37..39] = 4C 89 D3 (mov rbx, r10 — restore)
+    cmp byte [rcx+rdx+37], 0x4C
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+38], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+39], 0xD3
+    jne .fe_no_affine
+    ; [40..42] = 48 01 D8 (add rax, rbx)
+    cmp byte [rcx+rdx+40], 0x48
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+41], 0x01
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+42], 0xD8
+    jne .fe_no_affine
+    ; [43..45] = 49 89 C6 (mov r14, rax — second store)
+    cmp byte [rcx+rdx+43], 0x49
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+44], 0x89
+    jne .fe_no_affine
+    cmp byte [rcx+rdx+45], 0xC6
+    jne .fe_no_affine
+    ; Pattern confirmed. Extract A (at body+12) and B (at body+33) as zero-extended imm32.
+    mov r8d, dword [rcx+rdx+12]     ; r8  = A (single-step multiply coefficient)
+    mov r9d, dword [rcx+rdx+33]     ; r9  = B (single-step add offset)
+    ; N = end_val - from_val
+    mov r10, [for_rotation_end_val]
+    sub r10, [for_rotation_from_val] ; r10 = N (iteration count)
+    ; Binary ladder — computes in the compiler (not emitted):
+    ;   cur_a = A  (r8)   cur_b = B  (r9)
+    ;   res_a = 1  (r11)  res_b = 0  (rbx)
+    ; while N > 0:
+    ;   if N & 1: res_b = cur_a*res_b + cur_b; res_a = cur_a*res_a
+    ;   cur_b = cur_b*(cur_a+1); cur_a = cur_a^2; N >>= 1
+    ; Result: x_N = res_a * x_0 + res_b
+    push rbx
+    mov r11, 1
+    xor ebx, ebx
+.affine_ladder:
+    test r10, r10
+    jz .affine_ladder_done
+    test r10, 1
+    jz .affine_ladder_even
+    imul rbx, r8
+    add rbx, r9
+    imul r11, r8
+.affine_ladder_even:
+    lea rax, [r8+1]
+    imul r9, rax
+    imul r8, r8
+    shr r10, 1
+    jmp .affine_ladder
+.affine_ladder_done:
+    mov [affine_tmp_a], r11     ; A^N mod 2^64
+    mov [affine_tmp_b], rbx     ; B_N mod 2^64
+    pop rbx
+    ; Rewind output to body start — erase the 46-byte loop body
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    ; Emit replacement: if res_a != 1: mov rax, res_a (imm64) + imul r14, rax
+    mov r11, [affine_tmp_a]
+    cmp r11, 1
+    je .affine_skip_mul
+    mov al, 0x48                ; mov rax, imm64 = 48 B8 <8 bytes>
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, [affine_tmp_a]
+    call emit_q
+    mov al, 0x4C                ; imul r14, rax = 4C 0F AF F0
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xAF
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+.affine_skip_mul:
+    ; Emit replacement: if res_b != 0: mov rax, res_b (imm64) + add r14, rax
+    mov r11, [affine_tmp_b]
+    test r11, r11
+    jz .affine_skip_add
+    mov al, 0x48                ; mov rax, imm64 = 48 B8 <8 bytes>
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, [affine_tmp_b]
+    call emit_q
+    mov al, 0x49                ; add r14, rax = 49 01 C6
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+.affine_skip_add:
+    ; Patch the forward jge guard to skip our replacement if N=0
+    call codegen_patch_jump
+    ; Clear O2 pin so the pin-flush (mov [i_addr],r15) is suppressed —
+    ; r15 was never incremented so flushing it would write the from_val
+    mov byte [loop_pin_active], 0
+    ; codegen_patch_breaks + codegen_pop_cont + O13 flush happen at .fe_no_combine/.fe_done
+    jmp .fe_no_combine
+.fe_no_affine:
     ; O256: closed-form 256× virtual accumulator folding.
     ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 256 == 0.
     ; Replaces per-iteration add with: sum_delta = 256*i + 32640; i += 256
