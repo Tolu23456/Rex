@@ -1215,6 +1215,74 @@ codegen_emit_for_end:
     call codegen_patch_for_skips
     cmp r14, 1
     jne .fe_pin_step
+    ; O256: closed-form 256× virtual accumulator folding.
+    ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 256 == 0.
+    ; Replaces per-iteration add with: sum_delta = 256*i + 32640; i += 256
+    ; where 32640 = 0+1+...+255 = 255*256/2. Each outer iteration covers 256 logical loop iterations.
+    ; Supersedes O128 and O64 when (end-from) is a multiple of 256.
+    cmp byte [loop_accum_active], 0
+    je .fe_no_o256
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    cmp byte [rcx+rdx+0], 0x4D        ; add r14,r15 byte 0
+    jne .fe_no_o256
+    cmp byte [rcx+rdx+1], 0x01        ; add r14,r15 byte 1
+    jne .fe_no_o256
+    cmp byte [rcx+rdx+2], 0xFE        ; add r14,r15 byte 2
+    jne .fe_no_o256
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 3                         ; body must be exactly 3 bytes
+    jne .fe_no_o256
+    mov rax, [for_rotation_end_val]
+    sub rax, [for_rotation_from_val]
+    test rax, 255                      ; (end-from) % 256 == 0?
+    jnz .fe_no_o256
+    ; O256 applies — rewind out_idx to for_rotation_body_pc and emit closed-form.
+    ; Hot loop body: mov rax,r15 + shl rax,8 + add rax,32640 + add r14,rax + add r15,256
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    ; mov rax, r15 = 4C 89 F8  (REX.W=1 REX.R=1; mov r15→rax)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    ; shl rax, 8 = 48 C1 E0 08  (rax *= 256)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov al, 0x08
+    call emit_b
+    ; add rax, 32640 = 48 05 80 7F 00 00  (0+1+...+255 = 32640 = 0x7F80)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    mov eax, 32640
+    call emit_d
+    ; add r14, rax = 4B 01 C6  (REX.W=1 REX.B=1; mod=11 reg=000=rax rm=110=r14)
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    ; add r15, 256 = 49 81 C7 00 01 00 00  (REX.W=1 REX.B=1; add r15, imm32=256)
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov eax, 256
+    call emit_d
+    jmp .fe_pin_jmp        ; emit cmp r15,end; jl body_start
+.fe_no_o256:
     ; O128: closed-form 128× virtual accumulator folding.
     ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 128 == 0.
     ; Replaces per-iteration add with: sum_delta = 128*i + 8128; i += 128
