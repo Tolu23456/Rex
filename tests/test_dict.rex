@@ -1,5 +1,5 @@
 // test_dict.rex — dictionary type: declare, set, get
-dict d
+dict[int] d
 d["hello"] = 42
 d["world"] = 99
 

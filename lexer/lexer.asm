@@ -494,6 +494,100 @@ lexer_next:
     mov rcx, [lex_pos]
     mov rdi, [lex_src]
     xor rbx, rbx
+    ; peek: if first char is '0' and next is 'b'/'B'/'x'/'X'/'o'/'O' → radix literal
+    cmp rcx, [lex_len]
+    jge .in_l
+    movzx eax, byte [rdi+rcx]
+    cmp al, '0'
+    jne .in_l                  ; not '0' → normal decimal
+    lea r9, [rcx+1]
+    cmp r9, [lex_len]
+    jge .in_l                  ; only one char, just '0'
+    movzx eax, byte [rdi+rcx+1]
+    cmp al, 'b'
+    je .pin_bin
+    cmp al, 'B'
+    je .pin_bin
+    cmp al, 'x'
+    je .pin_hex
+    cmp al, 'X'
+    je .pin_hex
+    cmp al, 'o'
+    je .pin_oct
+    cmp al, 'O'
+    je .pin_oct
+    jmp .in_l                  ; plain '0...' decimal
+.pin_bin:
+    add rcx, 2                 ; skip '0b'
+.bin_l:
+    cmp rcx, [lex_len]
+    jge .in_d
+    movzx eax, byte [rdi+rcx]
+    cmp al, '0'
+    je .bin_0
+    cmp al, '1'
+    je .bin_1
+    jmp .in_d
+.bin_0:
+    shl rbx, 1
+    inc rcx
+    jmp .bin_l
+.bin_1:
+    shl rbx, 1
+    or rbx, 1
+    inc rcx
+    jmp .bin_l
+.pin_hex:
+    add rcx, 2                 ; skip '0x'
+.hex_l:
+    cmp rcx, [lex_len]
+    jge .in_d
+    movzx eax, byte [rdi+rcx]
+    cmp al, '0'
+    jl .hex_d
+    cmp al, '9'
+    jle .hex_digit
+    cmp al, 'a'
+    jl .hex_alpha_up
+    cmp al, 'f'
+    jle .hex_lower
+    jmp .hex_d
+.hex_alpha_up:
+    cmp al, 'A'
+    jl .hex_d
+    cmp al, 'F'
+    jg .hex_d
+    sub al, 'A' - 10
+    jmp .hex_acc
+.hex_lower:
+    sub al, 'a' - 10
+    jmp .hex_acc
+.hex_digit:
+    sub al, '0'
+.hex_acc:
+    shl rbx, 4
+    movzx rax, al
+    or rbx, rax
+    inc rcx
+    jmp .hex_l
+.hex_d:
+    jmp .in_d
+.pin_oct:
+    add rcx, 2                 ; skip '0o'
+.oct_l:
+    cmp rcx, [lex_len]
+    jge .in_d
+    movzx eax, byte [rdi+rcx]
+    cmp al, '0'
+    jl .in_d
+    cmp al, '7'
+    jg .in_d
+    sub al, '0'
+    shl rbx, 3
+    movzx rax, al
+    or rbx, rax
+    inc rcx
+    jmp .oct_l
 .in_l:
     cmp rcx, [lex_len]
     jge .in_d

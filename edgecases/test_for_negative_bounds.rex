@@ -1,7 +1,6 @@
-// Edge case: negative for-loop bounds (issue #20 — now fixed via parse_expr)
-// Before fix: tok_int was uint64; a unary minus in range position was discarded,
-// so for :i in -5..5 started at 5, not -5.
-// After fix: parse_expr handles TOK_MINUS as unary negation.
+// Edge case: negative for-loop bounds (issue #20 — fixed via parse_expr)
+// Parser requires ':' on the loop variable (mutation sigil).
+// 'step' comes AFTER the range: for :i in start..end step N
 
 // Negative start
 for :i in -5..5:
@@ -11,14 +10,12 @@ for :i in -5..5:
 for :j in -3..-1:
     output j    // expected: -3 -2
 
-// Expression bounds
+// Expression bounds with step
 int lo = -10
 int hi = 10
-for :k step 5 in lo..hi:
+for :k in lo..hi step 5:
     output k    // expected: -10 -5 0 5
 
-// Negative step (counting down) — not natively supported by syntax but
-// verify that negative bounds with positive step terminates immediately
-// if start >= end
+// Empty range (start >= end) — should print nothing
 for :m in 5..3:
-    output m    // expected: nothing (empty range, 5 >= 3)
+    output m
