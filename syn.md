@@ -301,24 +301,37 @@ int n
 
 ---
 
-## Type Casting ✅
+## Type Casting ✅ / 📋
+
+Cast functions are global. They look like function calls — no `.` needed.
+The type name IS the cast function.
+
+| Cast | From | Notes |
+|---|---|---|
+| `int(x)` | `float`, `str`, `char`, `byte`, `bool` | Float truncates toward zero; str parses decimal |
+| `float(x)` | `int`, `str` | str parses decimal notation |
+| `str(x)` | `int`, `float`, `bool`, `char`, `byte` | Human-readable string representation |
+| `char(x)` | `int`, `byte` | Interprets as UTF-8 code point |
+| `byte(x)` | `int`, `char` | Low 8 bits |
+| `bool(x)` | `int` | 0 → `false`, non-zero → `true` |
 
 ```rex
 float f = 3.7
-int i
-:i = int(f)         // cvttsd2si — truncates toward zero
+int i = int(f)          // 3 — truncates toward zero (cvttsd2si)
 
 int n = 5
-float g
-:g = float(n)       // cvtsi2sd
-```
+float g = float(n)      // 5.0 (cvtsi2sd)
 
-### String cast 📋
-Convert any value to its string representation.
-```rex
-str s
-:s = str(42)
-:s = str(pi)
+str s = str(42)         // "42"
+str t = str(3.14)       // "3.14"
+str u = str(true)       // "true"
+
+int parsed = int("42")  // 42
+float fp = float("3.14") // 3.14
+
+char c = char(65)       // 'A'
+int code = int('A')     // 65
+byte b = byte(255)      // 0xFF
 ```
 
 ---
@@ -865,9 +878,8 @@ str n
 | `.ends_with(suffix)` | `bool` | True if string ends with suffix |
 | `.replace(old, new)` | `str` | New copy with all occurrences replaced |
 | `.slice(start, end)` | `str` | New substring from index start to end |
-| `.to_int()` | `int` | Parse as integer |
-| `.to_float()` | `float` | Parse as float |
-| `.str()` | `str` | Identity (returns itself) |
+
+> **Parsing strings to numbers uses cast functions:** `int("42")`, `float("3.14")` — not `.to_int()` or `.to_float()`.
 
 ```rex
 str s = "  Hello, World!  "
@@ -885,6 +897,9 @@ output "length: {name.len()}"        // length: 3
 output name.upper()                  // REX
 output name[0]                       // 'R'
 output name.slice(0, 2)              // "Re"
+
+int parsed = int("42")               // cast function — not ".to_int()"
+float fp = float("3.14")             // cast function — not ".to_float()"
 ```
 
 ---
@@ -954,7 +969,8 @@ output z
 | `.abs()` | `float` | Absolute value |
 | `.min(other)` | `float` | Smaller of two |
 | `.max(other)` | `float` | Larger of two |
-| `.str()` | `str` | Convert to string |
+
+> **Type conversions use cast functions, not methods.** Use `str(f)`, `int(f)` — not `.str()` or `.int()`.
 
 ```rex
 float f = 3.7
@@ -968,6 +984,7 @@ float a = 2.5
 float b = 4.0
 output a.min(b)     // 2.5
 output a.max(b)     // 4.0
+output str(a)       // "2.5" — cast function, not method
 ```
 
 ### `int` method reference 📋
@@ -977,16 +994,16 @@ output a.max(b)     // 4.0
 | `.abs()` | `int` | Absolute value |
 | `.min(other)` | `int` | Smaller of two |
 | `.max(other)` | `int` | Larger of two |
-| `.str()` | `str` | Convert to string |
-| `.float()` | `float` | Convert to float |
+
+> **Type conversions use cast functions, not methods.** Use `str(n)`, `float(n)` — not `.str()` or `.float()`.
 
 ```rex
 int n = -5
 output n.abs()      // 5
 output n.min(0)     // -5
 output n.max(0)     // 0
-output n.str()      // "-5"
-output n.float()    // -5.0
+output str(n)       // "-5" — cast function
+output float(n)     // -5.0 — cast function
 ```
 
 ---
@@ -1181,6 +1198,56 @@ All memory management is **block-scoped**. The chosen strategy is active for the
 duration of the indented body and reverts to the enclosing strategy on exit.
 `mm` (allocator) and `gc` (collector) are independent axes — each can be used
 alone or combined in a single `use` block.
+
+### Context Allocator — Design Intent 📋
+
+Rex uses an **implicit context allocator** model. The current `use mm:` block
+sets a thread-local allocator context. Every allocation that happens within that
+block — including allocations inside protocols called from within the block —
+uses that context automatically. No explicit allocator parameter is needed.
+
+```rex
+use mm arena:
+    seq[int] nums       // arena-allocated
+    nums.push(10)
+    @build_graph(nums)  // any allocs inside build_graph also use the arena
+// entire arena freed here in one shot
+```
+
+This is the key idea: **the allocator context flows invisibly through the call
+stack**. The compiler stores the current allocator in a reserved thread-local
+slot (a fast register-resident pointer). Any allocation instruction routes
+through it automatically.
+
+**Nested overrides** are supported — inner blocks shadow the outer context:
+```rex
+use mm arena:
+    seq[int] outer      // arena
+
+    use mm pool[64]:    // inner block switches to pool
+        seq[int] inner  // pool-allocated
+        @tight_loop()   // pool context flows through here
+    // pool freed; back to arena context
+
+    seq[int] back       // arena again
+// arena freed
+```
+
+**Why this matters:** you can write protocols that allocate freely — `.push()`,
+`.split()`, `.map()` — without those protocols needing to know or care what
+allocator they're running under. The caller decides. This eliminates the need
+to thread allocator parameters through every signature.
+
+**Contrast with explicit-parameter style (Zig):**
+```
+// Zig — allocator passed explicitly everywhere
+fn build(allocator: std.mem.Allocator) !ArrayList { ... }
+```
+```rex
+// Rex — allocator set at call site via context
+use mm arena:
+    @build()   // no parameter; context handles it
+```
 
 ---
 
@@ -1536,7 +1603,8 @@ output "quotient={q} remainder={r}"
 | Method | Returns | Notes |
 |---|---|---|
 | `.len()` | `int` | Always fixed — known at compile time |
-| `.str()` | `str` | String representation of all fields |
+
+> Use `str(t)` to get a string representation — cast function, not a method.
 
 ---
 

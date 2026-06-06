@@ -97,6 +97,23 @@ Explicit types always valid and preferred for protocol params and public interfa
 `//` line comment (existing). `/* */` block comment. `///` doc comment (attaches to next prot).
 `#` is NOT a comment — it's the decorator sigil.
 
+## Type Casting
+
+**Global cast functions — no `.` needed. Type name IS the function.**
+`int(x)`, `float(x)`, `str(x)`, `char(x)`, `byte(x)`, `bool(x)`.
+- `int(float)` truncates toward zero. `int(str)` parses decimal.
+- NOT `.str()`, `.float()`, `.to_int()`, `.to_float()` on methods — those are removed.
+- Methods only carry computation logic (`.abs()`, `.min()`, `.sort()`, etc.).
+
+## Context Allocator
+
+Rex uses **implicit context allocator** via `use mm:` blocks.
+- Current allocator stored in a thread-local register-resident slot.
+- All allocations (including inside called protocols) automatically use the active context.
+- Nested `use mm:` blocks shadow the outer context.
+- No explicit allocator parameter threading needed (contrast: Zig's explicit approach).
+- Caller decides the allocator strategy at the call site; callee is unaware.
+
 ## Imports & Modules
 
 `import math` — whole module. `from math import sqrt` — specific identifier.
