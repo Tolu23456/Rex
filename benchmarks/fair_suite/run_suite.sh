@@ -66,14 +66,15 @@ done
 echo ""
 
 # ── Timing helper ─────────────────────────────────────────────────
-# Returns wall-clock milliseconds for a binary (discards stdout).
+# Returns wall-clock milliseconds (float, 2dp) using $EPOCHREALTIME.
+# $EPOCHREALTIME is a bash 5.0+ builtin — no subprocess, no fork overhead.
 wall_ms() {
     local bin="$1"
-    local start end
-    start=$(date +%s%N)
+    local t0 t1
+    t0=$EPOCHREALTIME
     "$bin" > /dev/null
-    end=$(date +%s%N)
-    echo $(( (end - start) / 1000000 ))
+    t1=$EPOCHREALTIME
+    awk "BEGIN{printf \"%.2f\", ($t1-$t0)*1000}"
 }
 
 # Extracts the "time=NNN.NN ms" field that C programs print.
@@ -82,7 +83,7 @@ c_time_ms() {
     "$bin" 2>/dev/null | grep -oP '(?<=time=)[\d.]+' | head -1
 }
 
-# Run N times, echo each result, then echo "best=X avg=Y"
+# Run 3 times, print each, export REX_BEST / REX_AVG (float strings).
 run3_rex() {
     local label="$1" bin="$2"
     echo "  Rex — $label"
@@ -90,12 +91,10 @@ run3_rex() {
     t1=$(wall_ms "$bin"); echo "    run1: ${t1} ms"
     t2=$(wall_ms "$bin"); echo "    run2: ${t2} ms"
     t3=$(wall_ms "$bin"); echo "    run3: ${t3} ms"
-    local best=$t1
-    [ "$t2" -lt "$best" ] && best=$t2
-    [ "$t3" -lt "$best" ] && best=$t3
-    local avg=$(( (t1 + t2 + t3) / 3 ))
+    local best avg
+    best=$(echo "$t1 $t2 $t3" | awk '{b=$1; if($2<b)b=$2; if($3<b)b=$3; printf "%.2f",b}')
+    avg=$(echo  "$t1 $t2 $t3" | awk '{printf "%.2f",($1+$2+$3)/3}')
     echo "    best=${best} ms  avg=${avg} ms"
-    # Export for table
     REX_BEST=$best; REX_AVG=$avg
 }
 
@@ -197,6 +196,7 @@ echo "------------------------------------------------------------"
 printf "  Rex wins: %d    C wins: %d    Ties: %d\n" $rex_wins $c_wins $ties
 echo "------------------------------------------------------------"
 echo ""
-echo "Note: Rex wall-clock times include ~3 ms process startup overhead."
-echo "      C times are internal clock_gettime measurements."
+echo "Note: Rex times = wall-clock via \$EPOCHREALTIME (bash builtin, no fork overhead)."
+echo "      C times = internal clock_gettime (excludes libc/crt0 startup)."
+echo "      Rex ELF startup (bare, no dynamic linker) is ~1-2 ms."
 echo "============================================================"

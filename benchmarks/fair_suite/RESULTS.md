@@ -472,12 +472,12 @@ Both produce: `9215150800219179009` ✓ (= 3^1,000,000,000 mod 2^64, signed)
 
 | Run      | Rex (wall ms) | C (internal ms) |
 |----------|---------------|-----------------|
-| Run 1    | 20            | 669.62          |
-| Run 2    | 22            | 670.30          |
-| Run 3    | 21            | 679.49          |
-| **Best** | **20**        | **669.62**      |
+| Run 1    | 2.55          | 670.38          |
+| Run 2    | 3.11          | 679.11          |
+| Run 3    | 2.52          | 670.51          |
+| **Best** | **2.52**      | **670.38**      |
 
-**Winner: Rex — ~33.5× faster**
+**Winner: Rex — ~266× faster**
 
 Rex emits exactly 2 runtime instructions replacing the entire 1B-iteration loop:
 
@@ -523,10 +523,10 @@ Both produce: `7000000001` ✓ (= 1 + 7 × 1,000,000,000)
 
 | Run      | Rex (wall ms) | C (internal ms) |
 |----------|---------------|-----------------|
-| Run 1    | 21            | 0.00            |
-| Run 2    | 22            | 0.00            |
-| Run 3    | 22            | 0.00            |
-| **Best** | **21**        | **0.00**        |
+| Run 1    | 3.11          | 0.00            |
+| Run 2    | 3.62          | 0.00            |
+| Run 3    | 4.37          | 0.00            |
+| **Best** | **3.11**      | **0.00**        |
 
 **Winner: ≈ Tie** — both compilers eliminate the loop at compile time.
 
@@ -555,19 +555,25 @@ Rex's 21 ms is pure ELF process startup (no dynamic linker). C's 0.00 ms is inte
 
 ### Runtime Performance
 
-| Benchmark                           | Rex Best (ms) | C Best (ms)  | Winner      | Ratio         |
-|-------------------------------------|---------------|--------------|-------------|---------------|
-| B1  Arithmetic Throughput (1B iter) | **20** (wall) | 1338 (int)   | **Rex**     | **~66.9×**    |
-| B3  Function Call Overhead (200M)   | 316 (wall)    | 261 (int)    | **C**       | ~1.21×        |
-| B6  Recursive Fibonacci fib(42)     | 1516 (wall)   | 479 (int)    | **C**       | ~3.16×        |
-| B7  Iterative Fibonacci (10M×fib80) | 1894 (wall)   | 285 (int)    | **C**       | ~6.64×        |
-| B9  Dynamic Array Growth (1M push)  | 32 (wall)     | 4.62 (int)   | **C**       | ~6.93×        |
-| B10 Multiply-only fold (1B × x*3)  | **20** (wall) | 670 (int)    | **Rex**     | **~33.5×**    |
-| B11 Add-only fold (1B × x+7)       | 21 (wall)     | ~0 (int)     | **≈ Tie**   | —             |
+| Benchmark                           | Rex Best (ms) | C Best (ms)  | Winner      | Ratio          |
+|-------------------------------------|---------------|--------------|-------------|----------------|
+| B1  Arithmetic Throughput (1B iter) | **2.21**      | 1338.78      | **Rex**     | **~606×**      |
+| B3  Function Call Overhead (200M)   | 295.87        | 268.25       | **C**       | ~1.10×         |
+| B6  Recursive Fibonacci fib(42)     | 1458.44       | 490.81       | **C**       | ~2.97×         |
+| B7  Iterative Fibonacci (10M×fib80) | 1880.26       | 287.48       | **C**       | ~6.54×         |
+| B9  Dynamic Array Growth (1M push)  | 14.42         | 4.93         | **C**       | ~2.92×         |
+| B10 Multiply-only fold (1B × x*3)  | **2.52**      | 670.38       | **Rex**     | **~266×**      |
+| B11 Add-only fold (1B × x+7)       | 3.11          | ~0.00        | **≈ Tie**   | —              |
 
-Rex times = wall-clock (includes ~3 ms bare-ELF startup, no dynamic linker).
-C times = program's own `clock_gettime` measurement (excludes ~8–10 ms libc/crt0 startup).
-B11: both Rex and GCC -O3 eliminate the loop at compile time; Rex's 21 ms is pure ELF startup.
+Rex times = wall-clock via `$EPOCHREALTIME` bash builtin (no subprocess fork, µs precision).
+C times = program's own `clock_gettime(CLOCK_MONOTONIC)` measurement (excludes libc/crt0 startup).
+B11: both Rex and GCC -O3 eliminate the loop at compile time. Rex's ~3 ms is bare-ELF startup only.
+
+> **Previous figures (20–22 ms for Rex on B1/B10/B11) were a measurement artifact.**
+> The old `wall_ms()` called `date +%s%N` twice per measurement — each `date` invocation
+> forks and execs a subprocess, adding ~9–10 ms each (≈19 ms total overhead baked into
+> every Rex reading). With `$EPOCHREALTIME` (a bash 5.0+ builtin that reads the kernel
+> clock inline), the true times are ~2–3 ms, which is ELF startup + a single `write` syscall.
 
 **History — B3 per-call cost reduction:**
 
@@ -595,7 +601,7 @@ B11: both Rex and GCC -O3 eliminate the loop at compile time; Rex's 21 ms is pur
 
 | Category           | Rex Wins | C Wins | Ties |
 |--------------------|----------|--------|------|
-| Runtime (7 total)  | 3        | 3      | 1    |
+| Runtime (7 total)  | 2        | 4      | 1    |
 | Binary size (7)    | 7        | 0      | 0    |
 
 **History — B1 (Arithmetic Throughput) trajectory:**
@@ -603,7 +609,8 @@ B11: both Rex and GCC -O3 eliminate the loop at compile time; Rex's 21 ms is pur
 | Version          | Rex B1 (ms) | C B1 (ms) | Winner | Notes |
 |------------------|-------------|-----------|--------|-------|
 | Pre-O-Affine     | ~1125       | ~1128     | Tie    | both run the loop |
-| Post-O-Affine    | **~20**     | ~1338     | **Rex 66.9×** | Rex: binary ladder at compile time |
+| Post-O-Affine (old timing) | ~20 | ~1338 | **Rex ~67×** | timing broken: 19ms was `date` fork overhead |
+| Post-O-Affine (fixed timing) | **~2.2** | ~1338 | **Rex ~606×** | `$EPOCHREALTIME` — no subprocess overhead |
 
 ---
 
