@@ -53,3 +53,13 @@ This is Kleene strong three-valued logic — mathematically principled.
 **`err "msg"`** — stderr + exit(1). Already implemented.
 **`input "prompt"`** — prints prompt inline, reads line from stdin, returns `str`.
 **String interpolation** — `{expr}` inside any string literal, automatic, no prefix. `{{` = literal brace. `@` still marks protocol calls inside `{}`.
+
+## Error Handling
+
+**try/except/finally** — Python-style but no exception class hierarchy. Every error is a `str` message from `err`.
+- `except:` — unconditional catch
+- `except msg:` — captures error message as `str msg`
+- `finally:` — always runs (cleanup)
+- `warn` is unaffected (non-fatal, passes through try)
+- Nested try: inner catches first; `err` inside `except` propagates outward
+- Phase 2: guard conditions (`except msg if "x" in msg:`) — deferred

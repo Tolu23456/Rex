@@ -950,6 +950,89 @@ warn "retry {attempt} of 3"
 
 ---
 
+## Structured Error Handling — `try` / `except` / `finally` 📋
+
+Rex uses `try/except/finally` for recoverable errors. Unlike Python, Rex has no
+exception class hierarchy — every error is a message string from `err`. So `except`
+is always unconditional or captures the message as a `str`. `warn` is unaffected
+by `try` — only `err` is intercepted.
+
+### Basic form
+
+```rex
+try:
+    str data = @read_file("config.txt")
+    output "loaded: {data}"
+except:
+    warn "file not found, using defaults"
+finally:
+    output "attempt complete"
+```
+
+- **`try:`** — run this block
+- **`except:`** — runs if `err` was called inside `try` (instead of halting)
+- **`finally:`** — always runs, whether or not an error occurred
+- `except` and `finally` are both optional independently
+
+### Capturing the error message
+
+`except` can bind the message string to a name:
+
+```rex
+try:
+    int n = int(input "Enter a number: ")
+    output "you entered {n}"
+except msg:
+    output "invalid input: {msg}"
+    :n = 0
+```
+
+`msg` is automatically `str`. It is whatever string was passed to `err`.
+
+### `try` / `finally` without `except`
+
+Use when you need guaranteed cleanup but don't intend to recover:
+
+```rex
+try:
+    @open_connection()
+    @do_work()
+finally:
+    @close_connection()    // always runs, even if err fires
+```
+
+### Nested `try` blocks
+
+Inner `try` catches first. Calling `err` inside `except` propagates to the
+next outer `try`.
+
+```rex
+try:
+    try:
+        str data = @load_primary()
+    except:
+        str data = @load_backup()    // fallback attempt
+    @process(data)
+except msg:
+    err "completely failed: {msg}"   // re-raise as fatal
+```
+
+### `warn` passes through
+
+`warn` is non-fatal and is never intercepted by `except`. It behaves identically
+inside and outside `try` blocks.
+
+### When to use what
+
+| Situation | Tool |
+|---|---|
+| Unrecoverable bug | `err "msg"` with no `try` |
+| Expected failure, can recover | `try / except` |
+| Guaranteed cleanup | `try / finally` |
+| Non-fatal log | `warn "msg"` |
+
+---
+
 ## Memory Allocator Contexts
 
 All memory management is **block-scoped**. The chosen strategy is active for the
