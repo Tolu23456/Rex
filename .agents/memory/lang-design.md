@@ -44,3 +44,12 @@ This is Kleene strong three-valued logic — mathematically principled.
 **Multiple returns — tuples.** `-> (int, int)` with destructuring: `int lo, int hi` then `:lo, :hi = @minmax(nums)`. Type mismatch = compile-time error.
 **Decorators — `#` sigil, one per line, stacked above `prot`.** `#` chosen over `@` (already a call prefix). No inline lists.
 **Decorator set:** `#memo`, `#pure`, `#total` (algorithmic); `#inline`, `#noinline`, `#hot`, `#cold` (performance); `#safe`, `#unsafe` (safety). Combine freely, order doesn't matter.
+
+## Output / I/O
+
+**`output x`** — stdout + newline. Keep the name (Rex-specific, unambiguous).
+**`show x`** — stdout, no newline. For inline/incremental printing.
+**`warn "msg"`** — stderr, no exit. Non-fatal logging.
+**`err "msg"`** — stderr + exit(1). Already implemented.
+**`input "prompt"`** — prints prompt inline, reads line from stdin, returns `str`.
+**String interpolation** — `{expr}` inside any string literal, automatic, no prefix. `{{` = literal brace. `@` still marks protocol calls inside `{}`.

@@ -858,9 +858,11 @@ on in new code.
 
 ---
 
-## Output ✅
+## Output ✅ / 📋
 
-Print any value with `output`. Rex routes to the correct printer based on the variable's declared type.
+### `output` — print with newline ✅
+Print any value followed by a newline. Rex auto-dispatches to the correct printer
+based on the variable's declared type.
 ```rex
 output 42
 output x
@@ -871,18 +873,80 @@ output c           // char: prints the character
 output b           // byte: prints the numeric value
 ```
 
----
-
-## Error Handling ✅
-
-Emit a runtime error message to stderr and halt:
+### `show` — print without newline 📋
+Like `output` but no trailing newline. Use when building a line incrementally.
 ```rex
-err "something went wrong"
+show "Loading"
+show "..."
+output "done"      // newline lands here — prints: Loading...done
 ```
 
-Passing a non-string argument to `err` is handled gracefully: the value is
-printed using its type's printer, then the process exits with code 1. Full
-`int → str` conversion in error messages requires the `str(expr)` cast (planned).
+### String interpolation — `{expr}` 📋
+Any string literal can embed expressions inside `{ }`. No prefix needed — all Rex
+strings support interpolation. The expression is evaluated and converted to its
+string representation at runtime.
+
+```rex
+output "x is {x} and y is {y}"
+output "result: {a + b}"
+output "fib(10) = {@fib(10)}"       // @ still marks protocol calls inside {}
+output "name: {name}, age: {age}"
+output "half of {n} is {n / 2}"
+```
+
+**Rule:** `{` in a string literal opens an interpolation block. Any valid Rex
+expression is allowed inside — arithmetic, protocol calls, casts, boolean ops.
+`}` closes it. A literal `{` is written `{{`.
+
+```rex
+output "{{not interpolated}}"    // prints: {not interpolated}
+output "{x * x} squared"         // prints: 25 squared  (if x == 5)
+```
+
+---
+
+## I/O ✅ / 📋
+
+### `input` — read from stdin 📋
+Prints a prompt (no trailing newline — cursor stays inline), reads until `\n`,
+returns a `str`.
+
+```rex
+str name = input "Enter your name: "
+output "Hello, {name}!"
+
+int age = int(input "Enter your age: ")   // cast after reading
+output "You are {age} years old."
+```
+
+---
+
+## Error Handling ✅ / 📋
+
+### `err` — fatal error to stderr ✅
+Emit a message to stderr and halt with exit code 1.
+```rex
+err "something went wrong"
+err "expected positive value, got {x}"    // interpolation works here too
+```
+
+### `warn` — non-fatal warning to stderr 📋
+Like `err` but does **not** exit. Use for recoverable conditions or diagnostic
+logging that shouldn't stop the program.
+```rex
+warn "cache miss — falling back to disk"
+warn "retry {attempt} of 3"
+```
+
+### The complete stderr/stdout picture
+
+| Keyword | Destination | Newline | Exits? |
+|---|---|---|---|
+| `output x` | stdout | ✅ yes | no |
+| `show x` | stdout | ✗ no | no |
+| `warn "msg"` | stderr | ✅ yes | no |
+| `err "msg"` | stderr | ✅ yes | yes — code 1 |
+| `input "prompt"` | stdin (read) | — | no |
 
 ---
 
