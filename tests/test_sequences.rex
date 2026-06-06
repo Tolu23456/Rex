@@ -1,9 +1,13 @@
 // test_sequences.rex — dynamic sequence: declare, push, len, pop
+// Tests both push syntaxes: old-style `push seq val` and new method-call `seq.push(val)`
 seq nums
 
+// Old-style push syntax (still supported)
 push nums 10
 push nums 20
-push nums 30
+
+// New method-call push syntax
+nums.push(30)
 
 // Output the length
 int n

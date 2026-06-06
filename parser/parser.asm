@@ -54,6 +54,7 @@ extern codegen_push_loop_else_flag, codegen_pop_loop_else_flag
 extern codegen_emit_each_start, codegen_emit_each_end
 extern codegen_emit_zero_var
 extern codegen_emit_memo_reset
+extern codegen_skip_pin_save
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
 var_count:       resq 1
@@ -87,6 +88,7 @@ for_end_tok:           resb 1       ; static-bounds: tok_type before end parse_e
 for_start_val:         resq 1       ; static-bounds: tok_int before start parse_expr
 for_end_val:           resq 1       ; static-bounds: tok_int before end parse_expr
 for_rollback_idx:      resq 1       ; static-bounds: out_idx before for init code
+cur_call_proto_seq_idx: resq 1     ; O26: seq idx of called proto (saved before parse_expr clobbers)
 section .data
 err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
@@ -389,6 +391,9 @@ parse_factor:
     cmp rax, -1
     je .prt_skip
     mov r12, rax
+    ; O26: save seq_idx before parse_expr calls may overwrite proto_find_seq_idx
+    mov rax, [proto_find_seq_idx]
+    mov [cur_call_proto_seq_idx], rax
     call lexer_next
     mov rbx, [var_count]        ; snapshot var_count for caller-save (Gap-1)
     cmp byte [tok_type], TOK_LPAREN
@@ -454,6 +459,14 @@ parse_factor:
     jne .prt_not_self_recur
     mov byte [proto_is_self_recursive], 1
 .prt_not_self_recur:
+    ; O26: set skip-pin-save flag based on called proto's has_loop flag at offset 46
+    ; If proto has no loop, r15/r14 won't be clobbered — skip save/restore.
+    mov rax, [cur_call_proto_seq_idx]
+    imul rax, PROTO_ENTRY_SIZE
+    lea rdx, [proto_table]
+    movzx eax, byte [rdx + rax + 46]   ; proto_has_loop flag (0=no loops, 1=has loops)
+    xor al, 1                           ; invert: no_loop→skip=1, has_loop→skip=0
+    mov [codegen_skip_pin_save], al
     ; O6: save r10/r11 if live as expression spill regs (noop when depth=0)
     call codegen_emit_expr_spill_save
     ; ── Gap-1 fix: caller-save all in-scope vars before call ─────────────────
@@ -478,6 +491,8 @@ parse_factor:
     call codegen_emit_pop_var_slot
     jmp .prt_cr
 .prt_cr_done:
+    ; O26: clear skip-pin-save flag after save/restore loops complete
+    mov byte [codegen_skip_pin_save], 0
     ; O6: restore r10/r11 after call if they were saved
     call codegen_emit_expr_spill_restore
     movzx ecx, byte [proto_ret_type]
@@ -1053,6 +1068,8 @@ parse_stmt:
     je .unreachable
     cmp al, TOK_ASSERT
     je .assert
+    cmp al, TOK_IDENT
+    je .ident_stmt
     call lexer_next
     jmp .done
 
@@ -1408,6 +1425,14 @@ parse_stmt:
     pop r14
     pop r13
 .for_le_cont:
+    ; O26: mark current proto as having a for-loop (call-site pin-save skip opt)
+    cmp qword [prot_body_depth], 0
+    je .for_no_mark
+    mov rax, [cur_proto_idx]
+    imul rax, PROTO_ENTRY_SIZE
+    lea rcx, [proto_table]
+    mov byte [rcx + rax + 46], 1
+.for_no_mark:
     ; dispatch: static bounds → register-pinned loop, dynamic → memory-based loop
     cmp byte [for_start_tok], TOK_INT_LIT
     jne .for_start_dyn
@@ -1525,6 +1550,14 @@ parse_stmt:
     call parse_expr
     call codegen_emit_test_rax_jz
     call codegen_emit_loop_base
+    ; O26: mark current proto as having a while-loop
+    cmp qword [prot_body_depth], 0
+    je .whl_no_mark
+    mov rax, [cur_proto_idx]
+    imul rax, PROTO_ENTRY_SIZE
+    lea rcx, [proto_table]
+    mov byte [rcx + rax + 46], 1
+.whl_no_mark:
     call lexer_next
     cmp byte [tok_type], TOK_NEWLINE
     jne .whl_enter
@@ -1606,6 +1639,7 @@ parse_stmt:
     mov rbx, [out_idx]
     mov [r13+32], rbx
     mov byte [r13+40], 0
+    mov byte [r13+46], 0    ; clear has_loop flag for new proto
     mov byte [r13+47], 0
     mov rax, [proto_count]
     mov [cur_proto_idx], rax
@@ -2414,6 +2448,39 @@ parse_stmt:
     call lexer_next
     call parse_expr
     mov rdi, r14
+    call codegen_emit_seq_push
+    jmp .done
+
+; ── ident.push(expr) — method-call syntax for seq operations ──────────────────
+; Syntax: data.push(value)
+; Saves ident, peeks for DOT, checks method name, parses (expr), emits seq_push.
+.ident_stmt:
+    lea rdi, [saved_name]
+    lea rsi, [tok_ident]
+    call strcpy
+    call lexer_next
+    cmp byte [tok_type], TOK_DOT
+    jne .done
+    call lexer_next
+    cmp byte [tok_type], TOK_PUSH
+    jne .done
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    lea rdi, [saved_name]
+    call var_find
+    cmp rax, -1
+    je .done
+    sub rsp, 16             ; allocate stack slot (maintains 8-misalign for calls)
+    mov [rsp], rax          ; save var_idx
+    call lexer_next         ; consume LPAREN
+    call parse_expr         ; parse value expression (emits runtime code)
+    cmp byte [tok_type], TOK_RPAREN
+    jne .ident_push_emit
+    call lexer_next         ; consume RPAREN
+.ident_push_emit:
+    mov rdi, [rsp]          ; restore var_idx
+    add rsp, 16
     call codegen_emit_seq_push
     jmp .done
 

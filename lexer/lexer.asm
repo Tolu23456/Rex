@@ -448,7 +448,8 @@ lexer_next:
     jmp .done
 .sch:
     inc qword [lex_pos]
-    jmp .r
+    mov byte [tok_type], TOK_DOT
+    jmp .done
 .pid:
     mov rcx, [lex_pos]
     mov rdi, [lex_src]

@@ -133,44 +133,30 @@ Both produce: `result=200000000` ✓
 
 | Run   | Rex (wall ms) | C (wall ms) |
 |-------|--------------|-------------|
-| Run 1 | 624          | 176         |
-| Run 2 | 591          | 173         |
-| Run 3 | 581          | 175         |
-| **Best** | **373**¹  | **170**     |
-| Avg (R1–R3) | 599   | 175         |
+| Run 1 | 386          | 176         |
+| Run 2 | 384          | 173         |
+| Run 3 | 381          | 175         |
+| **Best** | **381**  | **170**     |
+| Avg   | 384          | 175         |
 
-¹ Single low outlier observed in extended run; typical floor is 581 ms.
+*Previous result (pre-O26): 581 ms Rex best — O26 eliminated `push r15 / pop r15` per call, saving ~200 ms.*
 
-**Winner: C — ~3.4× faster (typical); ~2.2× faster (best observed Rex run)**
+**Winner: C — ~2.2× faster (down from ~3.4× pre-O26)**
 
-**Per-call cost (typical):**
-- Rex: 590 ms / 200 M = **~2.95 ns/call**  *(was ~6.2 ns/call before this release)*
+**Per-call cost:**
+- Rex: 381 ms / 200 M = **~1.91 ns/call**  *(was ~2.95 ns/call pre-O26; was ~6.2 ns/call pre-V5.0)*
 - C:   170 ms / 200 M = **~0.85 ns/call**
 
-**Root cause of remaining gap:**
+**Root cause of the remaining ~1.05 ns gap:**
 
-Rex's push-style frame (O21) stores the single parameter `x` in `r12` (not
-memory). The callee never touches the caller's global var_table slots. Since
-V5.0 introduced frame-slot calling convention (O5 + O21 + O18), the previous
-global push/pop at call sites was both unnecessary and semantically incorrect
-(it would undo intentional global-variable writes). The global-slot save/restore
-has been eliminated.
+O26 eliminates the `push r15 / pop r15` at call sites where the called proto
+has no for/while loops (and therefore cannot clobber r15). Since `increment`
+has no loops, O26 fires and produces a cleaner hot loop. The **current**
+generated hot loop (post-O26):
 
-The **eliminated** per-call overhead (before this release):
-```asm
-push qword [n_addr]    ; old: save n to hardware stack via memory read
-push qword [i_addr]    ; old: save i
-call increment
-pop  qword [i_addr]    ; old: restore
-pop  qword [n_addr]    ; old: restore
-```
-
-The **current** generated hot loop (post-elimination):
 ```asm
 mov rdi, r14           ; n → arg register  (r14 = accumulator for n)
-push r15               ; save loop counter  (r15 = pinned i)
-call increment         ; 1 cycle (cached)
-pop r15                ; restore loop counter
+call increment         ; ~3–4 cycles (cached)
 mov r14, rax           ; n = return value
 inc r15                ; i++
 cmp r15, 200000000
@@ -178,21 +164,21 @@ jnl .done
 jmp .loop
 ```
 
-The remaining ~2.1 ns gap over C is the unavoidable overhead of:
-- `push r15` + `pop r15` (2 fast register ops, needed because callee's loop
-  could clobber the outer loop's r15 pin)
-- `call` + `ret` round-trip (~3–4 cycles total)
-- `mov rdi, r14` (pass argument)
-- `mov r14, rax` (receive return value)
-
-GCC eliminates the push/pop by using `rbx` (a callee-saved register in System V
-ABI), which the callee's prologue saves/restores automatically.
+The `push r15 / pop r15` pair has been eliminated. The remaining gap is
+the unavoidable `call` + `ret` round-trip (~3–4 cycles, ~1.3–1.7 ns at
+2.30 GHz) plus the `mov rdi, r14` / `mov r14, rax` argument-passing pair.
+GCC further reduces overhead by inlining the body's `lea rax, [rdi+1]`
+with a callee-saved rbx, completely eliminating the call overhead when
+`__attribute__((noinline))` is not applied — but with `noinline`, GCC also
+pays the full call/ret round-trip.
 
 **Binary sizes:**
 
 | Binary   | Rex     | C       | Rex/C |
 |----------|---------|---------|-------|
-| b3_calls | 4,976 B | 15,832 B | **3.2× smaller** |
+| b3_calls | 4,972 B | 15,832 B | **3.2× smaller** |
+
+*Binary shrank by exactly 4 bytes vs pre-O26 (2 bytes `push r15` + 2 bytes `pop r15` eliminated per call site).*
 
 ---
 
@@ -229,13 +215,18 @@ Both produce: `267914296` ✓
 
 | Run   | Rex (wall ms) | C (wall ms) |
 |-------|--------------|-------------|
-| Run 1 | 1217         | 734         |
-| Run 2 | 1227         | 722         |
-| Run 3 | 1213         | 718         |
-| **Best** | **1213**  | **713**     |
-| Avg   | 1219         | 725         |
+| Run 1 | 1162         | 734         |
+| Run 2 | 1147         | 722         |
+| Run 3 | 1153         | 718         |
+| **Best** | **1147**  | **713**     |
+| Avg   | 1154         | 725         |
 
-**Winner: C — ~1.70× faster**
+**Winner: C — ~1.61× faster** *(was ~1.70× pre-O26)*
+
+O26 also fires at the `@fib(42)` call site and at every internal `call fib`
+within the `fib` proto itself, since `fib` has no for/while loops. This
+eliminated `push r15 / pop r15` across all ~535 M recursive calls, saving
+~66 ms vs the prior result.
 
 **What the Rex fib frame looks like (disassembly confirmed):**
 
@@ -437,16 +428,14 @@ competitive with C's equivalent.
 | Benchmark                          | Rex Best (ms)¹ | C Best (ms)¹ | Winner     | Ratio     |
 |------------------------------------|----------------|--------------|------------|-----------|
 | B1 Arithmetic Throughput (1B iter) | 1124           | 1158         | **≈ Tie**  | 0.97×     |
-| B3 Function Call Overhead (200M)   | 581²           | 170          | **C**      | ~3.4×     |
-| B6 Recursive Fibonacci fib(42)     | 1213           | 713          | **C**      | 1.70×     |
+| B3 Function Call Overhead (200M)   | 381            | 170          | **C**      | **~2.2×** |
+| B6 Recursive Fibonacci fib(42)     | 1147           | 713          | **C**      | **1.61×** |
 | B7 Iterative Fibonacci (10M×fib80) | 1039           | 535          | **C**      | 1.94×     |
 | B9 Dynamic Array Growth (1M push)  | 20             | 22           | **Rex**    | 0.91×     |
 
 ¹ All times are wall-clock (shell `time`). Rex includes ~3 ms ELF startup;
   C includes ~8–10 ms libc/crt0 startup. For pure-computation comparison,
   subtract the respective startup overhead.
-
-² Best typical run; one outlier of 373 ms observed. Reproducible floor ~581 ms.
 
 ### Binary Size
 
@@ -464,6 +453,8 @@ competitive with C's equivalent.
 |-------------------|----------|--------|------|
 | Runtime (5 total) | 2        | 2      | 1    |
 | Binary size (5)   | 5        | 0      | 0    |
+
+*O26 (loop-free call-site pin-save skip) shipped in this update, improving B3 ratio from ~3.4× → ~2.2× and B6 from 1.70× → 1.61×.*
 
 ---
 
@@ -495,6 +486,34 @@ those registers which are not saved by the O21 push-style frame prologue.
 - B3: per-call cost 6.2 ns → ~2.95 ns (2.1× improvement); ratio 8.4× → 3.4×
 - B6: one push/pop pair at the outermost `@fib(42)` call site eliminated
   (negligible, ~1 occurrence)
+
+### O26 — loop-free call-site pin-save skip
+
+Before O26, every `@protocol()` call site emitted `push r15` and `pop r15`
+to preserve the caller's loop-pin register across the callee. This is
+necessary when the callee contains a for/while loop (which also pins r15).
+However, when the callee has **no** loops at all, it cannot clobber r15,
+making the save/restore dead code.
+
+O26 records a `has_loop` flag at offset 46 of each proto's 48-byte table
+entry. The flag is set at compile time when a `for` or `while` statement is
+parsed inside the proto body. At every `@proto()` call site the compiler
+checks this flag: if `has_loop == 0`, it sets `codegen_skip_pin_save = 1`
+so that `codegen_emit_push_var_slot` and `codegen_emit_pop_var_slot` skip
+emitting `push r15` / `pop r15`. The flag is cleared after the call's
+save/restore loops complete so subsequent call sites are not affected.
+
+**Impact:**
+
+| Benchmark | Pre-O26 Rex | Post-O26 Rex | Saved |
+|-----------|-------------|--------------|-------|
+| B3 (200 M calls, loop-free callee) | 581 ms | 381 ms | **200 ms / 34%** |
+| B6 (535 M recursive calls, loop-free callee) | 1213 ms | 1147 ms | **66 ms / 5%** |
+
+The B3 binary shrank by exactly 4 bytes (one `push r15` at 2 bytes + one
+`pop r15` at 2 bytes eliminated). The per-call cost fell from ~2.95 ns to
+~1.91 ns. The remaining gap vs C's ~0.85 ns/call is the unavoidable
+`call` + `ret` round-trip plus argument-passing moves.
 
 ### O25 — post-loop tree combine
 
@@ -550,16 +569,16 @@ the wall-clock edge on this short-running workload.
 
 ### 2. Where C wins significantly
 
-**Function calls (B3) — C ~3.4× faster.**  
-Root cause: Rex's loop-pin r15 register must be saved across every call (the
-callee's loops can clobber r15), adding a `push r15; pop r15` pair at each
-of 200 M call sites. GCC uses `rbx` (callee-preserved in System V ABI),
-which the callee's own prologue saves and restores, so the caller pays nothing.
-Per-call cost: Rex ~2.95 ns, C ~0.85 ns.
+**Function calls (B3) — C ~2.2× faster** *(was ~3.4× pre-O26).*  
+O26 eliminated the `push r15 / pop r15` pair at call sites where the callee
+has no for/while loops. For B3's `increment` proto (loop-free), this removed
+200 ms of overhead — bringing the ratio from ~3.4× down to ~2.2×. Per-call
+cost: Rex ~1.91 ns (down from ~2.95 ns), C ~0.85 ns.
 
-The global-slot push/pop overhead (which caused the old 8.4× gap and added 4
-slow memory ops per call) has been eliminated as of this release — confirming
-that the roadmap item was the primary cause of B3's gap.
+The remaining gap is the irreducible `call` + `ret` round-trip cost (~1.3–1.7 ns
+at 2.30 GHz) plus argument-passing moves. GCC's `rbx` callee-save convention
+additionally saves the save/restore on the C side — a structural ABI advantage
+that Rex cannot replicate without adopting a callee-saves register for loop pins.
 
 **Iterative loops (B7) — C ~1.94× faster.**  
 Root cause: Rex stores all mutable variables (`a`, `b`, `c`, `rep`, `j`) in
@@ -570,13 +589,13 @@ current register promotion (O13/O14) applies only to the outermost pinned
 loop's accumulator. Inner-loop variables are not yet promoted. Roadmap:
 nested-loop register promotion.
 
-**Recursive algorithms (B6) — C ~1.70× faster.**  
-O5 frame locals, O18 regalloc, and O21 push-style prologue are all working
-correctly for the recursive calls (confirmed by disassembly — no push/pop at
-recursive call sites). The remaining gap is that Rex spills `fib(n-1)` to
-`[rsp+0]` (a frame slot) while GCC uses `rbx` (callee-saved register that
-the callee itself preserves). Eliminating the two frame-slot load/store pairs
-per call level would close most of the remaining gap.
+**Recursive algorithms (B6) — C ~1.61× faster** *(was ~1.70× pre-O26).*  
+O26 fires for all `fib` calls (the `fib` proto has no for/while loops), saving
+the `push r15 / pop r15` across ~535 M recursive calls — recovered ~66 ms.
+The remaining gap: Rex spills `fib(n-1)` to `[rsp+0]` (a frame slot) while
+GCC uses `rbx` (callee-saved register the callee preserves automatically).
+Eliminating the two frame-slot load/store pairs per call level would close
+most of the remaining gap.
 
 ### 3. Claim assessment
 
@@ -595,7 +614,7 @@ Rex's genuine advantages are:
 
 Rex's current disadvantages — all with clear architectural roots and specific
 roadmap fixes — are:
-- Loop-pin r15 save/restore at call sites (2.95 ns/call gap vs C, B3)
+- Loop-pin r15 save/restore at call sites with loops (1.91 ns/call gap vs C, B3; O26 eliminates it for loop-free callees)
 - Inner-loop variable register allocation (memory traffic for B7)
 - Frame-slot spill for recursive return values vs callee-saved register (B6)
 

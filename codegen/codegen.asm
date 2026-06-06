@@ -9,6 +9,7 @@ global codegen_emit_while_start, codegen_emit_while_end
 global codegen_emit_break, codegen_patch_breaks, codegen_emit_loop_base
 global codegen_emit_ret, codegen_emit_mov_eax_imm32, codegen_emit_call_prot
 global codegen_emit_push_var_slot, codegen_emit_pop_var_slot
+global codegen_skip_pin_save
 global codegen_emit_assign_var, codegen_emit_zero_var, codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
 global codegen_emit_mm_switch, codegen_emit_gc_switch
 global codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
@@ -132,6 +133,8 @@ regalloc_cnt:        resb 1
 regalloc_vars:       resb 2
 ; O21: push-style frame — 1-param protocols use push r12/pop r12 instead of sub/add rsp slot
 push_style_frame:    resb 1
+; O26: skip pin/accum reg save at call sites when called proto has no loops
+codegen_skip_pin_save: resb 1
 ; @memo: positions for forward jump patching during memo check emission
 memo_jnz_patch:      resq 1
 memo_jge_patch:      resq 1
@@ -3493,6 +3496,9 @@ codegen_emit_push_var_slot:
     cmp rdi, [loop_pin_var_idx]
     jne .pvs_check_accum
     ; pinned to r15: push r15 = 41 57
+    ; O26: skip if called proto has no loop (r15 won't be clobbered)
+    cmp byte [codegen_skip_pin_save], 0
+    jne .pvs_global
     mov al, 0x41
     call emit_b
     mov al, 0x57
@@ -3503,6 +3509,9 @@ codegen_emit_push_var_slot:
     cmp byte [loop_accum_active], 0
     je .pvs_global
     cmp rdi, [loop_accum_var_idx]
+    jne .pvs_global
+    ; O26: skip if called proto has no loop (r14 won't be clobbered)
+    cmp byte [codegen_skip_pin_save], 0
     jne .pvs_global
     mov al, 0x41
     call emit_b
@@ -3531,6 +3540,9 @@ codegen_emit_pop_var_slot:
     cmp rdi, [loop_pin_var_idx]
     jne .ppv_check_accum
     ; pinned to r15: pop r15 = 41 5F
+    ; O26: skip if called proto has no loop (r15 was never pushed)
+    cmp byte [codegen_skip_pin_save], 0
+    jne .ppv_global
     mov al, 0x41
     call emit_b
     mov al, 0x5F
@@ -3541,6 +3553,9 @@ codegen_emit_pop_var_slot:
     cmp byte [loop_accum_active], 0
     je .ppv_global
     cmp rdi, [loop_accum_var_idx]
+    jne .ppv_global
+    ; O26: skip if called proto has no loop (r14 was never pushed)
+    cmp byte [codegen_skip_pin_save], 0
     jne .ppv_global
     mov al, 0x41
     call emit_b

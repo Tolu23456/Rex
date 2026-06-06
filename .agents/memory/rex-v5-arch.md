@@ -137,17 +137,28 @@ reverse at every ret path. Correct: fib(10)=55 verified.
 Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
-## Benchmark — Measured Numbers (June 2026, post-O25 + global-push/pop elimination)
+## Benchmark — Measured Numbers (June 2026, post-O26)
 
-**Fair 5-benchmark suite (best-of-N wall-clock, both Rex and C use `time` command):**
+**Fair 5-benchmark suite (best-of-N wall-clock, Rex=wall-clock, C=internal clock):**
 - B1 Arith (1B LCG): Rex 1124ms / C 1158ms → **≈ tie** (Rex wins on pure computation)
-- B3 Calls (200M calls): Rex ~581ms / C ~170ms → **~3.4×** (was 8.4× before this release)
-- B6 Fib-rec fib(42): Rex 1213ms / C 713ms → **1.70×**
+- B3 Calls (200M calls): Rex ~381ms / C ~170ms → **~2.2×** (was 3.4× pre-O26, 8.4× pre-V5.0)
+- B6 Fib-rec fib(42): Rex 1147ms / C 713ms → **1.61×** (was 1.70× pre-O26)
 - B7 Fib-iter (10M×80): Rex 1039ms / C 535ms → **1.94×**
 - B9 Dynarray (1M push): Rex 20ms / C 22ms → **Rex wins** (startup-overhead advantage)
 
-**B3 per-call cost:** Rex ~2.95 ns/call (was 6.2 ns/call before global-push/pop elimination).
+**B3 per-call cost:** Rex ~1.91 ns/call (was 2.95 ns pre-O26; 6.2 ns pre-V5.0).
 **Binary sizes:** Rex wins all 5 (2.9× to 19.7× smaller than GCC output).
+
+## O26: Loop-Free Call-Site Pin-Save Skip (IMPLEMENTED)
+Proto table offset 46 = `has_loop` flag (byte). Set to 1 when a `for`/`while` is parsed inside the proto body; cleared to 0 at each proto definition start. At call sites (`.prt_do_normal`), if `proto_table[seq_idx*48+46]==0`, sets `codegen_skip_pin_save=1` so `codegen_emit_push_var_slot`/`_pop_var_slot` skip emitting `push r15`/`pop r15`. Flag cleared after `.prt_cr_done`.
+**Why:** callees with no loops cannot clobber r15 (the loop-pin register), making save/restore dead code. Confirmed: B3 binary shrank exactly 4 bytes (push r15=2B + pop r15=2B); B3 Rex 581ms→381ms (34% faster).
+**Safety:** loop-having callees still save r15 correctly (O26 does NOT fire). Verified: `sum_to(n)` with for loop + outer for loop produces correct result.
+
+## data.push(val) Method-Call Syntax (IMPLEMENTED)
+New syntax: `seq.push(expr)` — method-call style for seq push. Old `push seq val` still works.
+**Lexer:** single `.` now emits `TOK_DOT=88` (was silently skipped). `..` still emits TOK_DOTDOT.
+**Parser:** `parse_stmt` dispatches `TOK_IDENT → .ident_stmt`. Handler: save name, lexer_next, check TOK_DOT, lexer_next, check TOK_PUSH, lexer_next, check TOK_LPAREN, var_find, sub rsp 16, save var_idx, lexer_next, parse_expr, check/consume TOK_RPAREN, restore var_idx, call codegen_emit_seq_push.
+**BSS needed:** `saved_name resb 64` (already existed), `cur_call_proto_seq_idx resq 1` (new for O26).
 
 ## O22: Loop Rotation + 32-byte µop-cache alignment (IMPLEMENTED — CRITICAL LESSON)
 O22 replaces the unconditional `jmp loop_top` back-edge with `cmp r15,end; jl body_start` (1 branch/iter instead of 2).
