@@ -151,6 +151,17 @@ memo_jge_patch:      resq 1
 memo_je_patch:       resq 1
 ; O24: 4× loop unrolling with 4 accumulators (rdx=sum2,r8=cnt2,rcx=sum3,r9=cnt3)
 o24_active:          resb 1
+; O28: inner-loop register promotion — retroactive byte-patching for nested loops
+; Promotes up to 2 global variables (r12=slot0, r13=slot1) accessed in an inner loop.
+; Condition: regalloc_active==0 (r12/r13 free from O18) and loop_pin_depth==1→2.
+; Strategy: at inner for_start emit a 16-byte NOP header (2 × 8-byte long NOPs);
+;           at inner for_end scan body bytes for global load/store patterns and patch.
+o28_active:          resb 1    ; 1 if NOP header was emitted for current inner loop
+o28_var_count:       resb 1    ; number of unique promoted variables found (0..2)
+o28_var_addrs:       resq 2    ; addr32 (zero-extended) of each promoted variable
+o28_inner_loop_var:  resq 1    ; var_idx of inner loop counter (excluded from scan)
+o28_header_pos:      resq 1    ; out_idx where 16-byte NOP header was emitted
+o28_body_start:      resq 1    ; out_idx of first inner loop body byte (after jge)
 ; Dead blob elimination: actual VAs for each conditionally-emitted blob (0 = not included)
 actual_pri_va:       resq 1
 actual_prs_va:       resq 1
@@ -885,6 +896,37 @@ codegen_emit_for_start:
     mov [for_rotation_end_val], r13  ; O22: save before r13 is clobbered in .fs_patch
     jmp .fs_patch
 .fs_cond_global:
+    ; O28: if entering first nested loop (depth 1→2) and r12/r13 are free, emit NOP header.
+    ; Emits 2 × 8-byte long NOPs (16 bytes) as pre-load placeholder; patched retroactively
+    ; at for_end with: slot0=mov r12,[addr32_0]  slot1=mov r13,[addr32_1].
+    ; Only when regalloc_active==0 (O18 not using r12/r13).
+    cmp qword [loop_pin_depth], 1   ; depth must be 1 (about to become 2)
+    jne .fs_cg_no_o28
+    cmp byte [regalloc_active], 0   ; r12/r13 must be free from O18
+    jne .fs_cg_no_o28
+    mov rax, [out_idx]
+    mov [o28_header_pos], rax
+    mov [o28_inner_loop_var], r12   ; r12 = loop var_idx (saved at for_start entry)
+    mov byte [o28_active], 1
+    mov byte [o28_var_count], 0
+    mov ecx, 2                      ; emit 2 × 8-byte long NOPs
+.fs_cg_nop_loop:
+    mov al, 0x0F                    ; 8-byte long NOP: 0F 1F 84 00 00000000
+    call emit_b
+    mov al, 0x1F
+    call emit_b
+    mov al, 0x84
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    xor eax, eax
+    call emit_d
+    dec ecx
+    jnz .fs_cg_nop_loop
+    jmp .fs_cg_done
+.fs_cg_no_o28:
+    mov byte [o28_active], 0
+.fs_cg_done:
     inc qword [loop_pin_depth]
     call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]
@@ -939,6 +981,12 @@ codegen_emit_for_start:
     mov rax, [out_idx]
     mov [for_rotation_body_pc], rax
 .fs_push_cont:
+    ; O28: record body_start = first byte after the jge placeholder (for retroactive scan)
+    cmp byte [o28_active], 0
+    je .fs_o28_bs_skip
+    mov rax, [out_idx]
+    mov [o28_body_start], rax
+.fs_o28_bs_skip:
     mov rdi, rbx
     call codegen_push_cont
     mov rax, rbx
@@ -947,6 +995,211 @@ codegen_emit_for_start:
     pop rbx
     ret
 
+; ── O28: inner-loop body scan — collect unique global var addresses and patch ──────────────
+; Scans out_buffer[o28_body_start..out_idx] for global load/store patterns:
+;   Load:  48 8B 04 25 addr32  →  4C 89 {E0+slot*8} 90 90 90 90 90  (mov rax,rXX + 5 NOPs)
+;   Store: 48 89 04 25 addr32  →  49 89 {C4+slot}   90 90 90 90 90  (mov rXX,rax + 5 NOPs)
+; Registers: slot0=r12 (ModRM E0/C4), slot1=r13 (ModRM E8/C5).
+; Patches the 16-byte NOP header at o28_header_pos with pre-load instructions:
+;   slot0: 4C 8B 24 25 addr32  (mov r12,[addr32])
+;   slot1: 4C 8B 2C 25 addr32  (mov r13,[addr32])
+; Sets o28_active=0 if no vars found (disables flush call).
+codegen_o28_scan_body:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, [o28_body_start]   ; scan start position in out_buffer
+    mov r13, [out_idx]          ; scan end (exclusive) — called before increment/jmp emission
+    lea r14, [out_buffer]       ; base of code buffer
+    mov rdi, [o28_inner_loop_var]
+    call get_var_va             ; rax = full VA of inner loop counter
+    mov r15d, eax               ; r15d = addr32 of inner loop counter (excluded from promotion)
+
+    ; === Phase 1: collect up to 2 unique global variable addresses ===
+.p1_loop:
+    lea rax, [r12+7]
+    cmp rax, r13
+    jge .p1_done
+    cmp byte [r14+r12+0], 0x48
+    jne .p1_next
+    movzx eax, byte [r14+r12+1]
+    cmp al, 0x8B                ; global load pattern: 48 8B 04 25 addr32
+    je .p1_candidate
+    cmp al, 0x89                ; global store pattern: 48 89 04 25 addr32
+    jne .p1_next
+.p1_candidate:
+    cmp byte [r14+r12+2], 0x04
+    jne .p1_next
+    cmp byte [r14+r12+3], 0x25
+    jne .p1_next
+    mov eax, dword [r14+r12+4]  ; read addr32 (little-endian 32-bit from emitted code)
+    cmp eax, r15d               ; skip inner loop counter
+    je .p1_next
+    movzx rcx, byte [o28_var_count]
+    test rcx, rcx
+    jz .p1_add
+    lea rdi, [o28_var_addrs]
+    xor rdx, rdx
+.p1_search:
+    cmp rdx, rcx
+    jge .p1_add
+    cmp dword [rdi+rdx*8], eax  ; already collected this address?
+    je .p1_next
+    inc rdx
+    jmp .p1_search
+.p1_add:
+    cmp rcx, 2                  ; max 2 slots (r12, r13)
+    jge .p1_next
+    lea rdi, [o28_var_addrs]
+    mov dword [rdi+rcx*8], eax  ; store addr32 zero-extended into qword slot
+    inc byte [o28_var_count]
+.p1_next:
+    inc r12
+    jmp .p1_loop
+.p1_done:
+    cmp byte [o28_var_count], 0
+    je .o28_scan_nothing        ; no vars found: disable O28
+
+    ; === Phase 2: patch body bytes ===
+    mov r12, [o28_body_start]
+.p2_loop:
+    lea rax, [r12+7]
+    cmp rax, r13
+    jge .p2_done
+    cmp byte [r14+r12+0], 0x48
+    jne .p2_next
+    cmp byte [r14+r12+2], 0x04
+    jne .p2_next
+    cmp byte [r14+r12+3], 0x25
+    jne .p2_next
+    mov eax, dword [r14+r12+4]
+    cmp eax, r15d               ; skip inner loop counter
+    je .p2_next
+    movzx rcx, byte [o28_var_count]
+    lea rdi, [o28_var_addrs]
+    xor rdx, rdx
+.p2_find:
+    cmp rdx, rcx
+    jge .p2_next
+    cmp dword [rdi+rdx*8], eax
+    je .p2_patch
+    inc rdx
+    jmp .p2_find
+.p2_patch:
+    movzx eax, byte [r14+r12+1]
+    cmp al, 0x8B
+    je .p2_patch_load
+    cmp al, 0x89
+    je .p2_patch_store
+    jmp .p2_next
+.p2_patch_load:
+    ; 4C 89 {E0+slot*8} 90×5  — mov rax,rXX + 5 NOPs
+    ; slot0(r12): ModRM=E0  slot1(r13): ModRM=E8
+    mov byte [r14+r12+0], 0x4C
+    mov byte [r14+r12+1], 0x89
+    mov al, 0xE0
+    shl edx, 3                  ; slot * 8
+    add al, dl
+    mov byte [r14+r12+2], al
+    mov byte [r14+r12+3], 0x90
+    mov byte [r14+r12+4], 0x90
+    mov byte [r14+r12+5], 0x90
+    mov byte [r14+r12+6], 0x90
+    mov byte [r14+r12+7], 0x90
+    jmp .p2_next
+.p2_patch_store:
+    ; 49 89 {C4+slot} 90×5  — mov rXX,rax + 5 NOPs
+    ; slot0(r12): ModRM=C4  slot1(r13): ModRM=C5
+    mov byte [r14+r12+0], 0x49
+    mov byte [r14+r12+1], 0x89
+    mov al, 0xC4
+    add al, dl                  ; dl = slot (0 or 1)
+    mov byte [r14+r12+2], al
+    mov byte [r14+r12+3], 0x90
+    mov byte [r14+r12+4], 0x90
+    mov byte [r14+r12+5], 0x90
+    mov byte [r14+r12+6], 0x90
+    mov byte [r14+r12+7], 0x90
+.p2_next:
+    inc r12
+    jmp .p2_loop
+.p2_done:
+
+    ; === Phase 3: patch NOP header with pre-load instructions ===
+    ; slot0: 4C 8B 24 25 addr32  (mov r12,[addr32])
+    ; slot1: 4C 8B 2C 25 addr32  (mov r13,[addr32])
+    ; ModRM = 0x24 + slot*8
+    lea rdi, [o28_var_addrs]
+    mov r12, [o28_header_pos]   ; header write position
+    movzx rbx, byte [o28_var_count]
+    xor r13, r13                ; slot index
+.p3_loop:
+    cmp r13, rbx
+    jge .o28_scan_done
+    mov byte [r14+r12+0], 0x4C
+    mov byte [r14+r12+1], 0x8B
+    mov al, 0x24
+    mov rdx, r13
+    shl edx, 3                  ; slot * 8
+    add al, dl
+    mov byte [r14+r12+2], al
+    mov byte [r14+r12+3], 0x25  ; SIB: scale=0 index=rsp(none) base=disp32
+    mov edx, dword [rdi+r13*8]  ; addr32 for this slot
+    mov dword [r14+r12+4], edx  ; write 4-byte address into header slot
+    add r12, 8
+    inc r13
+    jmp .p3_loop
+
+.o28_scan_nothing:
+    mov byte [o28_active], 0    ; no vars: disable flush step
+.o28_scan_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; ── O28: emit post-loop register flushes for promoted variables ────────────────────────────
+; Emits: 4C 89 {24+slot*8} 25 addr32  (mov [addr32],rXX) for each slot.
+; slot0(r12): ModRM=24  slot1(r13): ModRM=2C
+; Called at jge jump target (right after codegen_patch_jump) so the CPU executes
+; these flushes when the loop exits, restoring promoted values to their memory locations.
+codegen_o28_emit_flushes:
+    push rbx
+    push r12
+    push r13
+    lea r12, [o28_var_addrs]
+    movzx rbx, byte [o28_var_count]
+    xor r13, r13                ; slot index
+.flush_loop:
+    cmp r13, rbx
+    jge .flush_done
+    ; 4C 89 {0x24+slot*8} 25 addr32
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x24
+    mov rdx, r13
+    shl edx, 3                  ; slot * 8
+    add al, dl
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov eax, dword [r12+r13*8]  ; addr32 for this slot
+    call emit_d
+    inc r13
+    jmp .flush_loop
+.flush_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; ── for loop (static bounds) ──────────────────────────────────────────────────
 codegen_emit_for_end:
     push rbx
     push r12
@@ -956,6 +1209,13 @@ codegen_emit_for_end:
     mov r13, rsi             ; loop_var_idx
     mov r14, [for_step_val]  ; step value
     mov qword [for_step_val], 1
+    ; O28: scan inner loop body before emitting increment/back-edge (scan end = current out_idx)
+    cmp byte [o28_active], 0
+    je .fe_skip_o28_scan
+    cmp qword [loop_pin_depth], 2   ; inner loop: depth is 2 before this for_end decrements it
+    jne .fe_skip_o28_scan
+    call codegen_o28_scan_body
+.fe_skip_o28_scan:
     ; O2: use r15 increment when loop is pinned
     cmp byte [loop_pin_active], 0
     je .fe_global_inc
@@ -1191,6 +1451,17 @@ codegen_emit_for_end:
     call emit_d
 .fe_after_jmp:
     call codegen_patch_jump
+    ; O28: emit post-loop register flushes at jge jump target (just patched above).
+    ; codegen_patch_jump patched jge→current out_idx; flushes emitted here land exactly
+    ; at that target so the CPU executes them on loop exit.
+    ; Only active for inner loops (depth==2 before dec) when scan found ≥1 var.
+    cmp byte [o28_active], 0
+    je .fe_skip_o28_flush
+    cmp qword [loop_pin_depth], 2
+    jne .fe_skip_o28_flush
+    call codegen_o28_emit_flushes
+    mov byte [o28_active], 0        ; reset for next inner loop
+.fe_skip_o28_flush:
     ; O23: if 2×unroll was applied, emit post-loop combine
     ; O25: when O24 is also active, use a tree combine to reduce serial r14 latency
     ;      from 3 cycles (O23+O24 serial) to 2 cycles (parallel pair + sequential merge).
@@ -1208,12 +1479,14 @@ codegen_emit_for_end:
     call emit_b
     jmp .fe_no_combine
 .fe_o25_tree:
-    ; O25 tree combine — O23+O24 both active:
-    ; Old (3 serial cycles on r14): add r14,rax; add r14,rdx; add r14,rcx
-    ; New (2 cycles — step 1a ‖ step 1b, then step 2 depends on both):
-    ;   step 1a: add rax,rdx = 48 01 D0  (fold even2 into odd; no r14 dep)
-    ;   step 1b: add r14,rcx = 4B 01 CE  (start r14 chain; no dep on 1a)
-    ;   step 2:  add r14,rax = 4B 01 C6  (complete: r14 += rax+rdx+rcx)
+    ; O25 LEA tree combine — O23+O24 both active:
+    ; Reduces 3 serial r14 deps to 2 via parallel fold + LEA instead of ADD:
+    ;   step 1a: add rax,rdx = 48 01 D0           (fold rdx into rax; no r14 dep)
+    ;   step 1b: lea r14,[r14+rcx] = 4D 8D 34 0E  (start r14 chain via LEA; no dep on 1a)
+    ;   step 2:  add r14,rax = 4B 01 C6            (merge: r14 += rax+rdx+rcx)
+    ; LEA encoding: REX.W=1 REX.R=1(r14) REX.B=1(r14 base)=0x4D, opcode=0x8D,
+    ;   ModRM=mod00 reg=110(r14_low3) rm=100(SIB)=0x34, SIB=scale0 idx=001(rcx) base=110(r14)=0x0E
+    ; LEA dispatches to p1/p5 instead of p0/p5, reducing port pressure vs paired ADD in step 1a.
     ; add rax,rdx = 48 01 D0
     mov al, 0x48
     call emit_b
@@ -1221,12 +1494,14 @@ codegen_emit_for_end:
     call emit_b
     mov al, 0xD0
     call emit_b
-    ; add r14,rcx = 4B 01 CE
-    mov al, 0x4B
+    ; lea r14,[r14+rcx] = 4D 8D 34 0E
+    mov al, 0x4D
     call emit_b
-    mov al, 0x01
+    mov al, 0x8D
     call emit_b
-    mov al, 0xCE
+    mov al, 0x34
+    call emit_b
+    mov al, 0x0E
     call emit_b
     ; add r14,rax = 4B 01 C6
     mov al, 0x4B

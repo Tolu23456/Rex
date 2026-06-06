@@ -386,3 +386,56 @@ dispatches to `.prt` which calls `proto_find`. Plain `TOK_IDENT` goes to `.idn` 
 and returns 0 if not a variable — protocol names are NOT valid as bare identifiers in expressions.
 **Why this matters for debugging:** `output(fib(10))` outputs 0 (silent wrong result);
 correct is `output(@fib(10))`. Always use `@` prefix when calling protocols.
+
+## Compound Assignment `a = expr` (IMPLEMENTED)
+Syntax: bare identifier followed by `TOK_ASSIGN` (no leading colon — colon signals declaration).
+**Location:** parser.asm, `.ident_stmt`. After saving ident name and calling `lexer_next`,
+if next token == TOK_ASSIGN: call `var_find` (looks up existing var), `lexer_next`, `parse_expr`
+(full order-of-operations expr), then `codegen_emit_store_rax_to_var`.
+**Why separate from declaration:** declaration is `int :x = expr` — starts with a type keyword,
+then colon-prefixed ident. Bare `x = expr` (no colon, no type keyword) reuses `.ident_stmt`.
+**Verified:** `x = y * 4 + 2` → 14 (y=3), `y = x / 3 - 1` → 3 (x=14). Correct OoO.
+
+## O25: LEA Tree Combine for O23+O24 Post-Loop (IMPLEMENTED)
+Replaces the old `add r14,rcx` (4B 01 CE) in `.fe_o25_tree` with `lea r14,[r14+rcx]` (4D 8D 34 0E).
+**Encoding:** REX=0x4D (W=1,R=1,X=0,B=1), opcode=0x8D, ModRM=0x34 (mod=00,reg=110,rm=100=SIB),
+SIB=0x0E (scale=00,index=001=rcx,base=110=r14). Scales from base+index with no displacement.
+**Why LEA over ADD:** ADD is port 0; LEA ([base+index]) dispatches to p1 or p5, freeing port 0
+for the parallel `add rax,rdx` in step 1a. Reduces 3 serial r14 dependencies to 2.
+**Verified:** sum reduction O23+O24 path gives 4999999950000000 (1..1e8 sum) in 15ms.
+
+## O28: Inner-Loop Register Promotion via Retroactive Byte-Patching (IMPLEMENTED)
+Promotes up to 2 non-pin/non-accum variables to r12/r13 within the inner loop of a nested
+`for` pair. Active only when `regalloc_active==0` and `loop_pin_depth==1→2`.
+**Mechanism:**
+1. **for_start hook** (`.fs_cond_global`, before `inc loop_pin_depth`): when depth==1 and
+   regalloc_active==0, emit 2×8-byte Intel long NOPs as patchable header slots; record
+   `o28_header_pos` (out_idx before NOPs) and `o28_inner_loop_var` (the loop pin var).
+2. **body_start** recorded in `.fs_push_cont` immediately after the header.
+3. **for_end scan** (`codegen_o28_scan_body`): at for_end entry (before back-edge), scans
+   body bytes `[o28_body_start..out_idx]` for `48 8B 04 25 addr32` (8-byte global load) and
+   `48 89 04 25 addr32` (8-byte global store) of variables that are NOT the inner loop counter.
+   Promotes up to 2 unique addrs: slot 0→r12, slot 1→r13.
+4. **Patch loads:** 8 bytes at match site → `4C 89 E0 90 90 90 90 90` (mov rax,r12 + 5 NOPs)
+   or `4C 89 E8 90 90 90 90 90` (mov rax,r13 + 5 NOPs).
+5. **Patch stores:** `48 89 04 25 addr32` (7 bytes+junk) → `49 89 C4 90 90 90 90 90` (r12)
+   or `49 89 C5 90 90 90 90 90` (r13).
+6. **Header patch** (`codegen_o28_scan_body`): overwrites the 2×8-byte NOPs with
+   `mov r12,[addr32]` = `4C 8B 24 25 addr32` (8B) + padding and same for r13.
+7. **Flush emit** (`.fe_after_jmp`, after `codegen_patch_jump`): `codegen_o28_emit_flushes`
+   emits `mov [addr32],r12` = `4C 89 24 25 addr32` for each promoted slot. Lands exactly
+   at the jge jump target. Then `o28_active=0` reset.
+**Register slots:** 0=r12, 1=r13 only. r14 excluded (O13 accum). r15 is loop pin.
+**BSS added:** `o28_active`, `o28_var_count`, `o28_var_addrs resq 2`, `o28_inner_loop_var`,
+  `o28_header_pos`, `o28_body_start` — all in codegen.asm BSS after `o24_active`.
+**Depth guard:** flush fires only when `loop_pin_depth==2` (inner loop); checked in `.fe_after_jmp`.
+**B7 result:** correct fib(81)=37889062373143906 at 1.574s. All 5 benchmarks pass.
+**Key encodings (must be exact):**
+  - Pre-load r12: `4C 8B 24 25 <addr32>` (8 bytes)
+  - Pre-load r13: `4C 8B 2C 25 <addr32>` (8 bytes)
+  - Flush r12:    `4C 89 24 25 <addr32>` (8 bytes)
+  - Flush r13:    `4C 89 2C 25 <addr32>` (8 bytes)
+  - Body load→r12 patch:  `4C 89 E0 90 90 90 90 90` (8 bytes, replaces 8-byte global load)
+  - Body load→r13 patch:  `4C 89 E8 90 90 90 90 90`
+  - Body store←r12 patch: `49 89 C4 90 90 90 90 90` (8 bytes, replaces 7-byte global store)
+  - Body store←r13 patch: `49 89 C5 90 90 90 90 90`

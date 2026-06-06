@@ -2468,6 +2468,8 @@ parse_stmt:
     lea rsi, [tok_ident]
     call strcpy
     call lexer_next
+    cmp byte [tok_type], TOK_ASSIGN   ; bare assignment: name = expr (no leading colon)
+    je .ident_assign
     cmp byte [tok_type], TOK_DOT
     jne .done
     call lexer_next
@@ -2491,6 +2493,22 @@ parse_stmt:
     mov rdi, [rsp]          ; restore var_idx
     add rsp, 16
     call codegen_emit_seq_push
+    jmp .done
+
+; ── bare compound assignment: name = expr (without leading ':') ─────────────
+; Supports order-of-operations via the full parse_expr → parse_comparison →
+; parse_additive (+/-) → parse_term (*/ %) → parse_unary hierarchy.
+; Example: a = 3 * 4 + 2 / 5  (mul/div bind tighter than add/sub)
+.ident_assign:
+    lea rdi, [saved_name]
+    call var_find
+    cmp rax, -1
+    je .done
+    mov r14, rax            ; save var_idx (r14 is callee-saved, pushed at parse_stmt entry)
+    call lexer_next         ; consume '='
+    call parse_expr         ; evaluate RHS with full operator precedence → rax
+    mov rdi, r14
+    call codegen_emit_store_rax_to_var
     jmp .done
 
 ; ── ++ / -- prefix increment / decrement ──────────────────────────────────────
