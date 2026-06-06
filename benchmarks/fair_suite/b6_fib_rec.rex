@@ -11,6 +11,9 @@ prot fib(n):
     :b = @fib(n - 2)
     return a + b
 
+int :t0 = clock()
 int result
 :result = @fib(42)
+int :t1 = clock()
 output result
+output t1 - t0

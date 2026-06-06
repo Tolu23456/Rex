@@ -5,6 +5,7 @@
 int :a = 0
 int :b = 1
 int :c = 0
+int :t0 = clock()
 for rep in 0..10000000:
     :a = 0
     :b = 1
@@ -12,4 +13,6 @@ for rep in 0..10000000:
         :c = a + b
         :a = b
         :b = c
+int :t1 = clock()
 output b
+output t1 - t0

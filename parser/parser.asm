@@ -315,7 +315,14 @@ parse_factor:
     jmp .done
 .int:
     mov rdi, [tok_int]
+    mov eax, edi          ; zero-extend lower 32 bits → rax; rdi unchanged
+    cmp rdi, rax          ; if upper 32 bits are set, they differ → 64-bit constant
+    jne .int_imm64
     call codegen_emit_mov_eax_imm32
+    jmp .int_done
+.int_imm64:
+    call codegen_emit_mov_rax_imm64
+.int_done:
     mov byte [cur_type], TYPE_INT
     call lexer_next
     jmp .done

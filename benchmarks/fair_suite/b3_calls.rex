@@ -5,7 +5,10 @@
 prot increment(x):
     return x + 1
 
+int :t0 = clock()
 int :n = 0
 for i in 0..200000000:
     :n = @increment(n)
+int :t1 = clock()
 output n
+output t1 - t0

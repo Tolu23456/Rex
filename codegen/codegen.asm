@@ -1607,6 +1607,119 @@ codegen_emit_for_end:
     mov byte [loop_pin_active], 0
     jmp .fe_no_combine
 .fe_no_add_only:
+    ; O-Affine-Mul-64: closed-form for multiply-only loops with 64-bit constant.
+    ; (:x = x*A where A > 0xFFFFFFFF — movabs rax, imm64 prefix, 31-byte body)
+    ; Body layout:
+    ;   [0..2]   = 4C 89 F0  mov rax, r14
+    ;   [3..7]   = 90×5      NOPs (read-first patch)
+    ;   [8..10]  = 49 89 C2  mov r10, rax
+    ;   [11..12] = 48 B8     movabs rax, imm64 prefix (REX.W + opcode)
+    ;   [13..20] = 8-byte LE imm64 (constant A)
+    ;   [21..23] = 4C 89 D3  mov rbx, r10
+    ;   [24..27] = 48 0F AF C3  imul rax, rbx
+    ;   [28..30] = 49 89 C6  mov r14, rax
+    ; Computes A^N mod 2^64 via binary ladder, emits movabs rax, A^N + imul r14, rax.
+    cmp byte [loop_accum_active], 0
+    je .fe_no_mul64
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 31
+    jne .fe_no_mul64
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    ; [0..2] = 4C 89 F0
+    cmp byte [rcx+rdx+0], 0x4C
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+1], 0x89
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+2], 0xF0
+    jne .fe_no_mul64
+    ; [3] and [7] = 0x90 (spot-check NOPs)
+    cmp byte [rcx+rdx+3], 0x90
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+7], 0x90
+    jne .fe_no_mul64
+    ; [8..10] = 49 89 C2
+    cmp byte [rcx+rdx+8], 0x49
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+9], 0x89
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+10], 0xC2
+    jne .fe_no_mul64
+    ; [11..12] = 48 B8 (movabs rax, imm64)
+    cmp byte [rcx+rdx+11], 0x48
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+12], 0xB8
+    jne .fe_no_mul64
+    ; [21..23] = 4C 89 D3 (mov rbx, r10)
+    cmp byte [rcx+rdx+21], 0x4C
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+22], 0x89
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+23], 0xD3
+    jne .fe_no_mul64
+    ; [24..27] = 48 0F AF C3 (imul rax, rbx)
+    cmp byte [rcx+rdx+24], 0x48
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+25], 0x0F
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+26], 0xAF
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+27], 0xC3
+    jne .fe_no_mul64
+    ; [28..30] = 49 89 C6 (mov r14, rax)
+    cmp byte [rcx+rdx+28], 0x49
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+29], 0x89
+    jne .fe_no_mul64
+    cmp byte [rcx+rdx+30], 0xC6
+    jne .fe_no_mul64
+    ; Pattern confirmed. Extract A (64-bit) from body[13..20], N = end_val - from_val.
+    mov r8, qword [rcx+rdx+13]         ; r8 = A (full 64-bit constant)
+    mov r10, [for_rotation_end_val]
+    sub r10, [for_rotation_from_val]   ; r10 = N
+    ; Binary ladder (compile-time): r11 = A^N mod 2^64
+    push rbx
+    mov r11, 1
+.mul64_ladder:
+    test r10, r10
+    jz .mul64_ladder_done
+    test r10, 1
+    jz .mul64_even
+    imul r11, r8
+.mul64_even:
+    imul r8, r8
+    shr r10, 1
+    jmp .mul64_ladder
+.mul64_ladder_done:
+    pop rbx
+    ; Rewind output buffer — erase the 31-byte loop body
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    ; If A^N == 1: x unchanged, emit nothing
+    cmp r11, 1
+    je .mul64_skip_emit
+    ; Emit: movabs rax, A^N  (48 B8 + 8 bytes)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, r11
+    call emit_q
+    ; Emit: imul r14, rax  (4C 0F AF F0)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xAF
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+.mul64_skip_emit:
+    call codegen_patch_jump
+    mov byte [loop_pin_active], 0
+    jmp .fe_no_combine
+.fe_no_mul64:
     ; O256: closed-form 256× virtual accumulator folding.
     ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 256 == 0.
     ; Replaces per-iteration add with: sum_delta = 256*i + 32640; i += 256
