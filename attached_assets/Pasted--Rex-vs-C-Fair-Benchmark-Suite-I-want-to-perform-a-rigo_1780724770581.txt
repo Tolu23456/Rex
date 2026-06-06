@@ -1,0 +1,208 @@
+# Rex vs C Fair Benchmark Suite
+
+I want to perform a rigorous and fair benchmark comparison between Rex and C (compiled with GCC -O3).
+
+The goal is to measure compiler quality, generated machine code efficiency, runtime performance, and binary size while avoiding misleading benchmarks that compare different abstractions or library implementations.
+
+## General Rules
+
+1. Every benchmark must implement the exact same algorithm in both Rex and C.
+2. Use equivalent data types in both languages.
+3. Prevent dead-code elimination by printing or otherwise using the final result.
+4. Do not use volatile unless both implementations require it.
+5. Do not intentionally handicap either compiler.
+6. Compile C with GCC -O3.
+7. Compile Rex using its highest stable optimization level.
+8. Run each benchmark at least 3 times and report:
+
+   * Individual runs
+   * Best run
+   * Average run
+9. Report binary sizes for both implementations.
+10. If a benchmark requires a language feature that Rex does not currently support, completely remove that benchmark from the suite rather than substituting a different implementation.
+
+## Benchmark 1: Arithmetic Throughput
+
+Perform 1 billion iterations of:
+
+x = x * 1664525 + 1013904223
+
+using 64-bit integers.
+
+Measure:
+
+* Execution time
+* Binary size
+
+Purpose:
+
+* Register allocation
+* Loop optimization
+* Instruction scheduling
+
+## Benchmark 2: Array Summation
+
+Create a large array of integers.
+
+Populate it with deterministic values.
+
+Sum all elements using a simple loop.
+
+Measure:
+
+* Execution time
+* Binary size
+
+Purpose:
+
+* Memory throughput
+* Loop generation
+* Potential vectorization
+
+## Benchmark 3: Function Call Overhead
+
+Create a tiny function:
+
+increment(x)
+
+Call it hundreds of millions of times.
+
+Measure:
+
+* Execution time
+
+Purpose:
+
+* Calling convention efficiency
+* Inlining quality
+* Function call overhead
+
+## Benchmark 4: Branch Prediction
+
+Count values greater than a threshold.
+
+Run two versions:
+
+1. Predictable data
+2. Randomized data
+
+Measure:
+
+* Execution time
+
+Purpose:
+
+* Branch handling
+* Generated control flow quality
+
+## Benchmark 5: Matrix Multiplication
+
+Implement naive matrix multiplication.
+
+Use the same matrix dimensions in both languages.
+
+Measure:
+
+* Execution time
+* Binary size
+
+Purpose:
+
+* Loop optimization
+* Cache behavior
+* Register usage
+
+## Benchmark 6: Recursive Fibonacci
+
+Compute:
+
+fib(42)
+
+using a purely recursive implementation.
+
+Measure:
+
+* Execution time
+
+Purpose:
+
+* Function call performance
+* Stack management
+* Recursive code generation
+
+## Benchmark 7: Iterative Fibonacci
+
+Implement Fibonacci using iteration only.
+
+Run a very large number of iterations.
+
+Measure:
+
+* Execution time
+
+Purpose:
+
+* Pure loop performance
+* Arithmetic optimization
+
+## Benchmark 8: String Scanning
+
+Create a large string.
+
+Count occurrences of a specific character.
+
+Measure:
+
+* Execution time
+
+Purpose:
+
+* Sequential memory access
+* Branch handling
+* String processing efficiency
+
+## Benchmark 9: Dynamic Array Growth
+
+Only include this benchmark if Rex has a dynamic array or sequence type.
+
+Requirements:
+
+* Compare Rex's sequence/dynamic array against a C implementation using an equivalent dynamically growing array.
+* Use the same growth strategy.
+* Use the same number of insertions.
+* Do NOT compare against repeated malloc/free.
+
+Measure:
+
+* Execution time
+* Binary size
+
+Purpose:
+
+* Dynamic container efficiency
+* Allocation strategy overhead
+
+## Reporting Format
+
+For every benchmark report:
+
+| Benchmark | Rex Time | C Time | Winner | Ratio |
+| --------- | -------- | ------ | ------ | ----- |
+
+Also report:
+
+| Binary | Rex Size | C Size |
+| ------ | -------- | ------ |
+
+## Final Analysis
+
+After all benchmarks:
+
+1. Count Rex wins.
+2. Count C wins.
+3. Count ties.
+4. Identify benchmarks where Rex significantly outperforms C.
+5. Identify benchmarks where C significantly outperforms Rex.
+6. Explain likely technical reasons for every major performance difference.
+7. If Rex wins consistently across arithmetic, array traversal, matrix multiplication, function calls, and iterative workloads, investigate whether Rex is generating genuinely superior machine code or whether there are hidden differences in the benchmark implementations.
+8. Do not make claims that Rex is faster than C overall unless the majority of fair, equivalent benchmarks support that conclusion.
