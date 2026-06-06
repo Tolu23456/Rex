@@ -314,17 +314,31 @@ output typeof x
 
 ## Protocols ✅
 
-Define with `prot`. Parameters are positional. Return a value with `return`.
+Define with `prot`. Parameters are **typed** (type-first, matching Rex's variable style).
+Return a value with `return`. The return type is annotated with `->`.
+
+### Basic definition
 
 ```rex
 prot greet():
     output "Hello"
 
-prot add(a, b):
+prot square(int x) -> int:
+    return x * x
+
+prot add(int a, int b) -> int:
     return a + b
 ```
 
-Call with `@`:
+**No params:** empty parens — `prot greet():`.
+**No return value:** omit the `->` annotation entirely. No `None`, no `void`.
+
+### Calling with `@`
+
+`@` is Rex's protocol call prefix. It visually separates **user-defined protocols**
+from **built-in statements** (`output`, `push`, `pop`, `err`, etc.). Every `@` in
+Rex code means: "this is yours."
+
 ```rex
 @greet()
 
@@ -333,16 +347,110 @@ int result
 output result
 ```
 
-Return type annotation with `->`:
+### Multiple return values — tuples 📋
+
+A protocol can return a tuple of values using `-> (T, T, ...)`. The caller
+destructures with a matching declaration on the left side.
+
 ```rex
-prot square(x) -> int:
-    return x * x
+prot minmax(seq[int] s) -> (int, int):
+    int lo = s[0]
+    int hi = s[0]
+    for i in 1..len(s):
+        if s[i] < lo:
+            :lo = s[i]
+        if s[i] > hi:
+            :hi = s[i]
+    return lo, hi
+
+int lo, int hi
+:lo, :hi = @minmax(nums)
+output lo
+output hi
 ```
 
-Use `None` to explicitly declare no parameters or no return value:
+Tuple return values are positional. The types on the left side must match the
+declared return tuple exactly — a mismatch is a compile-time error.
+
+### Protocol decorators — `#` 📋
+
+Decorators annotate a protocol with compiler directives. They use the `#` sigil
+and stack **one per line** directly above the `prot` keyword.
+
 ```rex
-prot log(None) -> None:
-    output "log"
+#memo
+prot fib(int n) -> int:
+    if n <= 1:
+        return n
+    return @fib(n-1) + @fib(n-2)
+
+#hot
+#inline
+prot dot(int a, int b) -> int:
+    return a * b
+
+#cold
+#safe
+prot log_error(str msg):
+    err msg
+```
+
+**Why `#` and not `@`?** `@` is already Rex's call prefix. Using it for decorators
+would create two meanings for the same sigil. `#` is free (Rex comments use `//`),
+unambiguous, and reads clearly as an annotation.
+
+**Rule:** decorators are always on their own lines, never inline. Multiple decorators
+stack vertically — one idea per line.
+
+#### Built-in decorators
+
+| Decorator | Category | Effect |
+|---|---|---|
+| `#memo` | Algorithmic | Cache return value keyed on input; skip recomputation |
+| `#pure` | Algorithmic | No side effects — compiler may reorder or elide calls |
+| `#total` | Algorithmic | Hint: terminates for all inputs |
+| `#inline` | Performance | Force inline at every call site |
+| `#noinline` | Performance | Prevent inlining; useful for hot/cold splitting |
+| `#hot` | Performance | Called frequently — optimize for throughput |
+| `#cold` | Performance | Called rarely — optimize for binary size |
+| `#safe` | Safety | Compiler verifies: no raw syscalls or pointer arithmetic inside |
+| `#unsafe` | Safety | Allows raw `$` syscalls and direct memory operations |
+
+Decorators can be combined freely. Order does not matter.
+
+```rex
+#memo
+#pure
+prot factorial(int n) -> int:
+    if n <= 1:
+        return 1
+    return n * @factorial(n - 1)
+```
+
+### Recursive protocols ✅
+
+Protocols may call themselves. Rex tracks recursion and handles stack frames
+correctly. `#memo` is especially useful on recursive protocols.
+
+```rex
+prot fib(int n) -> int:
+    if n <= 1:
+        return n
+    return @fib(n-1) + @fib(n-2)
+```
+
+### Up to 6 parameters ✅
+
+Rex maps parameters to SysV ABI registers (`rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`).
+The maximum is 6 parameters per protocol. This is a current implementation limit.
+
+```rex
+prot clamp(int val, int lo, int hi) -> int:
+    if val < lo:
+        return lo
+    if val > hi:
+        return hi
+    return val
 ```
 
 ---

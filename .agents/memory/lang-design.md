@@ -1,6 +1,6 @@
 ---
 name: Rex language design decisions
-description: Mutability sigil rules, type system decisions, and bool Kleene logic — agreed in design session, written to syn.md.
+description: Mutability sigil rules, type system decisions, bool Kleene logic, and protocol design — agreed in design session, written to syn.md.
 ---
 
 ## Mutability — Path B (write-site only)
@@ -35,3 +35,12 @@ This is Kleene strong three-valued logic — mathematically principled.
 **not unknown = unknown**
 
 **Why kept:** `unknown` maps directly to `rdrand` hardware instruction. It's Rex's most distinctive type feature, useful for randomized algorithms, non-deterministic testing, probabilistic branching. Already implemented.
+
+## Protocols
+
+**`@` call prefix — KEEP.** Visual two-tier system: `@name(args)` = user protocol, bare keyword = built-in. Every `@` in Rex means "this is yours."
+**`None` — REMOVED.** Empty parens for no params (`prot greet():`). Omit `->` entirely for no return. No `void`, no `None`.
+**Typed parameters — YES.** Type-first matching Rex style: `prot add(int a, int b) -> int:`. Untyped params deprecated.
+**Multiple returns — tuples.** `-> (int, int)` with destructuring: `int lo, int hi` then `:lo, :hi = @minmax(nums)`. Type mismatch = compile-time error.
+**Decorators — `#` sigil, one per line, stacked above `prot`.** `#` chosen over `@` (already a call prefix). No inline lists.
+**Decorator set:** `#memo`, `#pure`, `#total` (algorithmic); `#inline`, `#noinline`, `#hot`, `#cold` (performance); `#safe`, `#unsafe` (safety). Combine freely, order doesn't matter.
