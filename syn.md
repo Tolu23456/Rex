@@ -9,37 +9,58 @@
 
 ## Variable Declaration ✅
 
-### Constant (immutable)
-Inline assignment at declaration time locks the value — no reassignment allowed.
+### Immutable (default)
+Declare with a type and an initial value. If no `:` write site exists in the same scope, the compiler treats this as a true constant — eligible for constant folding and inlining.
 ```rex
 int age = 13
+float pi = 3.14159
+str name = "Rex"
 ```
 
 ### Mutable
-Declare with `:` sigil at declaration, or declare then assign separately.
+Declarations are always written cleanly — no sigil at the declaration site. Mutability is inferred by the compiler from usage: if you ever write `:x = ...` in scope, `x` is mutable. The `:` sigil appears **only at write sites**.
 ```rex
-int :age = 13
-```
-```rex
-int age
-:age = 13
+int age = 13        // declared cleanly
+:age = 14           // compiler sees this — age is mutable
 ```
 
-The `:` sigil marks every write site — not just the declaration. Any line with `:x =` is modifying state; any line without it is not.
+Declare without an initial value, then assign:
+```rex
+int total
+:total = 100
+```
+
+### The `:` sigil — write site marker
+Every mutation must be marked with `:` at the point where it happens. This makes state changes visible at a glance without scrolling to the declaration.
+```rex
+int x = 5           // constant — compiler can fold this
+int y = 0           // will be mutated below
+:y = x + 10         // explicit mutation — eye immediately spots it
+++y                 // increment — self-evidently a mutation, no sigil needed
+swap x y            // swap — self-evidently a mutation, no sigil needed
+```
+
+### Compiler enforcement
+- No `:` write site in scope → true constant. The compiler may inline or fold the value.
+- At least one `:` write site → mutable. The compiler tracks this per variable.
+- Attempting to read an uninitialised variable (declared but never assigned) is a compile-time error.
 
 ---
 
 ## Data Types ✅
 
-| Type      | Syntax Example       | Notes                                           |
-|-----------|----------------------|-------------------------------------------------|
-| `int`     | `int a = 5`          | 64-bit signed integer                           |
-| `float`   | `float b = 1.5`      | 64-bit double (SSE2)                            |
-| `bool`    | `bool f = true`      | Tri-state: `true`, `false`, `unknown`           |
-| `complex` | `complex c = 3+4j`   | 128-bit XMM pair (real + imaginary)             |
-| `str`     | `str s = "Rex"`      | Null-terminated UTF-8 pointer                   |
-| `seq`     | `seq items`          | Dynamic sequence (heap); push / pop / len       |
-| `dict`    | `dict d`             | SipHash key-value map; `d["key"] = val`         |
+| Type       | Syntax Example         | Notes                                                        |
+|------------|------------------------|--------------------------------------------------------------|
+| `int`      | `int a = 5`            | 64-bit signed integer                                        |
+| `float`    | `float b = 1.5`        | 64-bit double (IEEE 754, SSE2)                               |
+| `bool`     | `bool f = true`        | Tri-state: `true`, `false`, `unknown` (Kleene logic)         |
+| `str`      | `str s = "Rex"`        | Heap-managed UTF-8 string; `[cap][len][data]` layout         |
+| `char`     | `char c = 'R'`         | Single UTF-8 byte; lightweight alias over `byte`             |
+| `byte`     | `byte b = 0xFF`        | Raw unsigned 8-bit value; for binary data and I/O            |
+| `seq[T]`   | `seq[int] nums`        | Typed dynamic sequence (heap); push / pop / len / cap        |
+| `dict[T]`  | `dict[int] d`          | Typed SipHash map; keys are always `str`, value type is `T`  |
+
+> **`complex` removed from core.** It is a niche type with significant implementation cost. It will be available as a standard library import in a future release. Existing `complex` code continues to work in V0.1 but is considered deprecated in core.
 
 ### Binary / hex / octal literals ✅
 ```rex
@@ -50,6 +71,54 @@ int oct  = 0o17
 
 ### Unimplemented types 📋
 `set` and `tup` are planned but not yet implemented.
+
+---
+
+## `bool` — Tri-State Logic ✅
+
+Rex `bool` has three values: `true` (1), `false` (0), and `unknown` (hardware entropy via `rdrand`). This is **Kleene strong three-valued logic** — a mathematically principled system, not an arbitrary extension.
+
+`unknown` represents genuine indeterminacy at runtime. It maps directly to the `rdrand` instruction and is a first-class Rex value, not a special-case enum.
+
+### `and` truth table
+| `and`       | `false`     | `true`      | `unknown`   |
+|-------------|-------------|-------------|-------------|
+| **`false`** | false       | false       | **false**   |
+| **`true`**  | false       | true        | unknown     |
+| **`unknown`**| **false**  | unknown     | unknown     |
+
+Rule: **false dominates** — `false and anything` is always `false`.
+
+### `or` truth table
+| `or`        | `false`     | `true`      | `unknown`   |
+|-------------|-------------|-------------|-------------|
+| **`false`** | false       | true        | unknown     |
+| **`true`**  | true        | true        | **true**    |
+| **`unknown`**| unknown    | **true**    | unknown     |
+
+Rule: **true dominates** — `true or anything` is always `true`.
+
+### `not`
+| input     | result    |
+|-----------|-----------|
+| `false`   | `true`    |
+| `true`    | `false`   |
+| `unknown` | `unknown` |
+
+### Usage
+```rex
+bool coin
+:coin = unknown         // hardware-entropy value
+output coin             // prints: true, false, or unknown
+
+bool a = true
+bool b = unknown
+
+bool result
+:result = a and b       // unknown  (true and unknown = unknown)
+:result = a or b        // true     (true dominates)
+:result = not b         // unknown  (not unknown = unknown)
+```
 
 ---
 
@@ -338,15 +407,16 @@ else:
 
 ### For loop ✅
 Range-based. Optional `step`. Both bounds accept full expressions (variables,
-arithmetic, unary negation).
+arithmetic, unary negation). The loop variable is implicitly mutable — the
+loop syntax itself implies iteration; no `:` sigil is needed at the declaration.
 ```rex
-for :i in 0..10:
+for i in 0..10:
     output i
 
-for :i in 0..20 step 2:
+for i in 0..20 step 2:
     output i
 
-for :i in -5..5:
+for i in -5..5:
     output i
 ```
 
@@ -360,7 +430,7 @@ while true:
 ### `stop` ✅
 Break out of the current (innermost) loop.
 ```rex
-for :i in 0..100:
+for i in 0..100:
     if i == 5:
         stop
     output i
@@ -372,8 +442,8 @@ Multi-level break. `stop N` breaks out of `N` nested loops at once.
 `stop 1` is identical to bare `stop` (break the innermost loop).
 
 ```rex
-for :i in 0..10:
-    for :j in 0..10:
+for i in 0..10:
+    for j in 0..10:
         if i == j:
             stop 2    // break both loops simultaneously
     output i          // never reached if i == j fires
@@ -394,8 +464,8 @@ for :i in 0..10:
 Continue the Nth enclosing loop (jump back to its condition check).
 `skip 1` is a continue of the innermost loop.
 ```rex
-for :i in 0..10:
-    for :j in 0..10:
+for i in 0..10:
+    for j in 0..10:
         if i == j:
             skip 2    // re-evaluate outer loop condition
 ```
@@ -406,7 +476,7 @@ An `else:` block attached directly to a `for` or `while` loop executes **only if
 the loop completes naturally — i.e., it was never interrupted by a `stop`.
 
 ```rex
-for :i in 0..10:
+for i in 0..10:
     if i == 5:
         stop
 else:
@@ -414,8 +484,8 @@ else:
 ```
 
 ```rex
-int :target = 7
-for :i in 0..10:
+int target = 7
+for i in 0..10:
     if i == target:
         stop
 else:
@@ -481,8 +551,12 @@ each item in items:
 
 ## Sequences ✅
 
+Sequences are typed. The element type is declared in brackets. The compiler
+uses the type to size elements, enforce push/pop type safety, and optimise
+access patterns.
+
 ```rex
-seq nums
+seq[int] nums
 push nums 10
 push nums 20
 push nums 30
@@ -495,20 +569,31 @@ int c
 :c = cap nums       // capacity (allocated slots)
 
 int v
-:v = pop nums       // LIFO pop
+:v = pop nums       // LIFO pop — returns int
 output v
 ```
 
+Method-call syntax is also valid:
+```rex
+seq[float] data
+data.push(1.5)
+data.push(2.7)
+```
+
 Sequences grow automatically: if a `push` would exceed capacity, the runtime
-doubles the allocation via `rt_alc` and copies existing elements before storing
-the new value. Growth is unbounded.
+allocates a larger block, copies existing elements, and resumes. Growth is
+unbounded. A compile-time error is raised if you push an element whose type
+does not match the declared element type.
 
 ---
 
 ## Dictionaries ✅
 
+Dictionaries are typed by value. Keys are always `str`. The value type is
+declared in brackets.
+
 ```rex
-dict d
+dict[int] d
 d["hello"] = 42
 d["world"] = 99
 
@@ -517,31 +602,114 @@ int v
 output v
 ```
 
-Keys must be string literals in the current implementation. Variable keys
-(`d[x]` where `x` is a `str`) are planned (see `docs/issues.md` issue #23).
+```rex
+dict[str] labels
+labels["en"] = "Hello"
+labels["es"] = "Hola"
+output labels["en"]
+```
+
+A compile-time error is raised if you assign a value whose type does not match
+the declared value type.
 
 ---
 
-## String Operations
+## Strings ✅ / 📋
+
+`str` is a heap-managed UTF-8 string. It shares the same header layout as `seq`:
+`[capacity: 8 bytes][length: 8 bytes][data: variable bytes]`. String literals
+are copied onto the heap at declaration.
+
+### Declaration ✅
+```rex
+str s = "hello"
+str t = "world"
+```
 
 ### Output ✅
 ```rex
-str s = "hello"
 output s
-```
-
-### Concatenation 📋
-```rex
-str a = "hello"
-str b = " world"
-str c
-:c = a + b
 ```
 
 ### Length ✅
 ```rex
 int n
 :n = len s
+output n
+```
+
+### Concatenation 📋
+Produces a new heap-allocated string. The original strings are unchanged.
+```rex
+str result
+:result = s + " " + t
+output result           // "hello world"
+```
+
+### Indexing — returns `char` 📋
+```rex
+char c = s[0]
+output c                // 'h'
+```
+
+### Comparison 📋
+Content equality — not pointer equality.
+```rex
+if s == "hello":
+    output "match"
+
+if s != t:
+    output "different"
+```
+
+### String cast 📋
+Convert any value to its string representation.
+```rex
+str n
+:n = str(42)
+:n = str(3.14)
+```
+
+---
+
+## `char` Type 📋
+
+A single UTF-8 byte. Declared with single quotes. Backed by an unsigned 8-bit
+value (`byte`) but printed and compared as a character.
+
+```rex
+char c = 'R'
+output c                // R
+
+char first = s[0]       // index into a str
+
+if first == 'h':
+    output "starts with h"
+```
+
+Casting between `char` and `int`:
+```rex
+int code
+:code = int(c)          // ASCII/UTF-8 code point
+
+char back
+:back = char(65)        // 'A'
+```
+
+---
+
+## `byte` Type 📋
+
+Raw unsigned 8-bit value. Used for binary data, I/O buffers, and direct memory
+manipulation. No display semantics — `output` prints the numeric value.
+
+```rex
+byte b = 0xFF
+byte mask = 0b10101010
+
+byte x
+:x = b & mask
+output x                // prints: 170
 ```
 
 ---
@@ -573,25 +741,12 @@ float fr
 
 ---
 
-## Complex Numbers ✅
+## Complex Numbers — Deprecated in Core
 
-```rex
-complex a = 3+4j
-complex b = 1+2j
-output a
-```
-
-### Component access 📋
-```rex
-float r
-:r = real(a)    // isolates real component
-
-float i
-:i = imag(a)    // isolates imaginary component
-
-complex c
-:c = conj(a)    // conjugate (negate imaginary)
-```
+`complex` has been moved out of the Rex core type system. It will be available
+as a standard library import in a future release. The type and its operations
+(`real`, `imag`, `conj`) continue to function in V0.1 but should not be relied
+on in new code.
 
 ---
 
@@ -604,7 +759,8 @@ output x
 output "hello"
 output flag        // bool: prints true / false / unknown
 output pi          // float
-output c           // complex: prints (real+imagj)
+output c           // char: prints the character
+output b           // byte: prints the numeric value
 ```
 
 ---
