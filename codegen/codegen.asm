@@ -155,7 +155,7 @@ proto_needs_r12_save: resb 64       ; 1 if proto is called from inside another p
 memo_jnz_patch:      resq 1
 memo_jge_patch:      resq 1
 memo_je_patch:       resq 1
-; O24: 4× loop unrolling with 4 accumulators (rdx=sum2,r8=cnt2,rcx=sum3,r9=cnt3)
+; O24: 128× loop unrolling with 128 virtual accumulators (closed-form: 128·i + 8128 per pass)
 o24_active:          resb 1
 ; O29: r13 protocol expr-spill register — inside a 1-param push-style proto,
 ; dedicate r13 (callee-saved) as the depth-0 expression spill register instead of
@@ -868,32 +868,8 @@ codegen_emit_for_start:
     call emit_b
     mov al, 0x01
     call emit_b
-    ; O24: speculative init — xor edx,edx; lea r8,[r15+2]; xor ecx,ecx; lea r9,[r15+3]
-    ; Harmless for non-O24 loops (rdx/r8/rcx/r9 unused in O23-only or standard hot paths)
-    mov al, 0x31        ; xor edx, edx = 31 D2
-    call emit_b
-    mov al, 0xD2
-    call emit_b
-    mov al, 0x4D        ; lea r8, [r15+2] = 4D 8D 47 02
-    call emit_b
-    mov al, 0x8D
-    call emit_b
-    mov al, 0x47
-    call emit_b
-    mov al, 0x02
-    call emit_b
-    mov al, 0x31        ; xor ecx, ecx = 31 C9
-    call emit_b
-    mov al, 0xC9
-    call emit_b
-    mov al, 0x4D        ; lea r9, [r15+3] = 4D 8D 4F 03
-    call emit_b
-    mov al, 0x8D
-    call emit_b
-    mov al, 0x4F
-    call emit_b
-    mov al, 0x03
-    call emit_b
+    ; O24: 128 virtual accumulators use closed-form rewrite at for_end; no speculative register
+    ; init needed here (unlike the old 4-register approach, no rdx/r8/rcx/r9 are consumed).
     call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]       ; loop cond start (after the init load)
     ; emit cmp r15,end_val = 49 81 FF <imm32>
@@ -1239,6 +1215,74 @@ codegen_emit_for_end:
     call codegen_patch_for_skips
     cmp r14, 1
     jne .fe_pin_step
+    ; O128: closed-form 128× virtual accumulator folding.
+    ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 128 == 0.
+    ; Replaces per-iteration add with: sum_delta = 128*i + 8128; i += 128
+    ; where 8128 = 0+1+...+127 = 127*128/2. Each outer iteration covers 128 logical loop iterations.
+    ; Supersedes O64 when (end-from) is a multiple of 128.
+    cmp byte [loop_accum_active], 0
+    je .fe_no_o128
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    cmp byte [rcx+rdx+0], 0x4D        ; add r14,r15 byte 0
+    jne .fe_no_o128
+    cmp byte [rcx+rdx+1], 0x01        ; add r14,r15 byte 1
+    jne .fe_no_o128
+    cmp byte [rcx+rdx+2], 0xFE        ; add r14,r15 byte 2
+    jne .fe_no_o128
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 3                         ; body must be exactly 3 bytes
+    jne .fe_no_o128
+    mov rax, [for_rotation_end_val]
+    sub rax, [for_rotation_from_val]
+    test rax, 127                      ; (end-from) % 128 == 0?
+    jnz .fe_no_o128
+    ; O128 applies — rewind out_idx to for_rotation_body_pc and emit closed-form.
+    ; Hot loop body: mov rax,r15 + shl rax,7 + add rax,8128 + add r14,rax + add r15,128
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    ; mov rax, r15 = 4C 89 F8  (REX.W=1 REX.R=1; mov r15→rax)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    ; shl rax, 7 = 48 C1 E0 07  (rax *= 128)
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0xE0
+    call emit_b
+    mov al, 0x07
+    call emit_b
+    ; add rax, 8128 = 48 05 C0 1F 00 00  (0+1+...+127 = 8128 = 0x1FC0)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    mov eax, 8128
+    call emit_d
+    ; add r14, rax = 4B 01 C6  (REX.W=1 REX.B=1; mod=11 reg=000=rax rm=110=r14)
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    ; add r15, 128 = 49 81 C7 80 00 00 00  (REX.W=1 REX.B=1; add r15, imm32=128)
+    mov al, 0x49
+    call emit_b
+    mov al, 0x81
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov eax, 128
+    call emit_d
+    jmp .fe_pin_jmp        ; emit cmp r15,end; jl body_start
+.fe_no_o128:
     ; O64: closed-form 64× accumulator folding.
     ; Condition: O14 body = add r14,r15 (4D 01 FE, exactly 3 bytes) AND (end-from) % 64 == 0.
     ; Replaces per-iteration add with: sum_delta = 64*i + 2016; i += 64
@@ -1354,49 +1398,8 @@ codegen_emit_for_end:
     call emit_b
     mov al, 0x02
     call emit_b
-    ; O24: check if 4×unroll also applies — (end-from) ≡ 0 (mod 4)
-    mov rax, [for_rotation_end_val]
-    sub rax, [for_rotation_from_val]
-    test rax, 3
-    jnz .fe_pin_jmp
-    mov byte [o24_active], 1
-    ; Patch `add r15, 2` imm8 at body_pc+9 and `add rbx, 2` imm8 at body_pc+13 → 4
-    lea rcx, [out_buffer]
-    mov rdx, [for_rotation_body_pc]
-    mov byte [rcx+rdx+9],  0x04
-    mov byte [rcx+rdx+13], 0x04
-    ; append: add rdx, r8 = 4C 01 C2  (REX.R=1 extends reg field 000 → r8)
-    mov al, 0x4C
-    call emit_b
-    mov al, 0x01
-    call emit_b
-    mov al, 0xC2
-    call emit_b
-    ; append: add rcx, r9 = 4C 01 C9  (REX.R=1 extends reg field 001 → r9)
-    mov al, 0x4C
-    call emit_b
-    mov al, 0x01
-    call emit_b
-    mov al, 0xC9
-    call emit_b
-    ; append: add r8, 4 = 49 83 C0 04
-    mov al, 0x49
-    call emit_b
-    mov al, 0x83
-    call emit_b
-    mov al, 0xC0
-    call emit_b
-    mov al, 0x04
-    call emit_b
-    ; append: add r9, 4 = 49 83 C1 04
-    mov al, 0x49
-    call emit_b
-    mov al, 0x83
-    call emit_b
-    mov al, 0xC1
-    call emit_b
-    mov al, 0x04
-    call emit_b
+    ; O24 (128×): eligible loops where (end-from) % 128 == 0 are handled above by O128 closed-form.
+    ; O23-only loops fall straight through to .fe_pin_jmp here.
     jmp .fe_pin_jmp
 .fe_no_o23:
     ; normal path: inc r15 = 49 FF C7
@@ -1549,48 +1552,12 @@ codegen_emit_for_end:
     call codegen_o28_emit_flushes
     mov byte [o28_active], 0        ; reset for next inner loop
 .fe_skip_o28_flush:
-    ; O23: if 2×unroll was applied, emit post-loop combine
-    ; O25: when O24 is also active, use a tree combine to reduce serial r14 latency
-    ;      from 3 cycles (O23+O24 serial) to 2 cycles (parallel pair + sequential merge).
+    ; O23: if 2×unroll was applied, emit post-loop combine: add r14,rax = 4B 01 C6
+    ; (O25 tree combine removed — O24 now uses O128 closed-form which needs no post-loop merge)
     cmp byte [o23_active], 0
     je .fe_no_combine
-    cmp byte [o24_active], 0
-    jne .fe_o25_tree
-    ; O23-only path: add r14,rax = 4B 01 C6
+    ; O23-only combine: add r14,rax = 4B 01 C6
     ; REX.W=1 REX.B=1 (0x4B): r14 is rm=110+REX.B, rax is reg=000
-    mov al, 0x4B
-    call emit_b
-    mov al, 0x01
-    call emit_b
-    mov al, 0xC6
-    call emit_b
-    jmp .fe_no_combine
-.fe_o25_tree:
-    ; O25 LEA tree combine — O23+O24 both active:
-    ; Reduces 3 serial r14 deps to 2 via parallel fold + LEA instead of ADD:
-    ;   step 1a: add rax,rdx = 48 01 D0           (fold rdx into rax; no r14 dep)
-    ;   step 1b: lea r14,[r14+rcx] = 4D 8D 34 0E  (start r14 chain via LEA; no dep on 1a)
-    ;   step 2:  add r14,rax = 4B 01 C6            (merge: r14 += rax+rdx+rcx)
-    ; LEA encoding: REX.W=1 REX.R=1(r14) REX.B=1(r14 base)=0x4D, opcode=0x8D,
-    ;   ModRM=mod00 reg=110(r14_low3) rm=100(SIB)=0x34, SIB=scale0 idx=001(rcx) base=110(r14)=0x0E
-    ; LEA dispatches to p1/p5 instead of p0/p5, reducing port pressure vs paired ADD in step 1a.
-    ; add rax,rdx = 48 01 D0
-    mov al, 0x48
-    call emit_b
-    mov al, 0x01
-    call emit_b
-    mov al, 0xD0
-    call emit_b
-    ; lea r14,[r14+rcx] = 4D 8D 34 0E
-    mov al, 0x4D
-    call emit_b
-    mov al, 0x8D
-    call emit_b
-    mov al, 0x34
-    call emit_b
-    mov al, 0x0E
-    call emit_b
-    ; add r14,rax = 4B 01 C6
     mov al, 0x4B
     call emit_b
     mov al, 0x01
