@@ -137,8 +137,8 @@ reverse at every ret path. Correct: fib(10)=55 verified.
 Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
-## Benchmark — Measured Numbers (June 2026, post-O22)
-- Rex sum (1B): **~331ms** correct `499999999500000000` (O14+O22+µop-align; AT PARITY with C ~334ms)
+## Benchmark — Measured Numbers (June 2026, post-O23)
+- Rex sum (1B): **~139ms** correct `499999999500000000` (O14+O22+O23+µop-align; 2.38× over O22's 331ms)
 - Rex fib(42): **~1289ms** correct `267914296` (O21+FLC+O18; ~2.76× slower than C ~468ms)
 - Rex alloc: **~8ms** vs C malloc ~56ms (Rex ~7× faster)
 - Rex binary size ~8712 bytes minimal vs C ~15800 bytes (1.8× smaller)
@@ -306,6 +306,31 @@ TOK_MEMO_RESET=87. Lexer: after "memo" dword match, checks byte[4]='_' then "res
   MEMO_PTR_BASE + out_idx*8 → address outside the mapped segment → segfault.
 **Null guard:** if the pointer slot is already 0 (table never allocated), the store is a no-op;
   next call goes through the normal alloc path. Safe to call before any protocol call.
+
+## O23: 2× Unroll + Dual Accumulators (IMPLEMENTED)
+Fires when: `loop_accum_active==1` AND body bytes = `4D 01 FE` (`add r14,r15`) AND
+`(end_val - from_val) % 2 == 0` AND body_size == 3 (all confirmed at `for_end` time).
+**Do NOT check `sr_add_done` in for_end** — that flag is reset to 0 by the O14 store
+suppression path (line ~1720) before for_end ever runs. Check `loop_accum_active` and
+verify body bytes directly via `lea rcx,[out_buffer]; mov rdx,[for_rotation_body_pc]`.
+**Init (emitted before guard in for_start):**
+  `xor eax,eax` (31 C0) — zero odd accumulator (rax)
+  `lea rbx,[r15+1]` (49 8D 5F 01) — odd counter = from+1
+**Body extension (appended in for_end after body):**
+  `add rax,rbx` (48 01 D8), `add r15,2` (49 83 C7 02), `add rbx,2` (48 83 C3 02)
+**Combine (post-loop after codegen_patch_jump):**
+  `add r14,rax` = `4B 01 C6` — REX=0x4B (W=1,R=0,X=0,B=1)
+**BSS:** `o23_active resb 1`, `for_rotation_from_val resq 1`.
+**Result:** 331ms → 139ms (2.38× on sum 1B); breaks serial add-r14 dependency chain.
+
+## REX Prefix Encoding Rule for `add r14,rax` (CRITICAL — easy to get wrong)
+`ADD r/m64, r64` (opcode 01): destination=rm field, source=reg field.
+- REX.B extends **rm** (destination); REX.R extends **reg** (source).
+- `add r14,rax`: r14 is dest (rm=110, needs REX.B=1); rax is src (reg=000, REX.R=0)
+  → REX = 0100_1011 = **0x4B**. Encoding: `4B 01 C6`.
+- `add r14,r15`: both need extension → REX.R=1, REX.B=1 → **0x4D**. Encoding: `4D 01 FE`.
+- `add rax,rbx`: neither needs extension → REX.W only → **0x48**. Encoding: `48 01 D8`.
+- Confusion: 0x4C = W=1,R=1,X=0,B=0 → encodes `add rsi,r8` (NOT r14). Bug 7 was exactly this.
 
 ## Rex Protocol Call Syntax
 Rex uses `@name(args)` NOT `name(args)` for protocol calls. In parse_factor, `TOK_AT`

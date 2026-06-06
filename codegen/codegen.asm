@@ -813,9 +813,20 @@ codegen_emit_for_end:
     cmp r14, 1
     jne .fe_pin_step
     ; O23: check if 2×unroll with dual accumulators applies
-    ; Conditions: O14 active (sr_add_done==1) AND (end-from) is even AND body==3 bytes
-    cmp byte [sr_add_done], 0
+    ; Conditions: accumulator promoted (loop_accum_active==1) AND body is exactly
+    ; "add r14,r15" (4D 01 FE, 3 bytes) AND (end-from) is even
+    ; Note: sr_add_done is reset per-store and is always 0 here; check body bytes directly.
+    cmp byte [loop_accum_active], 0
     je .fe_no_o23
+    ; verify body bytes = 4D 01 FE (add r14,r15 — confirms O14 add-fusion only, not sub/mul/div)
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    cmp byte [rcx+rdx+0], 0x4D
+    jne .fe_no_o23
+    cmp byte [rcx+rdx+1], 0x01
+    jne .fe_no_o23
+    cmp byte [rcx+rdx+2], 0xFE
+    jne .fe_no_o23
     mov rax, [for_rotation_end_val]
     sub rax, [for_rotation_from_val]
     test rax, 1                    ; odd iteration count?
@@ -968,10 +979,11 @@ codegen_emit_for_end:
     call emit_d
 .fe_after_jmp:
     call codegen_patch_jump
-    ; O23: if 2×unroll was applied, emit combine: add r14,rax = 4C 01 C6
+    ; O23: if 2×unroll was applied, emit combine: add r14,rax = 4B 01 C6
+    ; REX: W=1 R=0 X=0 B=1 (0x4B): r14 is rm=110+REX.B=1=14, rax is reg=000+REX.R=0=0
     cmp byte [o23_active], 0
     je .fe_no_combine
-    mov al, 0x4C
+    mov al, 0x4B
     call emit_b
     mov al, 0x01
     call emit_b
