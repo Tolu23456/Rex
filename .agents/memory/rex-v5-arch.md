@@ -137,11 +137,17 @@ reverse at every ret path. Correct: fib(10)=55 verified.
 Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
-## Benchmark — Measured Numbers (June 2026, post-O24)
-- Rex sum (1B): **~246ms** correct `499999999500000000` (O14+O22+O23+O24+short-back-edge; 1.49× over gcc -O2 357ms; 6.1× over gcc -O0 1506ms)
-- Rex fib(42): **~1289ms** correct `267914296` (O21+FLC+O18; ~2.76× slower than C ~468ms)
-- Rex alloc: **~8ms** vs C malloc ~56ms (Rex ~7× faster)
-- Rex binary size: 1850 bytes for sum (dead-blob elim; was 8448+ with all blobs) vs C ~15800 bytes
+## Benchmark — Measured Numbers (June 2026, post-O25 + global-push/pop elimination)
+
+**Fair 5-benchmark suite (best-of-N wall-clock, both Rex and C use `time` command):**
+- B1 Arith (1B LCG): Rex 1124ms / C 1158ms → **≈ tie** (Rex wins on pure computation)
+- B3 Calls (200M calls): Rex ~581ms / C ~170ms → **~3.4×** (was 8.4× before this release)
+- B6 Fib-rec fib(42): Rex 1213ms / C 713ms → **1.70×**
+- B7 Fib-iter (10M×80): Rex 1039ms / C 535ms → **1.94×**
+- B9 Dynarray (1M push): Rex 20ms / C 22ms → **Rex wins** (startup-overhead advantage)
+
+**B3 per-call cost:** Rex ~2.95 ns/call (was 6.2 ns/call before global-push/pop elimination).
+**Binary sizes:** Rex wins all 5 (2.9× to 19.7× smaller than GCC output).
 
 ## O22: Loop Rotation + 32-byte µop-cache alignment (IMPLEMENTED — CRITICAL LESSON)
 O22 replaces the unconditional `jmp loop_top` back-edge with `cmp r15,end; jl body_start` (1 branch/iter instead of 2).

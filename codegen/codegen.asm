@@ -1178,32 +1178,49 @@ codegen_emit_for_end:
     call emit_d
 .fe_after_jmp:
     call codegen_patch_jump
-    ; O23: if 2×unroll was applied, emit combine: add r14,rax = 4B 01 C6
-    ; REX: W=1 R=0 X=0 B=1 (0x4B): r14 is rm=110+REX.B=1=14, rax is reg=000+REX.R=0=0
+    ; O23: if 2×unroll was applied, emit post-loop combine
+    ; O25: when O24 is also active, use a tree combine to reduce serial r14 latency
+    ;      from 3 cycles (O23+O24 serial) to 2 cycles (parallel pair + sequential merge).
     cmp byte [o23_active], 0
     je .fe_no_combine
+    cmp byte [o24_active], 0
+    jne .fe_o25_tree
+    ; O23-only path: add r14,rax = 4B 01 C6
+    ; REX.W=1 REX.B=1 (0x4B): r14 is rm=110+REX.B, rax is reg=000
     mov al, 0x4B
     call emit_b
     mov al, 0x01
     call emit_b
     mov al, 0xC6
     call emit_b
-    ; O24: if 4×unroll was applied, also combine rdx and rcx into r14
-    cmp byte [o24_active], 0
-    je .fe_no_combine
-    ; add r14, rdx = 4B 01 D6
-    mov al, 0x4B
+    jmp .fe_no_combine
+.fe_o25_tree:
+    ; O25 tree combine — O23+O24 both active:
+    ; Old (3 serial cycles on r14): add r14,rax; add r14,rdx; add r14,rcx
+    ; New (2 cycles — step 1a ‖ step 1b, then step 2 depends on both):
+    ;   step 1a: add rax,rdx = 48 01 D0  (fold even2 into odd; no r14 dep)
+    ;   step 1b: add r14,rcx = 4B 01 CE  (start r14 chain; no dep on 1a)
+    ;   step 2:  add r14,rax = 4B 01 C6  (complete: r14 += rax+rdx+rcx)
+    ; add rax,rdx = 48 01 D0
+    mov al, 0x48
     call emit_b
     mov al, 0x01
     call emit_b
-    mov al, 0xD6
+    mov al, 0xD0
     call emit_b
-    ; add r14, rcx = 4B 01 CE
+    ; add r14,rcx = 4B 01 CE
     mov al, 0x4B
     call emit_b
     mov al, 0x01
     call emit_b
     mov al, 0xCE
+    call emit_b
+    ; add r14,rax = 4B 01 C6
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
     call emit_b
 .fe_no_combine:
     call codegen_patch_breaks
@@ -3493,16 +3510,9 @@ codegen_emit_push_var_slot:
     call emit_b
     ret
 .pvs_global:
-    push rdi
-    mov al, 0xFF
-    call emit_b
-    mov al, 0x34
-    call emit_b
-    mov al, 0x25
-    call emit_b
-    pop rdi
-    call get_var_va
-    call emit_d
+    ; All Rex protocols use frame-slot calling convention (O21 push-style + O5 locals).
+    ; Callees never write to any global var_table slot, so saving/restoring global
+    ; vars at call sites is unnecessary. Emit nothing — no-op.
     ret
 .pvs_skip:
     ret
@@ -3538,16 +3548,7 @@ codegen_emit_pop_var_slot:
     call emit_b
     ret
 .ppv_global:
-    push rdi
-    mov al, 0x8F
-    call emit_b
-    mov al, 0x04
-    call emit_b
-    mov al, 0x25
-    call emit_b
-    pop rdi
-    call get_var_va
-    call emit_d
+    ; Symmetric no-op: see .pvs_global above.
     ret
 .ppv_skip:
     ret
