@@ -3,7 +3,7 @@
 // skip N = continue the Nth loop from inside (1=innermost, 2=next outer, etc.)
 
 // Basic skip: print only even numbers 0..8
-for :i in 0..10:
+for i in 0..10:
     int r = i % 2
     if r == 1:
         skip
@@ -21,8 +21,8 @@ while x < 10:
 // Nested loops — skip 2 skips the outer loop iteration
 // The inner variable j goes 0..3; when j==1 skip outer (i)
 // Each outer iteration i prints j=0 then skips outer on j=1
-for :i in 0..4:
-    for :j in 0..4:
+for i in 0..4:
+    for j in 0..4:
         if j == 1:
             skip 2  // continue the outer for loop
         output j    // expected per outer iter: 0  (then outer continues)

@@ -6,6 +6,6 @@ prot increment(x):
     return x + 1
 
 int :n = 0
-for :i in 0..200000000:
+for i in 0..200000000:
     :n = @increment(n)
 output n

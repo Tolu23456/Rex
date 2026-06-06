@@ -5,10 +5,10 @@
 int :a = 0
 int :b = 1
 int :c = 0
-for :rep in 0..10000000:
+for rep in 0..10000000:
     :a = 0
     :b = 1
-    for :j in 0..80:
+    for j in 0..80:
         :c = a + b
         :a = b
         :b = c

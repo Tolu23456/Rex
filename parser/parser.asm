@@ -55,6 +55,7 @@ extern codegen_emit_each_start, codegen_emit_each_end
 extern codegen_emit_zero_var
 extern codegen_emit_memo_reset
 extern codegen_skip_pin_save
+extern o13_inhibit
 extern codegen_cur_proto_seq_idx, proto_needs_r12_save, codegen_mark_r12_needed
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
@@ -1325,8 +1326,11 @@ parse_stmt:
 
 ; ── for loop ──────────────────────────────────────────────────────────────────
 .for:
-    call lexer_next             ; skip 'for' → ':'
-    call lexer_next             ; skip ':' → loop var ident
+    call lexer_next             ; skip 'for' → ':' (optional) or ident
+    cmp byte [tok_type], TOK_COLON
+    jne .for_have_ident
+    call lexer_next             ; skip optional ':' → loop var ident
+.for_have_ident:
     lea rdi, [saved_name]
     lea rsi, [tok_ident]
     call strcpy
@@ -1355,7 +1359,9 @@ parse_stmt:
     je .done
     mov r14, rax
     mov rdi, r14
+    mov byte [o13_inhibit], 1      ; suppress O13 promotion: this is a synthetic for-init store
     call codegen_emit_store_rax_to_var
+    mov byte [o13_inhibit], 0
     cmp byte [tok_type], TOK_DOTDOT
     jne .for_nodd
     call lexer_next
@@ -1405,7 +1411,9 @@ parse_stmt:
     je .done
     mov r13, rax
     mov rdi, r13
+    mov byte [o13_inhibit], 1      ; suppress O13 promotion: synthetic i_fe end-value store
     call codegen_emit_store_rax_to_var
+    mov byte [o13_inhibit], 0
 .for_le_alloc:
     ; allocate __le flag var for loop-else (reclaimed by scope_stack at loop exit)
     push r13

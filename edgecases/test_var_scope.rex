@@ -4,19 +4,19 @@
 
 // Issue #37: for-loop synthetic _fe variable must be reclaimed after each loop
 // Run 10 for-loops with the same variable name — should not exhaust var_table
-for :i in 0..3:
+for i in 0..3:
     output i
 
-for :i in 10..13:
+for i in 10..13:
     output i
 
-for :i in 20..23:
+for i in 20..23:
     output i
 
-for :i in 30..33:
+for i in 30..33:
     output i
 
-for :i in 40..43:
+for i in 40..43:
     output i
 
 // All 5 loops reuse the same i and i_fe slots (after fix)

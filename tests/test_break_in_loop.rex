@@ -1,5 +1,5 @@
 // test_break_in_loop.rex — stop (break) inside for and while loops
-for :i in 0..10:
+for i in 0..10:
     if i == 3:
         stop
     output i

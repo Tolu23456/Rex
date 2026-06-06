@@ -83,6 +83,10 @@ break_base_stack: resq 32
 break_base_depth: resq 1
 cont_base_stack:  resq 32
 cont_base_depth:  resq 1
+cont_type_stack:  resb 32    ; 0=while/repeat (backward skip), 1=for (forward skip patch)
+skip_jump_stack:  resq 64    ; positions of forward jmp operands for skip-in-for
+skip_target_stack: resq 64   ; target cont_base_stack index for each skip entry
+skip_jump_depth:  resq 1     ; next free slot in skip_jump_stack
 prot_jmp_idx:     resq 1
 prot_jmp_live:    resb 1
 for_step_val:     resq 1
@@ -124,6 +128,8 @@ loop_accum_active:    resb 1      ; 1 = accumulator (r14) is live for this loop
 loop_accum_var_idx:   resq 1      ; var_idx of the variable promoted to r14
 loop_accum_read_first: resb 1     ; 1 = candidate var was LOADED before its first store
 loop_accum_load_patch_pos: resq 1 ; out_buffer offset of that first global load (8 bytes)
+global o13_inhibit
+o13_inhibit: resb 1               ; 1 = suppress O13 promotion (set by parser for synthetic for-init stores)
 ; O14: strength-reduction — fuse :accum = accum + pin → single add r14,r15
 sr_add_candidate:    resb 1  ; 1 = candidate 12-byte rewind sequence is live
 sr_add_rhs_is_pin:   resb 1  ; 1 = the + RHS was the O2-pinned loop variable (r15)
@@ -994,7 +1000,7 @@ codegen_emit_for_start:
     mov [o28_body_start], rax
 .fs_o28_bs_skip:
     mov rdi, rbx
-    call codegen_push_cont
+    call codegen_push_cont_for
     mov rax, rbx
     pop r13
     pop r12
@@ -1227,7 +1233,10 @@ codegen_emit_for_end:
     je .fe_global_inc
     cmp r13, [loop_pin_var_idx]
     jne .fe_global_inc
-    ; pinned: increment r15
+    ; pinned: patch any pending skip forward jumps targeting this loop, then increment r15
+    mov rdi, [cont_base_depth]
+    dec rdi
+    call codegen_patch_for_skips
     cmp r14, 1
     jne .fe_pin_step
     ; O64: closed-form 64× accumulator folding.
@@ -1423,6 +1432,10 @@ codegen_emit_for_end:
     call emit_d
     jmp .fe_pin_jmp
 .fe_global_inc:
+    ; patch any pending skip forward jumps targeting this for loop, then increment loop var
+    mov rdi, [cont_base_depth]
+    dec rdi
+    call codegen_patch_for_skips
     cmp r14, 1
     jne .fe_step
     ; inc qword [loop_var_addr]  (7 bytes: 48 FF 04 25 <addr32>)
@@ -1627,7 +1640,10 @@ codegen_emit_for_end:
 .fe_accum_nop:
     ; no accumulator found: replace the 8-byte placeholder with an 8-byte NOP
     ; 8-byte NOP: 0F 1F 84 00 00 00 00 00
+    ; GUARD: loop_accum_patch_pos==0 means no placeholder was emitted (dynamic loop) — skip
     mov rbx, [loop_accum_patch_pos]
+    test rbx, rbx
+    jz .fe_accum_done
     lea rdi, [out_buffer]
     mov byte [rdi+rbx+0], 0x0F
     mov byte [rdi+rbx+1], 0x1F
@@ -1659,6 +1675,10 @@ codegen_emit_for_start_dyn:
     mov r13, rsi
     ; O2: track nesting depth (no pin for dynamic loops)
     inc qword [loop_pin_depth]
+    ; O13 guard: reset patch_pos to 0 so fe_accum_nop skips the NOP-overwrite for dynamic loops
+    mov qword [loop_accum_patch_pos], 0
+    mov byte [loop_accum_active], 0
+    mov qword [loop_accum_var_idx], -1
     ; for_step_val already set by parser via codegen_set_for_step; do not reset here
     mov rax, [break_jump_depth]
     mov r14, [break_base_depth]
@@ -1702,7 +1722,7 @@ codegen_emit_for_start_dyn:
     xor eax, eax
     call emit_d
     mov rdi, rbx
-    call codegen_push_cont
+    call codegen_push_cont_for
     mov rax, rbx
     pop r14
     pop r13
@@ -1800,10 +1820,56 @@ codegen_patch_breaks:
     ret
 
 codegen_push_cont:
+    ; push cont_pc with type=0 (while/repeat — skip uses backward jmp)
     mov rax, [cont_base_depth]
     lea rcx, [cont_base_stack]
     mov [rcx+rax*8], rdi
+    lea rcx, [cont_type_stack]
+    mov byte [rcx+rax], 0
     inc qword [cont_base_depth]
+    ret
+
+codegen_push_cont_for:
+    ; push cont_pc with type=1 (for loop — skip uses forward jmp placeholder)
+    mov rax, [cont_base_depth]
+    lea rcx, [cont_base_stack]
+    mov [rcx+rax*8], rdi
+    lea rcx, [cont_type_stack]
+    mov byte [rcx+rax], 1
+    inc qword [cont_base_depth]
+    ret
+
+codegen_patch_for_skips:
+    ; rdi = target cont_base_stack index (cont_base_depth - 1 of the finishing for loop)
+    ; Scan skip_jump_stack; patch entries whose skip_target_stack matches rdi.
+    push rbx
+    push r12
+    mov r12, rdi               ; r12 = my cont level
+    xor rsi, rsi               ; rsi = scan index
+.spfs_scan:
+    cmp rsi, [skip_jump_depth]
+    jae .spfs_done
+    lea rcx, [skip_target_stack]
+    mov rbx, [rcx+rsi*8]
+    cmp rbx, r12               ; target matches?
+    jne .spfs_next
+    ; patch: write displacement at operand position
+    lea rcx, [skip_jump_stack]
+    mov rdx, [rcx+rsi*8]
+    mov rax, [out_idx]
+    sub rax, rdx
+    sub rax, 4
+    lea rcx, [out_buffer]
+    mov [rcx+rdx], eax
+    ; mark entry as consumed (-1)
+    lea rcx, [skip_target_stack]
+    mov qword [rcx+rsi*8], -1
+.spfs_next:
+    inc rsi
+    jmp .spfs_scan
+.spfs_done:
+    pop r12
+    pop rbx
     ret
 
 codegen_pop_cont:
@@ -1828,8 +1894,16 @@ codegen_emit_skip:
 .clamp:
     xor rax, rax
 .emit:
+    ; check cont type: 0=while(backward jmp), 1=for(forward patch)
+    mov rbx, rax                       ; rbx = target cont index
+    lea rcx, [cont_type_stack]
+    movzx rdx, byte [rcx+rbx]
+    test rdx, rdx
+    jnz .emit_for_forward
+
+    ; type=0: while/repeat — emit backward jmp to cont_pc
     lea rcx, [cont_base_stack]
-    mov rbx, [rcx+rax*8]
+    mov rbx, [rcx+rbx*8]              ; rbx = cont_pc (backward target)
     mov al, 0xE9
     call emit_b
     mov rax, rbx
@@ -1839,6 +1913,22 @@ codegen_emit_skip:
     add rdx, LOAD_BASE
     sub rax, rdx
     call emit_d
+    jmp .done
+
+.emit_for_forward:
+    ; type=1: for loop — emit forward jmp placeholder; patch later at for_end increment
+    mov al, 0xE9
+    call emit_b                        ; emit_b preserves rbx (target cont level)
+    mov rax, [out_idx]
+    mov rdx, [skip_jump_depth]
+    lea rcx, [skip_jump_stack]
+    mov [rcx+rdx*8], rax               ; save operand position
+    lea rcx, [skip_target_stack]
+    mov [rcx+rdx*8], rbx               ; save target cont level
+    inc qword [skip_jump_depth]
+    xor eax, eax
+    call emit_d
+
 .done:
     pop r12
     pop rbx
@@ -2390,6 +2480,8 @@ codegen_emit_store_rax_to_var:
     ret
 .srv_first_check:
     ; First global store inside the outermost loop → promote to accumulator (O13)
+    cmp byte [o13_inhibit], 0
+    jne .srv_global            ; parser inhibit: synthetic for-init store, never promote
     cmp byte [loop_pin_active], 0
     je .srv_global             ; not in a pinned loop
     cmp qword [loop_pin_depth], 1

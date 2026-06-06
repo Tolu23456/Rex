@@ -4,6 +4,6 @@
 // Uses new method-call push syntax: data.push(i)
 
 seq data
-for :i in 0..1000000:
+for i in 0..1000000:
     data.push(i)
 output 1
