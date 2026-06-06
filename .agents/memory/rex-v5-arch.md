@@ -137,11 +137,11 @@ reverse at every ret path. Correct: fib(10)=55 verified.
 Performance cost: ~9–10× vs C for fib(42) due to memory round-trips per param per
 call. Next step: rbp-relative stack frames to eliminate global-memory indirection.
 
-## Benchmark — Measured Numbers (June 2026, post-O23)
-- Rex sum (1B): **~139ms** correct `499999999500000000` (O14+O22+O23+µop-align; 2.38× over O22's 331ms)
+## Benchmark — Measured Numbers (June 2026, post-O24)
+- Rex sum (1B): **~246ms** correct `499999999500000000` (O14+O22+O23+O24+short-back-edge; 1.49× over gcc -O2 357ms; 6.1× over gcc -O0 1506ms)
 - Rex fib(42): **~1289ms** correct `267914296` (O21+FLC+O18; ~2.76× slower than C ~468ms)
 - Rex alloc: **~8ms** vs C malloc ~56ms (Rex ~7× faster)
-- Rex binary size ~8712 bytes minimal vs C ~15800 bytes (1.8× smaller)
+- Rex binary size: 1850 bytes for sum (dead-blob elim; was 8448+ with all blobs) vs C ~15800 bytes
 
 ## O22: Loop Rotation + 32-byte µop-cache alignment (IMPLEMENTED — CRITICAL LESSON)
 O22 replaces the unconditional `jmp loop_top` back-edge with `cmp r15,end; jl body_start` (1 branch/iter instead of 2).
@@ -331,6 +331,23 @@ verify body bytes directly via `lea rcx,[out_buffer]; mov rdx,[for_rotation_body
 - `add r14,r15`: both need extension → REX.R=1, REX.B=1 → **0x4D**. Encoding: `4D 01 FE`.
 - `add rax,rbx`: neither needs extension → REX.W only → **0x48**. Encoding: `48 01 D8`.
 - Confusion: 0x4C = W=1,R=1,X=0,B=0 → encodes `add rsi,r8` (NOT r14). Bug 7 was exactly this.
+
+## O24: 4× Unroll + 4 Accumulators (IMPLEMENTED — CRITICAL REX BUG FIXED)
+Fires inside O23 path when `(end_val - from_val) % 4 == 0`.
+**Init (emitted before guard, after O23 spec init):**
+  `xor edx,edx` (31 D2), `lea r8,[r15+2]` (4D 8D 47 02), `xor ecx,ecx` (31 C9), `lea r9,[r15+3]` (4D 8D 4F 03)
+**Body extension (appended after O23 extensions):**
+  `add rdx,r8` = `4C 01 C2`, `add rcx,r9` = `4C 01 C9`, `add r8,4` = `49 83 C0 04`, `add r9,4` = `49 83 C1 04`
+**Patching:** also changes O23's `add r15,2` → `add r15,4` (body_pc+9) and `add rbx,2` → `add rbx,4` (body_pc+13).
+**Combine (after O23 combine):**
+  `add r14,rdx` = `4B 01 D6`, `add r14,rcx` = `4B 01 CE`
+**CRITICAL BUG FIXED:** REX byte for `add rdx,r8` and `add rcx,r9` must be **0x4C** (REX.R=1 extends reg field 000/001 → r8/r9), NOT 0x4A (REX.R=0, REX.X=1 → encodes `add rdx,rax` / `add rcx,rcx` instead). 0x4A vs 0x4C differs by exactly bit 2 (REX.R). Symptom: 0..4 sum gave 2 instead of 6; the `add rcx,rcx` doubled a zero, giving 0.
+**Rule:** for `ADD r/m64, r64` (opcode 01), REX.R extends the SOURCE (reg field). r8–r15 as SOURCE need REX.R=1. r8–r15 as DESTINATION (rm field) need REX.B=1.
+
+## Dead Blob Elimination + Short Back-edge JMP (IMPLEMENTED)
+**Dead blob elimination:** `prescan_blobs` in main.asm scans source for 4-byte keyword patterns (BLOB_MASK constants); `codegen_init` emits only the blobs needed, records actual VAs into BSS (`actual_pri_va` etc.). Result: int-only sum benchmark = 1850 bytes vs 8448+ with all blobs.
+**Caveat:** prescan scans raw bytes including comments/strings — false positives are harmless (extra blobs included = slightly larger binary, still correct).
+**Short back-edge JMP:** in `.fe_pin_jmp`, computes target_VA = body_pc + LOAD_BASE; if `target_VA - VA_after_short_jl >= -128`, emits 2-byte `7C rel8`; else 6-byte `0F 8C rel32`. For 1B iteration loop: saves 4 bytes + avoids 32-bit displacement decode per iteration.
 
 ## Rex Protocol Call Syntax
 Rex uses `@name(args)` NOT `name(args)` for protocol calls. In parse_factor, `TOK_AT`

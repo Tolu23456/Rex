@@ -136,6 +136,18 @@ push_style_frame:    resb 1
 memo_jnz_patch:      resq 1
 memo_jge_patch:      resq 1
 memo_je_patch:       resq 1
+; O24: 4× loop unrolling with 4 accumulators (rdx=sum2,r8=cnt2,rcx=sum3,r9=cnt3)
+o24_active:          resb 1
+; Dead blob elimination: actual VAs for each conditionally-emitted blob (0 = not included)
+actual_pri_va:       resq 1
+actual_prs_va:       resq 1
+actual_prb_va:       resq 1
+actual_prf_va:       resq 1
+actual_prc_va:       resq 1
+actual_sip_va:       resq 1
+actual_alc_va:       resq 1
+actual_prq_va:       resq 1
+actual_alc_mode_va:  resq 1  ; = actual_alc_va + RT_ALC_SIZE - 8 (the allocator .mode var)
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
@@ -212,35 +224,135 @@ codegen_write_headers:
     ret
 
 codegen_init:
+    ; rdi = blob inclusion bitmask (bit0=PRI, bit1=PRS, bit2=PRB, bit3=PRF,
+    ;                                bit4=PRC, bit5=SIP, bit6=ALC, bit7=PRQ)
+    push rbx
+    push r12
+    push r13
+    mov r12d, edi               ; save blob mask (low byte sufficient)
     mov qword [for_step_val], 1
+    ; Zero actual-VA table (9 qwords: pri..prq + alc_mode)
+    lea rdi, [actual_pri_va]
+    xor eax, eax
+    mov ecx, 9
+    rep stosq
+    ; ── Compute total size of needed blobs ───────────────────────────────────
+    xor r13d, r13d
+    test r12b, 0x01
+    jz .ci_nps
+    add r13d, RT_PRI_SIZE
+.ci_nps:
+    test r12b, 0x02
+    jz .ci_npss
+    add r13d, RT_PRS_SIZE
+.ci_npss:
+    test r12b, 0x04
+    jz .ci_npb
+    add r13d, RT_PRB_SIZE
+.ci_npb:
+    test r12b, 0x08
+    jz .ci_npf
+    add r13d, RT_PRF_SIZE
+.ci_npf:
+    test r12b, 0x10
+    jz .ci_npc
+    add r13d, RT_PRC_SIZE
+.ci_npc:
+    test r12b, 0x20
+    jz .ci_nsi
+    add r13d, RT_SIP_SIZE
+.ci_nsi:
+    test r12b, 0x40
+    jz .ci_nal
+    add r13d, RT_ALC_SIZE
+.ci_nal:
+    test r12b, 0x80
+    jz .ci_npq
+    add r13d, RT_PRQ_SIZE
+.ci_npq:
+    ; Emit JMP over blobs: E9 <total_needed_size>
     mov al, 0xE9
     call emit_b
-    mov eax, RT_TOTAL_SIZE
+    mov eax, r13d
     call emit_d
+    ; ── Emit each needed blob, recording actual LOAD_BASE VA ─────────────────
+    test r12b, 0x01
+    jz .ci_sp
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_pri_va], rax
     lea rsi, [rt_pri_blob]
     mov rcx, RT_PRI_SIZE
     call emit_blob
+.ci_sp:
+    test r12b, 0x02
+    jz .ci_ss
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_prs_va], rax
     lea rsi, [rt_prs_blob]
     mov rcx, RT_PRS_SIZE
     call emit_blob
+.ci_ss:
+    test r12b, 0x04
+    jz .ci_sb
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_prb_va], rax
     lea rsi, [rt_prb_blob]
     mov rcx, RT_PRB_SIZE
     call emit_blob
+.ci_sb:
+    test r12b, 0x08
+    jz .ci_sf
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_prf_va], rax
     lea rsi, [rt_prf_blob]
     mov rcx, RT_PRF_SIZE
     call emit_blob
+.ci_sf:
+    test r12b, 0x10
+    jz .ci_sc
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_prc_va], rax
     lea rsi, [rt_prc_blob]
     mov rcx, RT_PRC_SIZE
     call emit_blob
+.ci_sc:
+    test r12b, 0x20
+    jz .ci_ssi
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_sip_va], rax
     lea rsi, [rt_sip_blob]
     mov rcx, RT_SIP_SIZE
     call emit_blob
+.ci_ssi:
+    test r12b, 0x40
+    jz .ci_sal
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_alc_va], rax
+    add rax, RT_ALC_SIZE - 8    ; .mode variable is at end of alc blob
+    mov [actual_alc_mode_va], rax
     lea rsi, [rt_alc_blob]
     mov rcx, RT_ALC_SIZE
     call emit_blob
+.ci_sal:
+    test r12b, 0x80
+    jz .ci_spq
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_prq_va], rax
     lea rsi, [rt_prq_blob]
     mov rcx, RT_PRQ_SIZE
     call emit_blob
+.ci_spq:
+    pop r13
+    pop r12
+    pop rbx
     ret
 
 codegen_finish:
@@ -283,7 +395,7 @@ codegen_output_const:
     call emit_d
     mov al, 0xE8
     call emit_b
-    mov rax, LOAD_BASE+RT_PRI_OFFSET
+    mov rax, [actual_pri_va]
     mov rdx, [out_idx]
     add rdx, 4
     add rdx, LOAD_BASE
@@ -332,7 +444,7 @@ codegen_output_typed:
 .ot_call:
     mov al, 0xE8
     call emit_b
-    mov rax, RT_PRI_OFFSET
+    lea rax, [actual_pri_va]
     cmp sil, TYPE_STR
     je .s
     cmp sil, TYPE_BOOL
@@ -342,14 +454,14 @@ codegen_output_typed:
     cmp sil, TYPE_COMPLEX
     je .c
     jmp .d
-.s: mov rax, RT_PRS_OFFSET
+.s: lea rax, [actual_prs_va]
     jmp .d
-.b: mov rax, RT_PRB_OFFSET
+.b: lea rax, [actual_prb_va]
     jmp .d
-.f: mov rax, RT_PRF_OFFSET
+.f: lea rax, [actual_prf_va]
     jmp .d
-.c: mov rax, RT_PRC_OFFSET
-.d: add rax, LOAD_BASE
+.c: lea rax, [actual_prc_va]
+.d: mov rax, [rax]
     mov rdx, [out_idx]
     add rdx, 4
     add rdx, LOAD_BASE
@@ -369,7 +481,7 @@ codegen_output_rax:
     pop rsi
     mov al, 0xE8
     call emit_b
-    mov rax, RT_PRI_OFFSET
+    lea rax, [actual_pri_va]
     cmp sil, TYPE_STR
     je .s
     cmp sil, TYPE_BOOL
@@ -379,14 +491,14 @@ codegen_output_rax:
     cmp sil, TYPE_COMPLEX
     je .c
     jmp .d
-.s: mov rax, RT_PRS_OFFSET
+.s: lea rax, [actual_prs_va]
     jmp .d
-.b: mov rax, RT_PRB_OFFSET
+.b: lea rax, [actual_prb_va]
     jmp .d
-.f: mov rax, RT_PRF_OFFSET
+.f: lea rax, [actual_prf_va]
     jmp .d
-.c: mov rax, RT_PRC_OFFSET
-.d: add rax, LOAD_BASE
+.c: lea rax, [actual_prc_va]
+.d: mov rax, [rax]
     mov rdx, [out_idx]
     add rdx, 4
     add rdx, LOAD_BASE
@@ -692,9 +804,10 @@ codegen_emit_for_start:
     mov byte [sr_add_candidate], 0
     mov byte [sr_add_rhs_is_pin], 0
     mov byte [sr_add_done], 0
-    ; O23: save from_val (rsi) for even-iteration check, reset flag
+    ; O23/O24: save from_val (rsi) for even/quad-iteration check, reset flags
     mov [for_rotation_from_val], rsi
     mov byte [o23_active], 0
+    mov byte [o24_active], 0
     mov al, 0x4C
     call emit_b
     mov al, 0x8B
@@ -718,6 +831,32 @@ codegen_emit_for_start:
     mov al, 0x5F
     call emit_b
     mov al, 0x01
+    call emit_b
+    ; O24: speculative init — xor edx,edx; lea r8,[r15+2]; xor ecx,ecx; lea r9,[r15+3]
+    ; Harmless for non-O24 loops (rdx/r8/rcx/r9 unused in O23-only or standard hot paths)
+    mov al, 0x31        ; xor edx, edx = 31 D2
+    call emit_b
+    mov al, 0xD2
+    call emit_b
+    mov al, 0x4D        ; lea r8, [r15+2] = 4D 8D 47 02
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x47
+    call emit_b
+    mov al, 0x02
+    call emit_b
+    mov al, 0x31        ; xor ecx, ecx = 31 C9
+    call emit_b
+    mov al, 0xC9
+    call emit_b
+    mov al, 0x4D        ; lea r9, [r15+3] = 4D 8D 4F 03
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x4F
+    call emit_b
+    mov al, 0x03
     call emit_b
     call codegen_align_loop_top   ; align loop top to 16-byte i-cache boundary
     mov rbx, [out_idx]       ; loop cond start (after the init load)
@@ -859,6 +998,49 @@ codegen_emit_for_end:
     call emit_b
     mov al, 0x02
     call emit_b
+    ; O24: check if 4×unroll also applies — (end-from) ≡ 0 (mod 4)
+    mov rax, [for_rotation_end_val]
+    sub rax, [for_rotation_from_val]
+    test rax, 3
+    jnz .fe_pin_jmp
+    mov byte [o24_active], 1
+    ; Patch `add r15, 2` imm8 at body_pc+9 and `add rbx, 2` imm8 at body_pc+13 → 4
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    mov byte [rcx+rdx+9],  0x04
+    mov byte [rcx+rdx+13], 0x04
+    ; append: add rdx, r8 = 4C 01 C2  (REX.R=1 extends reg field 000 → r8)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC2
+    call emit_b
+    ; append: add rcx, r9 = 4C 01 C9  (REX.R=1 extends reg field 001 → r9)
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC9
+    call emit_b
+    ; append: add r8, 4 = 49 83 C0 04
+    mov al, 0x49
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    ; append: add r9, 4 = 49 83 C1 04
+    mov al, 0x49
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC1
+    call emit_b
+    mov al, 0x04
+    call emit_b
     jmp .fe_pin_jmp
 .fe_no_o23:
     ; normal path: inc r15 = 49 FF C7
@@ -953,7 +1135,24 @@ codegen_emit_for_end:
     call emit_b
     mov rax, [for_rotation_end_val]
     call emit_d
-    ; emit: jl body_start_pc = 0F 8C <rel32>
+    ; Short-JMP optimisation: use 2-byte `jl rel8` when back-edge fits in signed 8 bits
+    mov rax, [for_rotation_body_pc]
+    add rax, LOAD_BASE              ; target VA
+    mov rdx, [out_idx]
+    add rdx, 2                      ; assume short form: 2 bytes
+    add rdx, LOAD_BASE
+    sub rax, rdx                    ; rel = target - VA_after_short_jl (negative)
+    cmp rax, -128
+    jl .fe_near_jl                  ; out of rel8 range: use 6-byte near jl
+    ; short jl: 7C <rel8>
+    mov [for_rotation_nop_cnt], al  ; stash rel8 byte (reuse nop_cnt temp — done with it)
+    mov al, 0x7C
+    call emit_b
+    movzx eax, byte [for_rotation_nop_cnt]
+    call emit_b
+    jmp .fe_after_jmp
+.fe_near_jl:
+    ; near jl: 0F 8C <rel32>  (emit opcodes first so out_idx is up-to-date for displacement)
     mov al, 0x0F
     call emit_b
     mov al, 0x8C
@@ -988,6 +1187,23 @@ codegen_emit_for_end:
     mov al, 0x01
     call emit_b
     mov al, 0xC6
+    call emit_b
+    ; O24: if 4×unroll was applied, also combine rdx and rcx into r14
+    cmp byte [o24_active], 0
+    je .fe_no_combine
+    ; add r14, rdx = 4B 01 D6
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xD6
+    call emit_b
+    ; add r14, rcx = 4B 01 CE
+    mov al, 0x4B
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xCE
     call emit_b
 .fe_no_combine:
     call codegen_patch_breaks
@@ -1350,7 +1566,7 @@ codegen_emit_arg_pops:
 codegen_emit_mm_switch:
     ; rdi=mode (0=arena,1=pool): emit mov qword [rip+disp], rdi
     ; encodes: 48 C7 05 <rel32> <imm32>
-    ; target address: LOAD_BASE + RT_ALC_OFFSET + RT_ALC_SIZE - 8  (the .mode variable)
+    ; target address: actual_alc_mode_va (= actual_alc_va + RT_ALC_SIZE - 8)
     mov al, 0x48
     call emit_b
     mov al, 0xC7
@@ -1359,7 +1575,7 @@ codegen_emit_mm_switch:
     call emit_b
     ; rel32 = target - (out_idx + 4 + 4 + LOAD_BASE)
     ; (rel32 field + imm32 field = 8 bytes; next instr is after both)
-    mov rax, LOAD_BASE + RT_ALC_OFFSET + RT_ALC_SIZE - 8
+    mov rax, [actual_alc_mode_va]
     mov rdx, [out_idx]
     add rdx, 4          ; past rel32
     add rdx, 4          ; past imm32 = next instruction
@@ -2898,7 +3114,7 @@ codegen_emit_seq_alloc:
     call emit_d
     mov al, 0xE8
     call emit_b
-    mov rax, LOAD_BASE+RT_ALC_OFFSET
+    mov rax, [actual_alc_va]
     mov rdx, [out_idx]
     add rdx, 4
     add rdx, LOAD_BASE
@@ -3016,7 +3232,7 @@ codegen_emit_seq_push:
     ; call rt_alc       →  E8 <rel32>   (rax = new buffer ptr)
     mov al, 0xE8
     call emit_b
-    mov rax, LOAD_BASE+RT_ALC_OFFSET
+    mov rax, [actual_alc_va]
     mov rdx, [out_idx]
     add rdx, 4
     add rdx, LOAD_BASE
@@ -3223,10 +3439,10 @@ codegen_emit_mov_rdi_rax:
     ret
 
 codegen_emit_call_rt_err:
-    ; emit: call rt_prq (= RT_PRQ_OFFSET)
+    ; emit: call rt_prq entry
     mov al, 0xE8
     call emit_b
-    mov rax, LOAD_BASE+RT_PRQ_OFFSET
+    mov rax, [actual_prq_va]
     mov rdx, [out_idx]
     add rdx, 4
     add rdx, LOAD_BASE
@@ -4576,7 +4792,7 @@ codegen_emit_memo_check:
     ; call rt_alc — E8 <rel32>
     mov al, 0xE8
     call emit_b
-    mov rax, LOAD_BASE + RT_ALC_OFFSET
+    mov rax, [actual_alc_va]
     mov rdx, [out_idx]
     add rdx, 4
     add rdx, LOAD_BASE
