@@ -447,7 +447,8 @@ codegen_output_typed:
     cmp rax, -1
     je .ot_global
     ; frame slot K: emit mov rdi,[rsp+K*8] = 48 8B 7C 24 <disp8>
-    mov rcx, rax
+    ; NOTE: emit_b clobbers rcx (lea rcx,[out_buffer]). Save K on stack.
+    push rax                 ; save K before emit_b clobbers rcx
     mov al, 0x48
     call emit_b
     mov al, 0x8B
@@ -456,6 +457,7 @@ codegen_output_typed:
     call emit_b
     mov al, 0x24
     call emit_b
+    pop rcx                  ; restore K (after last emit_b that clobbers rcx)
     shl rcx, 3
     mov al, cl
     call emit_b
@@ -897,9 +899,9 @@ codegen_emit_for_start:
     mov [o28_inner_loop_var], r12   ; r12 = loop var_idx (saved at for_start entry)
     mov byte [o28_active], 1
     mov byte [o28_var_count], 0
-    mov ecx, 2                      ; emit 2 × 8-byte long NOPs
-.fs_cg_nop_loop:
-    mov al, 0x0F                    ; 8-byte long NOP: 0F 1F 84 00 00000000
+    ; emit 2 × 8-byte long NOPs (unrolled — emit_d clobbers rcx/ecx so no ecx loop counter)
+    ; NOP 1: 0F 1F 84 00 00000000
+    mov al, 0x0F
     call emit_b
     mov al, 0x1F
     call emit_b
@@ -909,8 +911,17 @@ codegen_emit_for_start:
     call emit_b
     xor eax, eax
     call emit_d
-    dec ecx
-    jnz .fs_cg_nop_loop
+    ; NOP 2: 0F 1F 84 00 00000000
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x1F
+    call emit_b
+    mov al, 0x84
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    xor eax, eax
+    call emit_d
     jmp .fs_cg_done
 .fs_cg_no_o28:
     mov byte [o28_active], 0
@@ -1391,18 +1402,62 @@ codegen_emit_for_end:
     ; codegen_patch_breaks + codegen_pop_cont + O13 flush happen at .fe_no_combine/.fe_done
     jmp .fe_no_combine
 .fe_no_affine:
-    ; O-Affine-Mul: closed-form for multiply-only loops (:x = x*A, 26-byte body).
-    ; Detects a single-assignment loop body `for i in 0..N: :x = x*A` where A is a
-    ; compile-time constant and the loop index i is unused in the body.
-    ; Computes A^N mod 2^64 in the compiler via binary ladder, then emits:
-    ;   mov rax, A^N (imm64)   +   imul r14, rax      (2 runtime instructions)
-    ; If A^N == 1 (e.g. A=1, or any A with A^N ≡ 1 mod 2^64): emits nothing.
+    ; O-Affine-Mul: closed-form for multiply-only loops (:x = x*A).
+    ; Two body-size variants:
+    ;   26-byte: A is imm32 → uses mov eax,A + imul rax,rbx
+    ;   18-byte: A fits imm8 → uses imul rax,r10,A  (3-operand form)
+    ; Detects `for i in 0..N: :x = x*A`, computes A^N mod 2^64 at compile time.
+    ; Emits: mov rax, A^N (imm64) + imul r14, rax   (2 runtime instructions).
+    ; If A^N == 1: emits nothing.
     cmp byte [loop_accum_active], 0
     je .fe_no_mul_only
     mov rax, [out_idx]
     sub rax, [for_rotation_body_pc]
     cmp rax, 26
+    je .fe_mul_only_26
+    cmp rax, 18
     jne .fe_no_mul_only
+    ; ── 18-byte path: imul rax, r10, imm8 (3-operand, small constant A) ────────
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    ; [0..2] = 4C 89 F0 (mov rax, r14)
+    cmp byte [rcx+rdx+0], 0x4C
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+1], 0x89
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+2], 0xF0
+    jne .fe_no_mul_only
+    ; [3] and [7] = 0x90 (spot-check 5 NOPs)
+    cmp byte [rcx+rdx+3], 0x90
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+7], 0x90
+    jne .fe_no_mul_only
+    ; [8..10] = 49 89 C2 (mov r10, rax — spill)
+    cmp byte [rcx+rdx+8], 0x49
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+9], 0x89
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+10], 0xC2
+    jne .fe_no_mul_only
+    ; [11..13] = 49 6B C2 (imul rax, r10, imm8 — REX.W+REX.B, opcode 6B, ModRM C2)
+    cmp byte [rcx+rdx+11], 0x49
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+12], 0x6B
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+13], 0xC2
+    jne .fe_no_mul_only
+    ; [15..17] = 49 89 C6 (mov r14, rax — accumulator store)
+    cmp byte [rcx+rdx+15], 0x49
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+16], 0x89
+    jne .fe_no_mul_only
+    cmp byte [rcx+rdx+17], 0xC6
+    jne .fe_no_mul_only
+    ; Extract A from byte [14] (imm8, zero-extended to 64-bit)
+    movzx r8, byte [rcx+rdx+14]     ; r8 = A (zero-extended imm8)
+    jmp .affine_mul_have_A
+.fe_mul_only_26:
+    ; ── 26-byte path: mov eax, imm32 + imul rax, rbx ────────────────────────────
     lea rcx, [out_buffer]
     mov rdx, [for_rotation_body_pc]
     ; [0..2] = 4C 89 F0 (mov rax, r14 — accumulator read)
@@ -1450,8 +1505,11 @@ codegen_emit_for_end:
     jne .fe_no_mul_only
     cmp byte [rcx+rdx+25], 0xC6
     jne .fe_no_mul_only
-    ; Pattern confirmed. Extract A (body+12), compute N = end_val - from_val.
+    ; Extract A (body+12) as imm32, zero-extended
     mov r8d, dword [rcx+rdx+12]     ; r8 = A (zero-extended)
+    ; fall through to shared binary ladder
+.affine_mul_have_A:
+    ; ── Shared: binary ladder and code emit (both 18-byte and 26-byte paths) ────
     mov r10, [for_rotation_end_val]
     sub r10, [for_rotation_from_val] ; r10 = N
     ; Binary ladder — compiler-time only (not emitted):
@@ -1474,7 +1532,7 @@ codegen_emit_for_end:
     jmp .affine_mul_ladder
 .affine_mul_ladder_done:
     pop rbx
-    ; Rewind output buffer to body start — erase the 26-byte loop body
+    ; Rewind output buffer to body start — erase the loop body
     mov rax, [for_rotation_body_pc]
     mov [out_idx], rax
     ; If A^N == 1: x is unchanged, emit nothing
@@ -2876,7 +2934,8 @@ codegen_emit_mov_rax_var:
     cmp rax, -1
     je .mrv_global
     ; frame slot K: emit mov rax,[rsp+K*8] = 48 8B 44 24 <disp8>
-    mov rcx, rax
+    ; NOTE: emit_b clobbers rcx (lea rcx,[out_buffer]). Save K on stack.
+    push rax                 ; save K before emit_b clobbers rcx
     mov al, 0x48
     call emit_b
     mov al, 0x8B
@@ -2885,6 +2944,7 @@ codegen_emit_mov_rax_var:
     call emit_b
     mov al, 0x24
     call emit_b
+    pop rcx                  ; restore K (after last emit_b that clobbers rcx)
     shl rcx, 3
     mov al, cl
     call emit_b
@@ -2981,7 +3041,8 @@ codegen_emit_store_rax_to_var:
     cmp rax, -1
     je .srv_global_check
     ; frame slot K: emit mov [rsp+K*8],rax = 48 89 44 24 <disp8>
-    mov rcx, rax
+    ; NOTE: emit_b clobbers rcx (lea rcx,[out_buffer]). Save K on stack.
+    push rax                 ; save K before emit_b clobbers rcx
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -2990,6 +3051,7 @@ codegen_emit_store_rax_to_var:
     call emit_b
     mov al, 0x24
     call emit_b
+    pop rcx                  ; restore K (after last emit_b that clobbers rcx)
     shl rcx, 3
     mov al, cl
     call emit_b
@@ -3715,6 +3777,9 @@ codegen_emit_idiv_rbx_by_rax:
     sub rax, 8               ; rewind past literal (5) + restore (3)
     mov [out_idx], rax
     ; rax = dividend already (save left rax unchanged; only r10 was set)
+    ; IMPORTANT: emit_b/emit_d clobber rcx/ecx/cl via 'lea rcx,[out_buffer]'.
+    ; Save k on the stack before any emit calls.
+    push rcx                 ; save k (= ecx = shift amount)
     ; sar rax, 63  (sign fill: 0 if positive, -1 if negative)
     mov al, 0x48
     call emit_b
@@ -3754,7 +3819,10 @@ codegen_emit_idiv_rbx_by_rax:
     call emit_b
     mov al, 0xF8
     call emit_b
-    movzx eax, cl
+    ; Restore k now — AFTER the last emit_b that clobbers cl (0xF8 ModRM above).
+    ; pop must come here, not earlier, since each call emit_b resets cl to 0xF8.
+    pop rcx                  ; restore k (shift amount, saved before emit sequence)
+    movzx eax, cl            ; cl = k (correct — restored from stack)
     call emit_b
     ret
 .div30_skip:
