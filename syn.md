@@ -694,64 +694,235 @@ each item in items:
 
 ## Sequences ✅ / 📋
 
-Sequences are typed. The element type is declared in brackets. Method-call
-syntax is the primary API. Sequences grow automatically when capacity is exceeded.
+Sequences are heap-allocated, typed, and growable. The element type is declared
+in brackets. Method-call syntax is the canonical API.
+
+### Declaration and literals 📋
 
 ```rex
-seq[int] nums
-nums.push(10)
-nums.push(20)
-nums.push(30)
-
-output nums.len()       // 3
-output nums.cap()       // allocated capacity
-output nums.pop()       // 30 — LIFO pop
-output nums[0]          // 10 — index access
+seq[int] nums               // empty seq — push elements in
+seq[int] nums = [1, 2, 3]  // literal initialisation — type inferred from declaration
+seq[str] words = ["hello", "world"]
+seq[float] vals = [1.0, 2.5, 3.14]
 ```
 
+`[...]` is only valid at a seq declaration site. The compiler verifies each
+element matches `T` — a mismatch is a compile-time error.
+
+### Pre-sizing
+
+Declare an initial capacity without setting any elements. Avoids the first few
+grows when the final size is roughly known:
+
+```rex
+seq[int] buf = 1024     // capacity 1024, length 0 — no elements yet
+buf.push(42)            // first push; no allocation needed
+```
+
+### Index access and negative indexing
+
+```rex
+output nums[0]          // first element
+output nums[-1]         // last element  (len - 1)
+output nums[-2]         // second-to-last
+:nums[0] = 99           // write to first  — `:` mutation sigil required
+:nums[-1] = 0           // write to last
+```
+
+Negative indices count from the end. An out-of-range index (positive or
+negative) is a runtime panic.
+
+### Concatenation ✅ / 📋
+
+`+` produces a new seq containing all elements of both operands. Neither
+operand is modified:
+
+```rex
+seq[int] a = [1, 2, 3]
+seq[int] b = [4, 5, 6]
+seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
+```
+
+---
+
 ### `seq[T]` method reference
+
+#### Core ✅
 
 | Method | Returns | Notes |
 |---|---|---|
 | `.push(val)` | — | Append to end; grows if needed |
-| `.pop()` | `T` | Remove and return last element |
-| `.get(i)` | `T` | Same as `s[i]`; index from 0 |
-| `.set(i, val)` | — | Same as `:s[i] = val` |
+| `.pop()` | `T` | Remove and return last element (LIFO) |
+| `.get(i)` | `T` | Same as `s[i]`; supports negative indices |
+| `.set(i, val)` | — | Same as `:s[i] = val`; supports negative indices |
 | `.len()` | `int` | Current element count |
 | `.cap()` | `int` | Allocated capacity |
-| `.contains(val)` | `bool` | Linear scan for value |
-| `.remove(i)` | — | Remove element at index; shifts remaining |
+| `.clear()` | — | Remove all elements; keep allocation |
 | `.sort()` | — | In-place ascending sort |
 | `.reverse()` | — | In-place reversal |
-| `.slice(start, end)` | `seq[T]` | New sub-sequence (non-mutating) |
-| `.map(fn)` | `seq[U]` | Transform every element via lambda |
-| `.filter(fn)` | `seq[T]` | Keep elements where `fn` returns `true` |
-| `.each(fn)` | — | Call `fn` for every element (forEach) |
-| `.clear()` | — | Remove all elements; keep allocation |
+| `.contains(val)` | `bool` | Linear scan; `true` if value found |
+| `.remove(i)` | — | Remove element at index i; shift remaining left — O(n) |
+| `.slice(start, end)` | `seq[T]` | New sub-sequence; `end` is exclusive |
+| `.map(fn)` | `seq[U]` | New seq — every element transformed via `fn` |
+| `.filter(fn)` | `seq[T]` | New seq — keep elements where `fn` returns `true` |
+| `.each(fn)` | — | Call `fn(element)` for every element in order |
+
+#### Access 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.first()` | `T` | First element; runtime error if empty |
+| `.last()` | `T` | Last element; runtime error if empty |
+| `.is_empty()` | `bool` | True when `len() == 0` |
+| `.index_of(val)` | `int` | Index of first occurrence; `-1` if not found |
+| `.find(fn)` | `T` | First element where `fn` returns `true`; error if none |
+| `.find_index(fn)` | `int` | Index of first match; `-1` if none |
+
+#### Mutation 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.insert(i, val)` | — | Insert before index i; shift right — O(n) |
+| `.prepend(val)` | — | Insert at front; same as `.insert(0, val)` — O(n) |
+| `.dequeue()` | `T` | Remove and return first element (FIFO); shift left — O(n) |
+| `.extend(other)` | — | Append all elements of `other` seq in place |
+| `.fill(val)` | — | Set every element to `val` (length unchanged) |
+| `.truncate(n)` | — | Keep only first `n` elements; length becomes `min(n, len)` |
+| `.swap_at(i, j)` | — | Swap elements at indices `i` and `j` in place |
+| `.sort_by(fn)` | — | In-place sort; `fn(a, b) -> int` — negative/zero/positive |
+| `.sort_desc()` | — | In-place descending sort |
+
+#### Aggregation 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.sum()` | `T` | Sum of all elements; `T` must be `int` or `float` |
+| `.min()` | `T` | Minimum value; runtime error if empty |
+| `.max()` | `T` | Maximum value; runtime error if empty |
+| `.count(fn)` | `int` | Number of elements where `fn` returns `true` |
+
+#### Predicate checks 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.all(fn)` | `bool` | `true` if every element satisfies `fn` |
+| `.any(fn)` | `bool` | `true` if at least one element satisfies `fn` |
+| `.none(fn)` | `bool` | `true` if no element satisfies `fn` |
+
+#### Transformation 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.reduce(fn, init)` | `T` | Left fold; `fn(accumulator, element) -> T` |
+| `.unique()` | `seq[T]` | New seq with duplicates removed; order preserved |
+| `.copy()` | `seq[T]` | Shallow copy; independent allocation |
+| `.zip(other)` | `seq[tup[T,U]]` | Pair elements by index; length = min of both |
+| `.flatten()` | `seq[T]` | Collapse `seq[seq[T]]` into `seq[T]` |
+
+---
 
 ### Examples
 
 ```rex
-seq[int] nums
-nums.push(3)
-nums.push(1)
-nums.push(4)
-nums.push(1)
-nums.push(5)
+seq[int] nums = [3, 1, 4, 1, 5, 9, 2, 6]
 
-nums.sort()                              // [1, 1, 3, 4, 5]
-nums.reverse()                           // [5, 4, 3, 1, 1]
-output nums.contains(4)                  // true
+// sorting and access
+nums.sort()
+output nums.first()         // 1
+output nums.last()          // 9
+output nums[-1]             // 9 — negative index
 
-seq[int] big = nums.filter(fn(int x) -> bool: x > 2)
+// search
+output nums.index_of(5)     // 4
+output nums.find_index(fn(int x) -> bool: x > 7)   // 7 (value 9)
+
+// aggregation
+output nums.sum()           // 31
+output nums.min()           // 1
+output nums.max()           // 9
+output nums.count(fn(int x) -> bool: x % 2 == 0)   // 3
+
+// predicates
+output nums.any(fn(int x) -> bool: x > 8)   // true
+output nums.all(fn(int x) -> bool: x > 0)   // true
+output nums.none(fn(int x) -> bool: x < 0)  // true
+
+// transformation
 seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
-seq[int] part = nums.slice(1, 3)        // elements at index 1 and 2
+seq[int] evens = nums.filter(fn(int x) -> bool: x % 2 == 0)
+int total = nums.reduce(fn(int acc, int x) -> int: acc + x, 0)
+seq[int] deduped = nums.unique()             // [3, 1, 4, 5, 9, 2, 6]
 
-nums.each(fn(int x): output "{x}")      // print each
-output nums.len()
+// mutation
+nums.insert(0, 0)           // prepend 0
+nums.extend([7, 8])         // append 7 and 8
+nums.truncate(5)            // keep first 5
+
+// concatenation
+seq[int] a = [1, 2, 3]
+seq[int] b = [4, 5, 6]
+seq[int] c = a + b          // [1, 2, 3, 4, 5, 6]
 ```
 
-A compile-time error is raised when pushing a value whose type mismatches `T`.
+A compile-time error is raised when pushing or inserting a value whose type
+mismatches `T`.
+
+---
+
+## Fixed-Size Arrays — `arr[T, N]` 📋
+
+For data whose size is known at compile time. Stack-allocated, zero header
+overhead, no heap touch. `N` must be an integer literal or compile-time
+constant.
+
+```rex
+arr[int, 3] rgb = [255, 128, 0]
+arr[float, 4] quat = [0.0, 0.0, 0.0, 1.0]
+```
+
+`arr[T, N]` is NOT growable. `.push()`, `.extend()`, `.dequeue()` are not
+available. The element count is fixed and known to the compiler — `.len()`
+is a compile-time constant.
+
+### Index access
+
+```rex
+output rgb[0]           // 255
+:rgb[2] = 64            // write — `:` sigil required
+output rgb[-1]          // 0 — negative index supported
+```
+
+### `arr[T, N]` method reference
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.len()` | `int` | Always `N` — compile-time constant |
+| `.get(i)` | `T` | Same as `a[i]`; negative indices supported |
+| `.set(i, val)` | — | Same as `:a[i] = val` |
+| `.contains(val)` | `bool` | Linear scan |
+| `.sort()` | — | In-place ascending sort |
+| `.sort_by(fn)` | — | In-place sort with custom comparator |
+| `.sort_desc()` | — | In-place descending sort |
+| `.reverse()` | — | In-place reversal |
+| `.slice(start, end)` | `arr[T, M]` | Sub-array; `M = end - start`, compile-time |
+| `.each(fn)` | — | Call `fn(element)` for every element |
+| `.map(fn)` | `arr[U, N]` | New array — every element transformed |
+| `.contains(val)` | `bool` | Linear scan |
+| `.sum()` | `T` | Sum of all elements |
+| `.min()` | `T` | Minimum value |
+| `.max()` | `T` | Maximum value |
+| `.copy()` | `arr[T, N]` | Independent copy |
+| `.to_seq()` | `seq[T]` | Heap-allocate a new `seq[T]` with same elements |
+
+### `arr` vs `seq` — when to use which
+
+| | `seq[T]` | `arr[T, N]` |
+|---|---|---|
+| Size known at compile time | no | **yes** |
+| Growable | **yes** | no |
+| Memory | heap | **stack** |
+| Header overhead | 16 bytes | **none** |
+| Use for | lists, queues, accumulators | vectors, fixed buffers, matrices |
 
 ---
 
