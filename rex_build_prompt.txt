@@ -77,7 +77,7 @@ structural disadvantages that Rex does not:
   ─────────────────────────────────
   It does not mean beating a C expert with perfect hand-tuned malloc, custom
   allocators, and explicit SIMD intrinsics. It means beating typical C programs
-  as written by a skilled C programmer using the standard toolchain (gcc -O2
+  as written by a skilled C programmer using the standard toolchain (gcc -O3
   with glibc). That is the realistic comparison point.
 
 ─────────────────────────────────────────────────────────────────────────────
