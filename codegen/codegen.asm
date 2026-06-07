@@ -2599,7 +2599,7 @@ codegen_o31_scan_and_flush:
 .p1_loop:
     lea rax, [r12+8]
     cmp rax, r13
-    jge .p1_done
+    jg .p1_done
     cmp byte [r14+r12+0], 0x48
     jne .p1_next
     movzx eax, byte [r14+r12+1]
@@ -2643,7 +2643,7 @@ codegen_o31_scan_and_flush:
 .p2_loop:
     lea rax, [r12+8]
     cmp rax, r13
-    jge .p2_done
+    jg .p2_done
     cmp byte [r14+r12+0], 0x48
     jne .p2_next
     cmp byte [r14+r12+2], 0x04

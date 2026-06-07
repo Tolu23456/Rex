@@ -344,6 +344,16 @@ Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-3
 ### out_buffer expansion
 - 131072 → 524288 bytes (128 KB → 512 KB). Enables removal of bounds check in emit_b.
 
+### O31 scan boundary off-by-one (FIXED)
+- Phase 1 and Phase 2 of `codegen_o31_scan_and_flush` used `jge .pN_done` to guard the scan loop (`lea rax,[r12+8]; cmp rax,r13; jge`).
+- `r13 = o31_jmp_back_pos` is exclusive upper bound. An 8-byte instruction at `r13-8` ends exactly at `r13` — so `r12+8 == r13` → `jge` fires → last instruction before the jmp-back is always skipped.
+- **Symptom:** while-loop body stores that are the final statement (e.g. `:b = r`) were left as `48 89 04 25 addr32` (global store) — not patched to `49 89 C4/C5` (reg store) — causing the promoted register and the global variable to diverge. Binary hung.
+- **Fix:** change both `jge .p1_done` and `jge .p2_done` to `jg` (strictly greater than).
+- **Rule:** whenever scan bounds are exclusive upper limits and the instruction size equals the chunk size, use `jg` not `jge`.
+
 ### Build results (June 2026)
 - Compile time (100× bench_rex.rex): 446ms wall / 44ms user.
 - Runtime (bench_rex: 10M-iter sum): 19ms.
+- B13 GCD: Rex 164ms, C 165ms (~parity). Checksum 7988080 matches.
+- B14 while-div: Rex 391ms, C 87ms (C wins ~4.5×). Checksum 213222809 matches.
+- 37/37 tests pass after O31 fix.
