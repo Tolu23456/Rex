@@ -131,7 +131,7 @@ Rule: **true dominates** — `true or anything` is always `true`.
 ```rex
 bool coin
 :coin = unknown         // hardware-entropy value
-output coin             // prints: true, false, or unknown
+output(coin)             // prints: true, false, or unknown
 
 bool a = true
 bool b = unknown
@@ -178,10 +178,10 @@ bool result
 
 ```rex
 if x > 0 and y > 0:
-    output "both positive"
+    output("both positive")
 
 if a == 1 or b == 1:
-    output "at least one"
+    output("at least one")
 ```
 
 ### `not` operator 📋
@@ -193,7 +193,7 @@ for integer bitwise inversion. Not yet implemented in codegen.
 bool flag = true
 
 if not flag:
-    output "off"
+    output("off")
 ```
 
 **Planned emission:**
@@ -214,10 +214,10 @@ and null/sentinel checks without triggering arithmetic promotion.
 
 ```rex
 if x is 0:
-    output "zero"
+    output("zero")
 
 if ptr is not null:
-    output "valid"
+    output("valid")
 ```
 
 **Planned semantics:**
@@ -234,10 +234,10 @@ equality for collection types.
 Check whether a value is present in a `seq`, `dict`, or `str`.
 ```rex
 if 5 in nums:
-    output "found"
+    output("found")
 
 if "key" in d:
-    output "exists"
+    output("exists")
 ```
 
 ### Pipeline — `->` 📋
@@ -342,7 +342,7 @@ byte b = byte(255)      // 0xFF
 Returns the compiler's internal type token for a variable as an integer. Useful for conditional dispatch.
 ```rex
 int x = 5
-output typeof x
+output(typeof x)
 ```
 
 ---
@@ -356,7 +356,7 @@ Return a value with `return`. The return type is annotated with `->`.
 
 ```rex
 prot greet():
-    output "Hello"
+    output("Hello")
 
 prot square(int x) -> int:
     return x * x
@@ -379,7 +379,7 @@ Rex code means: "this is yours."
 
 int result
 :result = @add(3, 4)
-output result
+output(result)
 ```
 
 ### Multiple return values — tuples 📋
@@ -400,8 +400,8 @@ prot minmax(seq[int] s) -> (int, int):
 
 int lo, int hi
 :lo, :hi = @minmax(nums)
-output lo
-output hi
+output(lo)
+output(hi)
 ```
 
 Tuple return values are positional. The types on the left side must match the
@@ -427,7 +427,7 @@ prot dot(int a, int b) -> int:
 #cold
 #safe
 prot log_error(str msg):
-    err msg
+    err(msg)
 ```
 
 **Why `#` and not `@`?** `@` is already Rex's call prefix. Using it for decorators
@@ -497,11 +497,11 @@ prot clamp(int val, int lo, int hi) -> int:
 int x = 10
 
 if x == 10:
-    output "ten"
+    output("ten")
 elif x == 5:
-    output "five"
+    output("five")
 else:
-    output "other"
+    output("other")
 ```
 
 All six comparison operators are supported: `==`, `!=`, `<`, `>`, `<=`, `>=`.
@@ -513,11 +513,11 @@ int code = 2
 
 when code:
     is 1:
-        output "one"
+        output("one")
     is 2:
-        output "two"
+        output("two")
     else:
-        output "other"
+        output("other")
 ```
 
 ### `match` 📋
@@ -525,11 +525,11 @@ Structural pattern matching. Dense integer ranges compile to O(1) jump tables.
 ```rex
 match x:
     int:
-        output "integer"
+        output("integer")
     float:
-        output "float"
+        output("float")
     str:
-        output "string"
+        output("string")
 ```
 
 ### `pass` ✅
@@ -541,7 +541,7 @@ prot todo():
 if x == 0:
     pass
 else:
-    output x
+    output(x)
 ```
 
 ---
@@ -554,19 +554,19 @@ arithmetic, unary negation). The loop variable is implicitly mutable — the
 loop syntax itself implies iteration; no `:` sigil is needed at the declaration.
 ```rex
 for i in 0..10:
-    output i
+    output(i)
 
 for i in 0..20 step 2:
-    output i
+    output(i)
 
 for i in -5..5:
-    output i
+    output(i)
 ```
 
 ### While loop ✅
 ```rex
 while true:
-    output "Hello"
+    output("Hello")
     stop
 ```
 
@@ -576,7 +576,7 @@ Break out of the current (innermost) loop.
 for i in 0..100:
     if i == 5:
         stop
-    output i
+    output(i)
 ```
 
 ### `stop N` 📋
@@ -589,7 +589,7 @@ for i in 0..10:
     for j in 0..10:
         if i == j:
             stop 2    // break both loops simultaneously
-    output i          // never reached if i == j fires
+    output(i)          // never reached if i == j fires
 ```
 
 **Planned semantics:**
@@ -623,7 +623,7 @@ for i in 0..10:
     if i == 5:
         stop
 else:
-    output "completed without stop"
+    output("completed without stop")
 ```
 
 ```rex
@@ -632,7 +632,7 @@ for i in 0..10:
     if i == target:
         stop
 else:
-    output "target not found in range"
+    output("target not found in range")
 ```
 
 **Planned semantics:**
@@ -655,14 +655,14 @@ not needed inside the body.
 
 ```rex
 repeat 8:
-    output "tick"
+    output("tick")
 ```
 
 ```rex
 int :sum = 0
 repeat 100:
     :sum = sum + 1
-output sum
+output(sum)
 ```
 
 **Planned emission:**
@@ -687,7 +687,7 @@ jnz .top
 Cache-aligned iterator for sequential collection sweeping. Token is lexed; parser pending.
 ```rex
 each item in items:
-    output item
+    output(item)
 ```
 
 ---
@@ -722,9 +722,9 @@ buf.push(42)            // first push; no allocation needed
 ### Index access and negative indexing
 
 ```rex
-output nums[0]          // first element
-output nums[-1]         // last element  (len - 1)
-output nums[-2]         // second-to-last
+output(nums[0])          // first element
+output(nums[-1])         // last element  (len - 1)
+output(nums[-2])         // second-to-last
 :nums[0] = 99           // write to first  — `:` mutation sigil required
 :nums[-1] = 0           // write to last
 ```
@@ -828,24 +828,24 @@ seq[int] nums = [3, 1, 4, 1, 5, 9, 2, 6]
 
 // sorting and access
 nums.sort()
-output nums.first()         // 1
-output nums.last()          // 9
-output nums[-1]             // 9 — negative index
+output(nums.first())         // 1
+output(nums.last())          // 9
+output(nums[-1])             // 9 — negative index
 
 // search
-output nums.index_of(5)     // 4
-output nums.find_index(fn(int x) -> bool: x > 7)   // 7 (value 9)
+output(nums.index_of(5))     // 4
+output(nums.find_index(fn(int x) -> bool: x > 7))   // 7 (value 9)
 
 // aggregation
-output nums.sum()           // 31
-output nums.min()           // 1
-output nums.max()           // 9
-output nums.count(fn(int x) -> bool: x % 2 == 0)   // 3
+output(nums.sum())           // 31
+output(nums.min())           // 1
+output(nums.max())           // 9
+output(nums.count(fn(int x) -> bool: x % 2 == 0))   // 3
 
 // predicates
-output nums.any(fn(int x) -> bool: x > 8)   // true
-output nums.all(fn(int x) -> bool: x > 0)   // true
-output nums.none(fn(int x) -> bool: x < 0)  // true
+output(nums.any(fn(int x) -> bool: x > 8))   // true
+output(nums.all(fn(int x) -> bool: x > 0))   // true
+output(nums.none(fn(int x) -> bool: x < 0))  // true
 
 // transformation
 seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
@@ -887,9 +887,9 @@ is a compile-time constant.
 ### Index access
 
 ```rex
-output rgb[0]           // 255
+output(rgb[0])           // 255
 :rgb[2] = 64            // write — `:` sigil required
-output rgb[-1]          // 0 — negative index supported
+output(rgb[-1])          // 0 — negative index supported
 ```
 
 ### `arr[T, N]` method reference
@@ -950,7 +950,7 @@ Bracket syntax is canonical for single-key read and write:
 
 ```rex
 scores["alice"] = 95          // write — no `:` sigil needed (key is explicit)
-output scores["alice"]        // read
+output(scores["alice"])        // read
 ```
 
 `.get()` and `.set()` are the method equivalents.
@@ -962,7 +962,7 @@ Use `.get_or()` or `.has()` to guard:
 
 ```rex
 if scores.has("carol"):
-    output scores["carol"]
+    output(scores["carol"])
 
 int val = scores.get_or("carol", 0)     // 0 if missing — no insert
 ```
@@ -1032,17 +1032,17 @@ int val = scores.get_or("carol", 0)     // 0 if missing — no insert
 dict[int] scores = {"alice": 95, "bob": 87, "carol": 72}
 
 // basic access
-output scores["alice"]                   // 95
-output scores.has("dave")               // false
-output scores.get_or("dave", 0)         // 0
+output(scores["alice"])                   // 95
+output(scores.has("dave"))               // false
+output(scores.get_or("dave", 0))         // 0
 
 // safe insert-if-missing
 int s = scores.get_or_set("dave", 50)   // inserts 50, returns 50
-output scores.len()                      // 4
+output(scores.len())                      // 4
 
 // searching
-output scores.has_value(87)             // true
-output scores.find_key(95)              // "alice"
+output(scores.has_value(87))             // true
+output(scores.find_key(95))              // "alice"
 
 // iteration
 scores.each(fn(str k, int v): output "{k}: {v}")
@@ -1055,14 +1055,14 @@ dict[int] passing = scores.filter(fn(str k, int v) -> bool: v >= 75)
 // {"alice": 95, "bob": 87}
 
 // aggregation
-output scores.any(fn(str k, int v) -> bool: v == 100)    // false
-output scores.all(fn(str k, int v) -> bool: v > 50)      // true
-output scores.count(fn(str k, int v) -> bool: v >= 80)   // 2
+output(scores.any(fn(str k, int v) -> bool: v == 100))    // false
+output(scores.all(fn(str k, int v) -> bool: v > 50))      // true
+output(scores.count(fn(str k, int v) -> bool: v >= 80))   // 2
 
 // bulk
 dict[int] extras = {"eve": 88, "alice": 99}
 scores.update(extras)       // alice → 99, eve → 88 added
-output scores.len()         // 5
+output(scores.len())         // 5
 
 // sorted keys (deterministic output)
 seq[str] sorted_keys = scores.keys().sort()
@@ -1079,9 +1079,9 @@ A compile-time error is raised when a value's type mismatches `T`.
 
 ## Strings ✅ / 📋
 
-`str` is a heap-managed UTF-8 string. It shares the same header layout as `seq`:
-`[capacity: 8 bytes][length: 8 bytes][data: variable bytes]`. String literals
-are copied onto the heap at declaration.
+`str` is a heap-managed UTF-8 string with header layout
+`[capacity: 8 bytes][length: 8 bytes][data: variable]`. All methods return
+new strings — mutation always goes through `:s = s.method()`.
 
 ### Declaration ✅
 ```rex
@@ -1089,86 +1089,184 @@ str s = "hello"
 str t = "world"
 ```
 
-### Output ✅
+### Operators
+
 ```rex
-output s
+// concatenation — new string, originals unchanged
+str result = s + " " + t       // "hello world"
+
+// repetition
+str line = "-" * 40            // "----------------------------------------"
+// equivalent to:
+str line = "-".repeat(40)
 ```
 
-### Length ✅
+### Indexing and negative indices 📋
+
 ```rex
-int n
-:n = len s
-output n
+char c = s[0]       // first char
+char last = s[-1]   // last char
+char prev = s[-2]   // second to last
 ```
 
-### Concatenation 📋
-Produces a new heap-allocated string. The original strings are unchanged.
-```rex
-str result
-:result = s + " " + t
-output result           // "hello world"
-```
-
-### Indexing — returns `char` 📋
-```rex
-char c = s[0]
-output c                // 'h'
-```
+Negative indices count from the end. Out-of-range is a runtime error.
 
 ### Comparison 📋
-Content equality — not pointer equality.
+
+Content equality — not pointer equality:
 ```rex
 if s == "hello":
-    output "match"
-
+    output("match")
 if s != t:
-    output "different"
+    output("different")
 ```
+
+All six comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`) use
+lexicographic byte order.
 
 ### String cast 📋
-Convert any value to its string representation.
+
 ```rex
-str n
-:n = str(42)
-:n = str(3.14)
+str a = str(42)        // "42"
+str b = str(3.14)      // "3.14"
+str c = str(true)      // "true"
 ```
 
-### `str` method reference 📋
+> **Parsing strings to numbers uses cast functions:** `int("42")`, `float("3.14")` — not method calls.
+
+---
+
+### `str` method reference
+
+#### Core ✅
 
 | Method | Returns | Notes |
 |---|---|---|
-| `.len()` | `int` | Number of bytes |
-| `.upper()` | `str` | New uppercase copy |
-| `.lower()` | `str` | New lowercase copy |
-| `.trim()` | `str` | New copy with leading/trailing whitespace removed |
-| `.split(sep)` | `seq[str]` | Split by separator string |
-| `.contains(sub)` | `bool` | True if substring found |
-| `.starts_with(prefix)` | `bool` | True if string begins with prefix |
-| `.ends_with(suffix)` | `bool` | True if string ends with suffix |
-| `.replace(old, new)` | `str` | New copy with all occurrences replaced |
-| `.slice(start, end)` | `str` | New substring from index start to end |
+| `.len()` | `int` | Byte count (not codepoint count) |
+| `.upper()` | `str` | New uppercase copy (ASCII) |
+| `.lower()` | `str` | New lowercase copy (ASCII) |
+| `.trim()` | `str` | New copy with leading/trailing whitespace stripped |
+| `.trim_left()` | `str` | Strip leading whitespace only |
+| `.trim_right()` | `str` | Strip trailing whitespace only |
+| `.contains(sub)` | `bool` | `true` if substring `sub` found anywhere |
+| `.starts_with(prefix)` | `bool` | `true` if string begins with `prefix` |
+| `.ends_with(suffix)` | `bool` | `true` if string ends with `suffix` |
+| `.replace(old, new)` | `str` | New copy with every occurrence of `old` replaced by `new` |
+| `.slice(start, end)` | `str` | New substring; `end` exclusive; negative indices supported |
+| `.split(sep)` | `seq[str]` | Split on separator string; empty string splits every char |
 
-> **Parsing strings to numbers uses cast functions:** `int("42")`, `float("3.14")` — not `.to_int()` or `.to_float()`.
+#### Access 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.is_empty()` | `bool` | `true` when `len() == 0` |
+| `.first()` | `char` | First character; runtime error if empty |
+| `.last()` | `char` | Last character; runtime error if empty |
+| `.char_at(i)` | `char` | Same as `s[i]`; negative indices supported |
+| `.byte_at(i)` | `byte` | Raw byte value at index; negative indices supported |
+
+#### Search 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.index_of(sub)` | `int` | Index of first occurrence of `sub`; `-1` if not found |
+| `.last_index_of(sub)` | `int` | Index of last occurrence; `-1` if not found |
+| `.find(fn)` | `char` | First char where `fn(char) -> bool`; runtime error if none |
+| `.find_index(fn)` | `int` | Index of first char matching predicate; `-1` if none |
+
+#### Count 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.count(sub)` | `int` | Count of non-overlapping occurrences of substring `sub` |
+| `.count(fn)` | `int` | Count of chars matching `fn(char) -> bool` |
+
+#### Predicates 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.all(fn)` | `bool` | `true` if every char satisfies `fn(char) -> bool` |
+| `.any(fn)` | `bool` | `true` if at least one char satisfies `fn(char) -> bool` |
+| `.none(fn)` | `bool` | `true` if no char satisfies `fn(char) -> bool` |
+
+#### Transformation 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.reverse()` | `str` | New byte-reversed string |
+| `.repeat(n)` | `str` | New string repeated `n` times |
+| `.pad_left(n, char)` | `str` | Left-pad with `char` until total length is `n` |
+| `.pad_right(n, char)` | `str` | Right-pad with `char` until total length is `n` |
+| `.center(n, char)` | `str` | Center in width `n` with `char` on both sides |
+| `.strip_prefix(prefix)` | `str` | Remove `prefix` if present; unchanged otherwise |
+| `.strip_suffix(suffix)` | `str` | Remove `suffix` if present; unchanged otherwise |
+| `.replace_first(old, new)` | `str` | Replace only the first occurrence of `old` |
+
+#### Splitting and joining 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.lines()` | `seq[str]` | Split on `\n`; trailing newline produces no empty final element |
+| `.words()` | `seq[str]` | Split on whitespace runs; leading/trailing whitespace ignored |
+| `.join(parts)` | `str` | Use self as separator to join `seq[str]` — e.g., `", ".join(names)` |
+
+#### Collection views 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.chars()` | `seq[char]` | All characters as a sequence |
+| `.bytes()` | `seq[byte]` | All raw UTF-8 bytes as a sequence |
+
+---
+
+### Examples
 
 ```rex
 str s = "  Hello, World!  "
-output s.trim()                       // "Hello, World!"
-output s.trim().lower()               // "hello, world!"
-output s.trim().contains("World")     // true
-output s.trim().replace("World", "Rex") // "Hello, Rex!"
-output s.trim().starts_with("Hello")  // true
 
-seq[str] parts = "a,b,c".split(",")  // ["a", "b", "c"]
-parts.each(fn(str p): output p)
+// core
+output(s.trim())                              // "Hello, World!"
+output(s.trim().lower())                      // "hello, world!"
+output(s.trim().replace("World", "Rex"))      // "Hello, Rex!"
+output(s.trim().starts_with("Hello"))         // true
+output(s.trim().ends_with("!"))               // true
 
-str name = "Rex"
-output "length: {name.len()}"        // length: 3
-output name.upper()                  // REX
-output name[0]                       // 'R'
-output name.slice(0, 2)              // "Re"
+// search
+str name = "mississippi"
+output(name.index_of("ss"))                   // 2
+output(name.last_index_of("ss"))              // 5
+output(name.count("ss"))                      // 2
+output(name.find_index(fn(char c) -> bool: c == 'p'))  // 8
 
-int parsed = int("42")               // cast function — not ".to_int()"
-float fp = float("3.14")             // cast function — not ".to_float()"
+// predicates
+str digits = "12345"
+output(digits.all(fn(char c) -> bool: c >= '0' and c <= '9'))  // true
+output(digits.any(fn(char c) -> bool: c == '3'))               // true
+output(digits.none(fn(char c) -> bool: c == 'a'))              // true
+
+// transformation
+output("abc".repeat(3))                       // "abcabcabc"
+output("abc" * 3)                             // "abcabcabc"
+output("hi".pad_left(6, ' '))                // "    hi"
+output("hi".pad_right(6, '-'))               // "hi----"
+output("hi".center(6, '*'))                  // "**hi**"
+output("  hello".strip_prefix("  "))         // "hello"
+output("hello!".strip_suffix("!"))           // "hello"
+output("Hello World".reverse())              // "dlroW olleH"
+
+// splitting and joining
+seq[str] lines = "one\ntwo\nthree".lines()   // ["one", "two", "three"]
+seq[str] words = "  foo  bar  baz  ".words() // ["foo", "bar", "baz"]
+seq[str] names = ["alice", "bob", "carol"]
+output(", ".join(names))                      // "alice, bob, carol"
+output("\n".join(names))                      // one per line
+
+// collection views
+seq[char] cs = "Rex".chars()                 // ['R', 'e', 'x']
+seq[byte] bs = "Hi".bytes()                  // [72, 105]
+
+// chaining
+str clean = "  {user_input}  ".trim().lower().strip_suffix("!")
 ```
 
 ---
@@ -1180,12 +1278,12 @@ value (`byte`) but printed and compared as a character.
 
 ```rex
 char c = 'R'
-output c                // R
+output(c)                // R
 
 char first = s[0]       // index into a str
 
 if first == 'h':
-    output "starts with h"
+    output("starts with h")
 ```
 
 Casting between `char` and `int`:
@@ -1210,7 +1308,7 @@ byte mask = 0b10101010
 
 byte x
 :x = b & mask
-output x                // prints: 170
+output(x)                // prints: 170
 ```
 
 ---
@@ -1224,7 +1322,7 @@ float y = 1.5
 float z
 :z = x + y
 :z = x * y
-output z
+output(z)
 ```
 
 ### `float` method reference 📋
@@ -1243,17 +1341,17 @@ output z
 
 ```rex
 float f = 3.7
-output f.ceil()     // 4
-output f.floor()    // 3
-output f.round()    // 4
-output f.fract()    // 0.7
-output f.abs()      // 3.7
+output(f.ceil())     // 4
+output(f.floor())    // 3
+output(f.round())    // 4
+output(f.fract())    // 0.7
+output(f.abs())      // 3.7
 
 float a = 2.5
 float b = 4.0
-output a.min(b)     // 2.5
-output a.max(b)     // 4.0
-output str(a)       // "2.5" — cast function, not method
+output(a.min(b))     // 2.5
+output(a.max(b))     // 4.0
+output(str(a))       // "2.5" — cast function, not method
 ```
 
 ### `int` method reference 📋
@@ -1268,11 +1366,11 @@ output str(a)       // "2.5" — cast function, not method
 
 ```rex
 int n = -5
-output n.abs()      // 5
-output n.min(0)     // -5
-output n.max(0)     // 0
-output str(n)       // "-5" — cast function
-output float(n)     // -5.0 — cast function
+output(n.abs())      // 5
+output(n.min(0))     // -5
+output(n.max(0))     // 0
+output(str(n))       // "-5" — cast function
+output(float(n))     // -5.0 — cast function
 ```
 
 ---
@@ -1294,17 +1392,17 @@ Print one expression followed by a newline. Rex auto-dispatches to the correct
 printer based on the value's declared type.
 
 ```rex
-output 42
-output x
-output "hello"
-output flag        // bool: true / false / unknown
-output pi          // float: 3.14159...
-output c           // char: prints the character glyph
-output b           // byte: prints the numeric value (0–255)
+output(42)
+output(x)
+output("hello")
+output(flag)        // bool: true / false / unknown
+output(pi)          // float: 3.14159...
+output(c)           // char: prints the character glyph
+output(b)           // byte: prints the numeric value (0–255)
 ```
 
 `output` takes **one expression**. For multiple values on one line use string
-interpolation or `show` chains — there is no `output a, b, c` form.
+interpolation or `show` chains — there is no `output(a, b, c)` form.
 
 ### Collection output format
 
@@ -1313,19 +1411,19 @@ round-trippable:
 
 ```rex
 seq[int] nums = [1, 2, 3]
-output nums          // [1, 2, 3]
+output(nums)          // [1, 2, 3]
 
 dict[int] scores = {"alice": 95, "bob": 87}
-output scores        // {"alice": 95, "bob": 87}
+output(scores)        // {"alice": 95, "bob": 87}
 
 arr[float, 3] v = [1.0, 0.0, 0.0]
-output v             // [1.0, 0.0, 0.0]
+output(v)             // [1.0, 0.0, 0.0]
 ```
 
 Nested collections follow the same rule recursively:
 ```rex
 seq[seq[int]] matrix
-output matrix        // [[1, 2], [3, 4]]
+output(matrix)        // [[1, 2], [3, 4]]
 ```
 
 ---
@@ -1337,11 +1435,11 @@ strings support interpolation. The expression is evaluated and converted to its
 string representation at runtime.
 
 ```rex
-output "x is {x} and y is {y}"
-output "result: {a + b}"
-output "fib(10) = {@fib(10)}"       // @ still marks protocol calls inside {}
-output "name: {name}, age: {age}"
-output "half of {n} is {n / 2}"
+output("x is {x} and y is {y}")
+output("result: {a + b}")
+output("fib(10) = {@fib(10)}")       // @ still marks protocol calls inside {}
+output("name: {name}, age: {age}")
+output("half of {n} is {n / 2}")
 ```
 
 **Rule:** `{` opens an interpolation block. Any valid Rex expression is allowed
@@ -1349,8 +1447,8 @@ inside — arithmetic, protocol calls, casts, boolean ops. `}` closes it.
 A literal `{` is written `{{`.
 
 ```rex
-output "{{not interpolated}}"    // {not interpolated}
-output "{x * x} squared"         // 25 squared  (if x == 5)
+output("{{not interpolated}}")    // {not interpolated}
+output("{x * x} squared")         // 25 squared  (if x == 5)
 ```
 
 ---
@@ -1373,24 +1471,24 @@ controls width, precision, and base representation.
 
 ```rex
 float pi = 3.14159
-output "pi = {pi:.2f}"         // pi = 3.14
-output "pi = {pi:.4f}"         // pi = 3.1416
+output("pi = {pi:.2f}")         // pi = 3.14
+output("pi = {pi:.4f}")         // pi = 3.1416
 
 int n = 255
-output "{n:x}"                 // ff
-output "{n:X}"                 // FF
-output "{n:b}"                 // 11111111
-output "{n:08b}"               // 11111111  (8 wide, zero-padded)
-output "{n:10d}"               // '       255' (10 wide, space-padded)
+output("{n:x}")                 // ff
+output("{n:X}")                 // FF
+output("{n:b}")                 // 11111111
+output("{n:08b}")               // 11111111  (8 wide, zero-padded)
+output("{n:10d}")               // '       255' (10 wide, space-padded)
 
 str name = "Rex"
-output "{name:10s}"            // 'Rex       ' (10 wide, right-padded)
+output("{name:10s}")            // 'Rex       ' (10 wide, right-padded)
 ```
 
 Specifiers compose with expressions:
 ```rex
-output "avg: {total / count:.1f}"
-output "hex addr: {addr:x}"
+output("avg: {total / count:.1f}")
+output("hex addr: {addr:x}")
 ```
 
 ---
@@ -1405,7 +1503,7 @@ further processing.
 str label = fmt("score: {score:.1f} / 100")
 str hex_addr = fmt("0x{addr:X}")
 str report = fmt("{name}: {val:8.2f}")
-output report
+output(report)
 ```
 
 `fmt` accepts exactly one string expression — the template. Any `{expr}` or
@@ -1419,31 +1517,31 @@ Like `output` but no trailing newline. Use to build a line incrementally, then
 land the newline with a final `output`.
 
 ```rex
-show "Loading"
-show "."
-show "."
-show "."
-output "done"       // prints: Loading...done
+show("Loading")
+show(".")
+show(".")
+show(".")
+output("done")       // prints: Loading...done
 ```
 
 `show` accepts the same expression types and format specifiers as `output`:
 ```rex
-show "{progress:.0f}%  \r"    // overwrite the current line (carriage return)
+show("{progress:.0f}%  \r")    // overwrite the current line (carriage return)
 ```
 
 ---
 
-### `flush` — explicit stdout flush 📋
+### `flush()` — explicit stdout flush() 📋
 
 Drain the stdout buffer immediately. Normally stdout is flushed on newline
-(`output`) or program exit. Use `flush` after a `show` chain when you need
-output to appear before a blocking operation.
+(`output`) or program exit. Use `flush()` after a `show` chain when you need
+output(to appear before a blocking operation.)
 
 ```rex
-show "Connecting..."
-flush               // ensure "Connecting..." is visible before the syscall blocks
+show("Connecting...")
+flush()               // ensure "Connecting..." is visible before the syscall blocks
 @connect()
-output "done"
+output("done")
 ```
 
 ---
@@ -1455,13 +1553,13 @@ and diagnostic use — strip before release.
 
 ```rex
 int x = 42
-debug x             // stderr: int: 42
+debug(x)             // stderr: int: 42
 
 seq[int] nums = [1, 2, 3]
-debug nums          // stderr: seq[int]: [1, 2, 3]
+debug(nums)          // stderr: seq[int]: [1, 2, 3]
 
 dict[str] d = {"a": "b"}
-debug d             // stderr: dict[str]: {"a": "b"}
+debug(d)             // stderr: dict[str]: {"a": "b"}
 ```
 
 `debug` shows both the declared type and the runtime value in one line.
@@ -1475,7 +1573,7 @@ no newline, and no encoding. Use for binary protocols and file content.
 
 ```rex
 seq[byte] buf = [0x48, 0x65, 0x6C, 0x6C, 0x6F]
-write buf           // writes raw bytes: Hello
+write(buf)           // writes raw bytes: Hello
 ```
 
 ---
@@ -1484,14 +1582,14 @@ write buf           // writes raw bytes: Hello
 
 | Keyword | Destination | Newline | Format | Exits? |
 |---|---|---|---|---|
-| `output x` | stdout | ✅ yes | type-dispatched | no |
-| `show x` | stdout | ✗ no | type-dispatched | no |
-| `write buf` | stdout | ✗ no | raw bytes only | no |
-| `flush` | stdout | — | — | no |
-| `debug x` | stderr | ✅ yes | `type: value` | no |
-| `warn "msg"` | stderr | ✅ yes | string only | no |
-| `err "msg"` | stderr | ✅ yes | string only | yes — code 1 |
-| `input "prompt"` | stdin (read) | — | returns `str` | no |
+| `output(x)` | stdout | ✅ yes | type-dispatched | no |
+| `show(x)` | stdout | ✗ no | type-dispatched | no |
+| `write(buf)` | stdout | ✗ no | raw bytes only | no |
+| `flush()` | stdout | — | — | no |
+| `debug(x)` | stderr | ✅ yes | `type: value` | no |
+| `warn("msg")` | stderr | ✅ yes | string only | no |
+| `err("msg")` | stderr | ✅ yes | string only | yes — code 1 |
+| `input("prompt")` | stdin (read) | — | returns `str` | no |
 
 ---
 
@@ -1504,10 +1602,10 @@ returns a `str`.
 
 ```rex
 str name = input "Enter your name: "
-output "Hello, {name}!"
+output("Hello, {name}!")
 
 int age = int(input "Enter your age: ")
-output "You are {age} years old."
+output("You are {age} years old.")
 ```
 
 ### File I/O 📋
@@ -1538,27 +1636,27 @@ Modes: `"r"` (read), `"w"` (write/truncate), `"a"` (append), `"rb"` / `"wb"`
 ### `err` — fatal error to stderr ✅
 Emit a message to stderr and halt with exit code 1.
 ```rex
-err "something went wrong"
-err "expected positive value, got {x}"    // interpolation works here too
+err("something went wrong")
+err("expected positive value, got {x}")    // interpolation works here too
 ```
 
 ### `warn` — non-fatal warning to stderr 📋
 Like `err` but does **not** exit. Use for recoverable conditions or diagnostic
 logging that shouldn't stop the program.
 ```rex
-warn "cache miss — falling back to disk"
-warn "retry {attempt} of 3"
+warn("cache miss — falling back to disk")
+warn("retry {attempt} of 3")
 ```
 
 ### The complete stderr/stdout picture
 
 | Keyword | Destination | Newline | Exits? |
 |---|---|---|---|
-| `output x` | stdout | ✅ yes | no |
-| `show x` | stdout | ✗ no | no |
-| `warn "msg"` | stderr | ✅ yes | no |
-| `err "msg"` | stderr | ✅ yes | yes — code 1 |
-| `input "prompt"` | stdin (read) | — | no |
+| `output(x)` | stdout | ✅ yes | no |
+| `show(x)` | stdout | ✗ no | no |
+| `warn("msg")` | stderr | ✅ yes | no |
+| `err("msg")` | stderr | ✅ yes | yes — code 1 |
+| `input("prompt")` | stdin (read) | — | no |
 
 ---
 
@@ -1574,11 +1672,11 @@ by `try` — only `err` is intercepted.
 ```rex
 try:
     str data = @read_file("config.txt")
-    output "loaded: {data}"
+    output("loaded: {data}")
 except:
-    warn "file not found, using defaults"
+    warn("file not found, using defaults")
 finally:
-    output "attempt complete"
+    output("attempt complete")
 ```
 
 - **`try:`** — run this block
@@ -1593,9 +1691,9 @@ finally:
 ```rex
 try:
     int n = int(input "Enter a number: ")
-    output "you entered {n}"
+    output("you entered {n}")
 except msg:
-    output "invalid input: {msg}"
+    output("invalid input: {msg}")
     :n = 0
 ```
 
@@ -1626,7 +1724,7 @@ try:
         str data = @load_backup()    // fallback attempt
     @process(data)
 except msg:
-    err "completely failed: {msg}"   // re-raise as fatal
+    err("completely failed: {msg}")   // re-raise as fatal
 ```
 
 ### `warn` passes through
@@ -1638,10 +1736,10 @@ inside and outside `try` blocks.
 
 | Situation | Tool |
 |---|---|
-| Unrecoverable bug | `err "msg"` with no `try` |
+| Unrecoverable bug | `err("msg")` with no `try` |
 | Expected failure, can recover | `try / except` |
 | Guaranteed cleanup | `try / finally` |
-| Non-fatal log | `warn "msg"` |
+| Non-fatal log | `warn("msg")` |
 
 ---
 
@@ -1944,7 +2042,7 @@ use mm arena(16384):
     push tmp 2
 ```
 
-**Arena overflow** is a runtime panic (`err "arena overflow"` + exit 1). There
+**Arena overflow** is a runtime panic (`err("arena overflow")` + exit 1). There
 is no silent fallback to heap — the user sized the arena incorrectly and must
 know about it.
 
@@ -2023,7 +2121,7 @@ Asserts a code path cannot be reached. Emits `ud2` — illegal instruction trap.
 ```rex
 when code:
     is 1:
-        output "one"
+        output("one")
     else:
         unreachable
 ```
@@ -2046,7 +2144,7 @@ blast item in items:
     :item = item * 2
 
 pipe result from source into sink:
-    output result
+    output(result)
 ```
 
 ---
@@ -2057,7 +2155,7 @@ pipe result from source into sink:
 ```rex
 bool coin
 :coin = unknown
-output coin           // prints: true, false, or unknown
+output(coin)           // prints: true, false, or unknown
 ```
 
 ---
@@ -2112,16 +2210,16 @@ tup[bool, int] status = (true, 200)
 ### Index access
 Use `.0`, `.1`, `.2` etc. to read fields positionally.
 ```rex
-output record.0    // 1
-output record.1    // "Alice"
-output record.2    // 9.5
+output(record.0)    // 1
+output(record.1)    // "Alice"
+output(record.2)    // 9.5
 ```
 
 ### Destructuring
 Unpack all fields into named variables in one line.
 ```rex
 int id, str name, float score = record
-output "id={id} name={name} score={score}"
+output("id={id} name={name} score={score}")
 ```
 
 ### Partial destructuring with `_`
@@ -2137,7 +2235,7 @@ prot divmod(int a, int b) -> (int, int):
     return a / b, a % b
 
 int q, int r = @divmod(17, 5)
-output "quotient={q} remainder={r}"
+output("quotient={q} remainder={r}")
 ```
 
 ### Tuple method reference
@@ -2162,7 +2260,7 @@ fn(int x) -> int: x * 2              // single-expression body
 fn(int x, int y) -> int: x + y       // two params
 fn(str s) -> bool: s.len() > 3       // bool return
 fn(int x):                            // no return value (side-effect only)
-    output "item: {x}"
+    output("item: {x}")
 ```
 
 ### Multi-line body
@@ -2180,7 +2278,7 @@ prot(int, int -> int) add = fn(int a, int b) -> int: a + b
 prot(str -> bool) long = fn(str s) -> bool: s.len() > 5
 
 int result = @double(7)     // 14
-output result
+output(result)
 ```
 
 ### Passing to higher-order protocols
