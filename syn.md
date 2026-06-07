@@ -659,7 +659,7 @@ repeat 8:
 ```
 
 ```rex
-int :sum = 0
+int sum = 0
 repeat 100:
     :sum = sum + 1
 output(sum)
@@ -684,11 +684,92 @@ jnz .top
   `repeat` exit, identical to `for`/`while`.
 
 ### `each` 🔧
-Cache-aligned iterator for sequential collection sweeping. Token is lexed; parser pending.
+
+Cache-aligned iterator over any collection. Preferred over `for i in 0..N:` when
+the iteration index is not needed — the compiler emits a prefetch hint
+(`prefetcht0`) on each iteration for better cache behaviour.
+
+Works on `seq[T]`, `arr[T, N]`, `str` (yields `char`), and `dict[T]` (yields
+key-value pairs). Token is lexed; parser/codegen pending.
+
+#### Basic form — element only
 ```rex
 each item in items:
     output(item)
 ```
+
+#### With index — `each i, item in <col>:`
+```rex
+each i, item in items:
+    output("{i}: {item}")
+```
+
+`i` is a zero-based `int`. It is implicitly mutable (the loop advances it) but
+is read-only inside the body — assigning to `i` is a compile-time error.
+
+#### Over a `str` — yields `char`
+```rex
+str word = "Rex"
+each ch in word:
+    output(ch)         // R, e, x
+```
+
+#### Over a `dict` — yields key and value
+```rex
+dict[int] scores = {"alice": 95, "bob": 87}
+each k, v in scores:
+    output("{k}: {v}")
+```
+
+Key iteration order is unspecified (hash-determined). For sorted output use
+`.keys().sort()` then iterate.
+
+#### Mutating form — `:` on the element name
+Prefix the element name with `:` to write back to the collection. Without `:`,
+the element is a read-only copy.
+```rex
+seq[int] nums = [1, 2, 3, 4, 5]
+each :n in nums:
+    :n = n * 2          // doubles every element in place
+output(nums)            // [2, 4, 6, 8, 10]
+```
+
+The `:` on the `each` variable signals that writes flow back to the source
+collection. Attempting to write to a non-`:` `each` variable is a compile-time
+error.
+
+#### `stop` and `skip` inside `each`
+```rex
+each item in items:
+    if item == 0:
+        skip 1          // skip to next element
+    if item < 0:
+        stop            // exit the each loop entirely
+    output(item)
+```
+
+#### Nested `each`
+```rex
+each row in matrix:
+    each cell in row:
+        output("{cell} ")
+    output("")           // newline after each row
+```
+
+#### `each` vs `for` — when to use which
+
+| | `for i in 0..N:` | `each item in col:` |
+|---|---|---|
+| Iterates a numeric range | ✅ yes | ✗ no |
+| Iterates a collection | ✗ no | ✅ yes |
+| Index exposed | ✅ always | optional (`each i, item`) |
+| Cache prefetch emitted | ✗ | ✅ yes |
+| Mutating elements | ✗ (use `col[i]`) | ✅ `:` form |
+| Works on `dict` | ✗ | ✅ yes |
+| Works on `str` | ✗ | ✅ yes (yields `char`) |
+
+**Rule:** use `each` when you have a collection and don't need to compute the
+index manually. Use `for` when you need a numeric counter or a custom step.
 
 ---
 
@@ -949,11 +1030,11 @@ Key iteration order is unspecified (hash-determined). For sorted keys use
 Bracket syntax is canonical for single-key read and write:
 
 ```rex
-scores["alice"] = 95          // write — no `:` sigil needed (key is explicit)
+:scores["alice"] = 95          // write — `:` sigil required, same as seq
 output(scores["alice"])        // read
 ```
 
-`.get()` and `.set()` are the method equivalents.
+`.get()` and `.set()` are the method equivalents. Dict writes use the same `:` mutation sigil as all other write sites in Rex — `d["key"] = val` is a compile-time error; write `:d["key"] = val` instead.
 
 ### Missing-key behaviour
 
@@ -1531,11 +1612,11 @@ show("{progress:.0f}%  \r")    // overwrite the current line (carriage return)
 
 ---
 
-### `flush()` — explicit stdout flush() 📋
+### `flush()` — explicit stdout drain 📋
 
 Drain the stdout buffer immediately. Normally stdout is flushed on newline
 (`output`) or program exit. Use `flush()` after a `show` chain when you need
-output(to appear before a blocking operation.)
+output to appear before a blocking operation.
 
 ```rex
 show("Connecting...")
@@ -1601,10 +1682,10 @@ Prints a prompt (no trailing newline — cursor stays inline), reads until `\n`,
 returns a `str`.
 
 ```rex
-str name = input "Enter your name: "
+str name = input("Enter your name: ")
 output("Hello, {name}!")
 
-int age = int(input "Enter your age: ")
+int age = int(input("Enter your age: "))
 output("You are {age} years old.")
 ```
 
@@ -1816,23 +1897,23 @@ Five allocator strategies are available:
 
 ```rex
 use mm arena:
-    seq buf             // bump-allocated; entire region freed at dedent
-    push buf 1
-    push buf 2
+    seq[int] buf        // bump-allocated; entire region freed at dedent
+    buf.push(1)
+    buf.push(2)
 
-use mm pool:
-    dict cache          // pool-allocated; fixed-size blocks recycled
-    cache["x"] = 7
+use mm pool[64]:
+    dict[int] cache     // pool-allocated; fixed-size 64-byte blocks recycled
+    :cache["x"] = 7
 
 use mm stack:
-    seq tmp             // lives on the hardware stack; zero allocator overhead
+    seq[int] tmp        // lives on the hardware stack; zero allocator overhead
 
 use mm heap:
-    seq log             // each push/pop is a standalone malloc/free
+    seq[int] log        // each push/pop is a standalone malloc/free
 
 use mm static:
-    dict config         // config survives forever; never collected
-    config["debug"] = 1
+    dict[int] config    // config survives forever; never collected
+    :config["debug"] = 1
 ```
 
 ---
@@ -1996,12 +2077,12 @@ A named context gives explicit, user-managed control over a slab's lifetime.
 Use it when you need to reuse a slab across iterations or share it across calls.
 
 ```rex
-ctx :scratch = arena(8192)        // one mmap, 8 KB slab
+ctx scratch = arena(8192)         // one mmap, 8 KB slab
 
 for k in 0..1000000:
     use mm scratch:
-        seq[int] :tmp             // allocates from scratch
-        push tmp k
+        seq[int] tmp              // allocates from scratch
+        tmp.push(k)
         @process(tmp)
     reset scratch                 // O(1) bump rewind — no syscall
 
@@ -2037,9 +2118,9 @@ simultaneously. Pre-sizing avoids this:
 
 ```rex
 use mm arena(16384):
-    seq[int] :tmp = 1024    // pre-allocate 1024-element capacity — no grows
-    push tmp 1
-    push tmp 2
+    seq[int] tmp = 1024     // pre-allocate 1024-element capacity — no grows
+    tmp.push(1)
+    tmp.push(2)
 ```
 
 **Arena overflow** is a runtime panic (`err("arena overflow")` + exit 1). There
@@ -2130,7 +2211,7 @@ when code:
 Runtime guard. Halts with `rt_err_blob` if the expression is false.
 ```rex
 assert x > 0
-assert len items > 0
+assert items.len() > 0
 ```
 
 ---
@@ -2292,7 +2373,7 @@ nums.push(5)
 
 seq[int] evens = nums.filter(fn(int x) -> bool: x % 2 == 0)
 seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
-nums.each(fn(int x): output "{x}")
+nums.each(fn(int x): output("{x}"))
 
 // Chaining
 seq[int] result = nums

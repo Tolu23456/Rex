@@ -1,0 +1,1304 @@
+================================================================================
+  REX V5.0 — COMPLETE IMPLEMENTATION DIRECTIVE
+  A prompt for an AI engineer tasked with building the Rex compiler in full.
+  This document is authoritative. syn.md is the language specification.
+  Read both documents in their entirety before writing a single line of code.
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§0  WHAT REX IS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rex is a statically typed, compiled programming language that targets x86-64
+Linux (ELF64) via NASM assembly. It is not built on LLVM, GCC, or any external
+backend. Every instruction emitted is hand-authored NASM. Rex is designed to
+run at near-assembly speed while providing a clean, expressive, safe surface
+to the programmer.
+
+The compiler is written entirely in NASM assembly itself. There are currently
+six object files linked into one binary. The existing codegen works and passes
+37/37 tests. Your job is to take the existing codebase and bring every feature
+documented in syn.md to full, production-quality implementation status.
+
+Rex's core design principles, in priority order:
+  1. Correctness    — wrong output is worse than no output.
+  2. Speed          — target within 2x of handwritten NASM for equivalent code.
+  3. Safety         — no silent undefined behaviour, no silent data loss.
+  4. Expressiveness — the language should feel natural, not bureaucratic.
+  5. Size           — the compiler binary should be small and self-contained.
+
+Rex is single-threaded. It has no runtime library dependency. The final user
+binary links only against the Linux kernel via syscall. There is no libc,
+no libm, no dynamic linker involvement unless the user explicitly requests it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§1  ABSOLUTE RULES — THE AI MUST FOLLOW THESE WITHOUT EXCEPTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RULE 1: No stub implementations. Every feature you implement must be complete.
+  A stub that compiles but silently returns 0, crashes on real input, or drops
+  data is worse than having no implementation at all. If you cannot implement
+  something fully right now, leave it marked 🔧 in syn.md and move to the next
+  item. Do not write a partial implementation and call it done.
+
+RULE 2: The status markers in syn.md are the source of truth.
+  ✅ = working in production code and tested.
+  🔧 = token exists in lexer, parser/codegen not yet done.
+  📋 = not yet started.
+  Update the marker the moment you finish implementing a feature. If you write
+  code but do not update the marker, the documentation is lying.
+
+RULE 3: Every runtime error must print a clear, actionable message.
+  Bad:  "error"
+  Bad:  "runtime panic"
+  Good: "rex: bounds error: index 7 out of range [0..5] at line 42"
+  Good: "rex: dict key not found: 'carol'"
+  Good: "rex: arena overflow: requested 1024 bytes but only 128 remain"
+  The message must include: what went wrong, what the bad value was, where in
+  the user's source file it happened (file name + line number).
+
+RULE 4: Never introduce undefined behaviour.
+  Every operation must have a documented outcome. "This will do whatever the
+  hardware does" is not acceptable unless it is explicitly an `#unsafe` block.
+
+RULE 5: Every new feature must have at least 5 test cases.
+  Three normal cases, one edge case, one error case. Tests live in the tests/
+  directory. The existing test harness must still pass 37/37 after your work.
+  Every test you write must pass before you mark the feature ✅.
+
+RULE 6: Do not rewrite working code without strong justification.
+  The existing codegen for int, float, bool, basic control flow, and protocols
+  is correct and tested. Do not touch it except to integrate new features
+  alongside it. If you need to refactor to accommodate a new feature, do so
+  surgically — change the minimal surface area needed.
+
+RULE 7: Performance targets are non-negotiable.
+  - Arithmetic on primitive types: within 5% of raw NASM.
+  - Collection operations (push, pop, index): within 10% of equivalent C.
+  - String operations: within 15% of equivalent C (glibc has SSE2 memcpy; 
+    implement your own SSE2 routines, do not call libc).
+  - Protocol calls: zero overhead vs a labelled NASM call for non-closures.
+  Measure. Include a benchmark. If you miss a target, explain exactly why and
+  what the tradeoff is.
+
+RULE 8: The compiler must be deterministic.
+  Given the same source file, the Rex compiler must always produce byte-for-byte
+  identical output. No timestamps in the binary. No random padding. No ASLR
+  influence on codegen.
+
+RULE 9: Memory allocated by the compiler is not leaked.
+  The compiler process itself must not leak. Use a single arena for the
+  compilation pipeline — free it when linking completes.
+
+RULE 10: Documentation and implementation must stay in sync.
+  After every implementation session, re-read the section you implemented in
+  syn.md. If the spec and the code disagree, fix the code OR update the spec
+  with a documented rationale. They must never silently diverge.
+
+RULE 11: Commit atomically per feature.
+  One feature = one commit. The commit message must name the feature and the
+  syn.md section it corresponds to. Do not batch unrelated changes.
+
+RULE 12: No global state in the compiler except the designated globals.
+  The compiler already uses a small set of BSS globals (var_table, label
+  counters, etc.). Do not add new global state except through the existing
+  mechanisms. Pass context through the call stack.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§2  IMPLEMENTATION SCOPE — COMPLETE LIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Everything listed in syn.md under 🔧 or 📋 must be fully implemented. The
+following is a structured breakdown with implementation notes.
+
+─────────────────────────────────────────────────────────────────────────────
+2.1  TYPE SYSTEM
+─────────────────────────────────────────────────────────────────────────────
+
+2.1.1  Type inference (📋)
+  - Infer type from the RHS expression at declaration: `x = 5` → `int`
+  - Infer from protocol return type: `result = @add(2, 3)` → return type of add
+  - Explicit type still beats inference in all ambiguous cases
+  - No inference for untyped declarations with no RHS — that is still an error
+  - Infer inside `for`, `each`, and lambda parameters where context is clear
+
+2.1.2  `tup[T...]` (📋)
+  - Fixed-size heterogeneous tuples
+  - Stack-allocated, zero header overhead, zero dynamic dispatch
+  - Field access: `.0`, `.1`, `.2` — compile to a fixed stack offset load
+  - Destructuring: `int a, str b = tup_val` — positional, types must match
+  - Partial destructuring with `_` discards fields without a load
+  - Tuple return from protocols: `return a, b` packs into consecutive registers
+    using SysV ABI extended convention (rax for first, rdx for second)
+  - `.len()` is a compile-time constant — replace with literal at codegen
+
+2.1.3  `set[T]` (📋)
+  - Hash set: keys only, no values. Uses the same SipHash-2-4 as `dict`.
+  - Supports: `.add(val)`, `.remove(val)`, `.has(val)`, `.len()`, `.clear()`,
+    `.union(other)`, `.intersect(other)`, `.diff(other)`, `.is_subset(other)`,
+    `.is_superset(other)`, `.each(fn)`, `.to_seq()`, `.is_empty()`
+  - Literal syntax: `{1, 2, 3}` — parser distinguishes from dict by absence of `:`
+
+─────────────────────────────────────────────────────────────────────────────
+2.2  OPERATORS
+─────────────────────────────────────────────────────────────────────────────
+
+2.2.1  `not` operator (🔧)
+  - `bool` operand → `xor rax, 1`
+  - `int` operand  → `not rax` (bitwise complement)
+  - `unknown` bool → `unknown` (Kleene rule — NOT(unknown) = unknown)
+  - Must compose with `and`/`or` in complex boolean expressions
+
+2.2.2  `is` / `is not` (📋)
+  - `cmp rax, rbx; sete al; movzx rax, al` → yields `bool`
+  - `a is not b` → `setne al` variant
+  - `ptr is not null` → `cmp rax, 0`
+  - Result type is always `bool`
+  - Participates fully in boolean expressions
+
+2.2.3  `in` membership (📋)
+  - `val in seq[T]` → linear scan, O(n)
+  - `key in dict[T]` → hash lookup, O(1) average
+  - `sub in str` → byte-search, emit custom SIMD scan (see §4.3)
+  - `val in set[T]` → hash lookup, O(1) average
+  - All forms produce a `bool` and short-circuit correctly
+
+2.2.4  Pipeline `->` (📋)
+  - `@compute(x) -> output` pipes return value into output
+  - `expr -> @fn()` inserts expr as the first argument of @fn
+  - Multiple pipes: `@a() -> @b() -> @c()` — left associative
+  - Verified at compile time: source type must match the next stage's input type
+
+2.2.5  Syscall intercept `$` (📋)
+  - `$(num, args...)` directly emits: `mov rax, num; mov rdi, arg1; ...`
+    followed by `syscall`
+  - Available only inside `#unsafe` blocks (compile error otherwise)
+  - Args are bound: rdi, rsi, rdx, r10, r8, r9 — exactly matching Linux ABI
+  - Return value is in `rax` — assign with normal `:` syntax
+
+2.2.6  `swap` (✅ — verify it handles all types, including collections)
+
+2.2.7  `flip` / `rand` (📋)
+  - `flip b` → `xor byte [b_addr], 1` in place (no load-store round-trip)
+  - `rand` → `rdrand rax; jnc .retry` with retry loop — returns `int`
+  - `unknown` bool sources from `rdrand`, thresholds on bit 0
+
+2.2.8  String repetition operator `*` (📋)
+  - `"ab" * 3` = `"ababab"` — syntactic sugar for `.repeat(n)`
+  - RHS must be a non-negative `int` — compile-time error otherwise
+  - `0` repetitions = empty string `""`
+
+2.2.9  `carry` / `overflow` hardware flags (📋)
+  - Read EFLAGS directly after arithmetic via `setc al` / `seto al`
+  - Store into `bool` variable — the variable must be declared before the flag read
+  - These are volatile — any intervening instruction may clobber them
+  - Compiler must emit the flag-read instruction immediately after the arithmetic
+    with no intervening instructions
+
+─────────────────────────────────────────────────────────────────────────────
+2.3  CONTROL FLOW
+─────────────────────────────────────────────────────────────────────────────
+
+2.3.1  `match` (📋)
+  - Structural pattern matching on type
+  - Dense integer ranges → O(1) jump table (`jmp [rax*8 + table_base]`)
+  - Sparse cases → binary search over sorted case values, then conditional jump
+  - Fallthrough is NOT allowed — each arm is its own block
+  - Exhaustiveness check: if the matched type has a finite set of values (bool,
+    byte, char, known enum), warn if not all values are covered
+
+2.3.2  `stop N` (📋)
+  - Multi-level break out of N nested loops
+  - Implemented via a break-patch stack extended with a depth counter
+  - `stop 1` is identical to bare `stop`
+  - Depth exceeding nesting level is a compile-time error
+
+2.3.3  Loop `else:` (📋)
+  - Executes only if the loop terminated naturally (no `stop` fired)
+  - One `bool` flag per loop that has an `else:` clause
+  - `stop` sets the flag before the jump; `else:` checks it after the exit label
+  - `stop N` sets the flag in all N bypassed loops
+
+2.3.4  `repeat N:` (📋)
+  - `N` must be a compile-time integer constant
+  - Emit: `mov rcx, N` / `<body>` / `dec rcx` / `jnz .top`
+  - `rcx` is not exposed inside the body — use a `for` loop if the index is needed
+  - `stop` inside `repeat` patches a jump to the label after `jnz .top`
+  - Nested `repeat` spills outer `rcx` to stack before using `rcx` for the inner
+
+2.3.5  `each` (🔧)
+  - Collection iterator — works on `seq[T]`, `arr[T, N]`, `str`, `dict[T]`, `set[T]`
+  - `each item in col:` — element-only form, no index
+  - `each i, item in col:` — zero-based index plus element
+  - `each :item in col:` — mutating form; writes `item` back to source collection
+  - `each k, v in dict:` — key and value for dict/set
+  - Emit a `prefetcht0` for the next cache line at each iteration
+  - `stop` and `skip N` work inside `each` identically to `for`/`while`
+  - Nested `each` is supported — each level uses independent registers
+
+2.3.6  `try` / `except` / `finally` (📋)
+  - `try` wraps a block; `err()` inside it is intercepted instead of halting
+  - `except:` runs if `err` was called; `except msg:` binds the message string
+  - `finally:` always runs, regardless of whether `err` was called
+  - Implementation: `err` in a `try` context writes the message to a thread-local
+    string slot, then `jmp`s to the `except` block's entry label
+  - `warn` is never intercepted — it always prints and continues
+  - Nested `try`: inner `except` catches first; `err` inside `except` propagates
+
+─────────────────────────────────────────────────────────────────────────────
+2.4  SEQUENCES — FULL METHOD SET
+─────────────────────────────────────────────────────────────────────────────
+
+All methods documented in syn.md under `seq[T]` must be implemented. The
+following have specific algorithmic requirements:
+
+  `.sort()` — Introsort:
+    Use quicksort (median-of-three pivot) down to depth 2*log2(N), then switch
+    to heapsort to guarantee O(n log n) worst case. For N < 16, use insertion
+    sort directly. This is the same strategy as C++ std::sort.
+
+  `.sort_by(fn)` — Same introsort skeleton, comparator is a Rex `fn` callback.
+    The comparator receives two elements and returns an int: negative = a < b,
+    zero = equal, positive = a > b.
+
+  `.sort_desc()` — Introsort with reversed comparator. Do NOT call `.sort()`
+    then `.reverse()` — that is two passes when one is sufficient.
+
+  `.unique()` — For N ≤ 64: sort a copy, remove adjacent duplicates (O(n log n)).
+    For N > 64: hash-set pass over the original sequence preserving order (O(n)).
+    Do NOT sort the original — `.unique()` preserves original order.
+
+  `.reduce(fn, init)` — Left fold. Emit a tight register loop — keep the
+    accumulator in a register for the entire reduction, not on the stack.
+
+  `.zip(other)` — Allocate a new `seq[tup[T,U]]`. Length = min of both seqs.
+    Elements past the shorter seq are discarded.
+
+  `.flatten()` — Input must be `seq[seq[T]]`. Output is `seq[T]`. Calculate
+    total length first (one pass), then memcpy each inner seq's data (one pass).
+    Two passes total — not N recursive allocations.
+
+  `.map(fn)` — Allocate output seq first (same length as input), then fill.
+    Never reallocate during map — the length is known.
+
+  `.filter(fn)` — Cannot know output length upfront. Use 2x growth strategy.
+
+  `.each(fn)` — Must emit a tight loop with no intermediate allocation.
+    The `fn` is called via a register-indirect call (`call rax`), not a sym call.
+
+  `.count(fn)` — Same loop structure as `.each(fn)`, accumulate a counter.
+
+─────────────────────────────────────────────────────────────────────────────
+2.5  STRINGS — FULL METHOD SET
+─────────────────────────────────────────────────────────────────────────────
+
+All methods documented in syn.md under `str` must be implemented.
+
+String storage: heap header `[capacity: 8][length: 8][data: variable]`.
+Small String Optimisation (SSO) for strings ≤ 15 bytes: store inline in a
+24-byte stack slot (8 bytes header flags + 15 bytes data + 1 null byte) with
+no heap allocation. SSO strings and heap strings are distinguished by a flag
+bit in the capacity word. Methods work identically on both; only allocation
+differs.
+
+  `.upper()` / `.lower()` — ASCII only (bytes 0x41-0x5A / 0x61-0x7A).
+    Implement with a SIMD vectorised case-conversion loop using SSE2 `pcmpgtb`
+    and `por` (16 bytes per iteration). Non-ASCII bytes are passed through
+    unchanged. Do NOT loop byte by byte.
+
+  `.contains(sub)` — Two-Way String Matching algorithm. O(n + m) worst-case
+    with O(1) extra space. This is strictly better than naive O(n*m). Do NOT
+    call memmem — implement Two-Way or Boyer-Moore-Horspool from scratch.
+
+  `.index_of(sub)` / `.last_index_of(sub)` — Same Two-Way algorithm.
+    `.last_index_of` scans from the right.
+
+  `.split(sep)` — Allocate result `seq[str]` with initial capacity 8. Each
+    segment is a new SSO or heap string. Empty separator splits every byte.
+
+  `.replace(old, new)` / `.replace_first(old, new)` — First pass: count
+    occurrences and compute the exact output length. Allocate once. Second pass:
+    write output. No realloc during replace.
+
+  `.reverse()` — Byte-level reversal. For strings > 16 bytes use SSE2 `pshufb`
+    to reverse 16-byte lanes, then join. Correct for ASCII; documented as
+    byte-level (not codepoint-level) in syn.md.
+
+  `.join(parts)` — One pass to compute total length, one allocation, one pass
+    to fill. Never append incrementally.
+
+  `.repeat(n)` — Allocate `len * n` bytes once, then use `rep movsq` to fill.
+
+  `.chars()` — Allocate `seq[char]` of length `len`. Each byte → one `char`.
+
+  `.bytes()` — Allocate `seq[byte]` of length `len`. Raw copy.
+
+  `.pad_left(n, c)` / `.pad_right(n, c)` / `.center(n, c)` — Allocate exactly
+    `max(n, len)` bytes. Use `memset` pattern (`rep stosb`) for the padding.
+
+─────────────────────────────────────────────────────────────────────────────
+2.6  DICTIONARIES — FULL METHOD SET
+─────────────────────────────────────────────────────────────────────────────
+
+Dict is an open-addressing hash map. Key type is always `str`, value type is `T`.
+
+  Hash function: SipHash-2-4 (already implemented). Seed is a per-dict random
+  value sourced from `rdrand` at dict creation time (prevents hash-flooding).
+
+  Load factor threshold: 75%. When `len / cap >= 0.75`, grow the table to
+  `cap * 2` and rehash all existing entries.
+
+  Collision resolution: linear probing with tombstone deletion. When a key is
+  removed, place a tombstone in the slot so probe chains are not broken. Compact
+  tombstones when load factor drops below 25%.
+
+  All methods in syn.md must be implemented:
+  - `.entries()` is blocked on `tup` — implement it as soon as `tup` is done.
+  - `.map(fn)` returns a new `dict[U]` — allocate with the same initial capacity.
+  - `.filter(fn)` returns a new `dict[T]` — iterate and selectively insert.
+  - `.invert()` — only valid when T = str. Iterate all entries; insert reversed.
+    Duplicate values → last key wins (documented behaviour).
+
+─────────────────────────────────────────────────────────────────────────────
+2.7  OUTPUT AND I/O
+─────────────────────────────────────────────────────────────────────────────
+
+2.7.1  String interpolation `{expr}` (📋)
+  - All Rex string literals support `{expr}` at parse time (not a library call)
+  - The parser must scan for `{` and `}` inside string literals and build an
+    AST node for each interpolation segment
+  - At codegen, evaluate each segment, convert to string, then concatenate with
+    the literal segments using a stack-allocated join buffer
+  - Escaped brace `{{` → literal `{`; `}}` → literal `}`
+  - Nested `{}` are not allowed — a `{` inside `{}` is an error
+  - The `@` prefix inside `{}` still marks protocol calls: `{@fib(10)}`
+
+2.7.2  Format specifiers `{expr:spec}` (📋)
+  - Parse `:` inside `{}` as format mode switch
+  - Specifiers: `.Nf` (float N decimals), `Nd` (width N right-align), `0Nd`
+    (zero-pad), `x` (hex lower), `X` (hex upper), `b` (binary), `o` (octal),
+    `Ns` (string width N left-pad)
+  - Float formatting: implement `dtoa` (Grisu2 algorithm) — do NOT call sprintf.
+    Grisu2 produces the shortest decimal representation that round-trips.
+
+2.7.3  `fmt(template)` (📋)
+  - Same interpolation and format machinery as output, but returns a `str`
+  - Builds into a heap string and returns its pointer, does NOT write to stdout
+
+2.7.4  `show(x)` (📋) — print without newline; same type dispatch as `output`
+
+2.7.5  `flush()` (📋) — `sys_fsync(1)` or simply drain internal buffer if
+  stdout is internally buffered by Rex (it is not by default — Rex writes
+  directly via `sys_write`; `flush()` is a no-op unless a buffer is added later)
+
+2.7.6  `debug(x)` (📋) — emit `type: value\n` to fd 2 (stderr)
+
+2.7.7  `write(buf)` (📋) — `sys_write(1, data_ptr, len)` with no conversion
+
+2.7.8  `input("prompt")` (📋)
+  - Print prompt via `sys_write(1, prompt, len)` with no newline
+  - Read from fd 0 via `sys_read` into a growing buffer until `\n`
+  - Return a heap-allocated `str` with the newline stripped
+  - Buffer starts at 256 bytes, grows by doubling if needed
+
+2.7.9  `err("msg")` / `warn("msg")` (✅ err, 📋 warn)
+  - `err`: write to fd 2, then `sys_exit(1)` — interpolation must work here
+  - `warn`: write to fd 2, no exit — interpolation must work here
+
+─────────────────────────────────────────────────────────────────────────────
+2.8  MEMORY ALLOCATOR CONTEXTS
+─────────────────────────────────────────────────────────────────────────────
+
+2.8.1  Scoped allocators `use mm <mode>:` (✅ arena, pool — others 📋)
+  - All five modes: arena, pool, stack, heap, static
+  - The active allocator context is stored at `ALLOC_CTX_PTR = 0x447000` (BSS)
+  - On block entry: save old pointer, install new allocator vtable pointer
+  - On block exit: restore old pointer (even if `err` fired — must be in finally)
+  - Every allocation inside the block (push, dict set, str concat, etc.) routes
+    through the active context's `alloc` function pointer
+  - `use mm arena(N):` creates an N-byte slab via `mmap`; bump-allocates from it;
+    `munmap`s on exit. Overflow = `err("arena overflow")`
+  - `use mm pool[N]:` allocates N-byte fixed blocks from a free list; grows by
+    `mmap`ing new slabs when empty
+  - `use mm stack:` uses `rsp` directly — `sub rsp, size` to allocate,
+    `add rsp, size` to free at exit. Fast but limited to stack size.
+  - `use mm heap:` calls the default allocator for each allocation (no pooling)
+  - `use mm static:` calls mmap once and never frees; survives all scope exits
+
+2.8.2  Named contexts `ctx` (📋)
+  - `ctx name = arena(N)` — declares a named slab outside a loop
+  - `reset name` — `O(1)` bump rewind (no syscall; just reset a pointer)
+  - `free name` — `munmap` the slab; name becomes invalid
+
+2.8.3  GC modes `use gc <mode>:` (📋)
+  - All five modes: sweep, ref, gen, inc, region
+  - GC runs AT SCOPE EXIT unless triggered earlier by allocator threshold
+  - `sweep`: walk the var_table from scope entry to scope exit, mark reachable,
+    free unreachable. One stop-the-world pass.
+  - `ref`: every assignment decrements old refcount, increments new. Free when
+    refcount hits zero. No stop-the-world.
+  - `gen`: maintain young/old buckets; minor collection every 64KB allocated in
+    young; major collection every 1MB in old.
+  - `inc`: spread sweep work across allocations — do 1 unit of GC work per
+    N bytes allocated so pause time is O(1) per trigger
+  - `region`: bulk free on scope exit — same behaviour as arena mm but at the
+    GC abstraction level
+
+2.8.4  User-defined allocators and GCs (📋)
+  - `mm myalloc: alloc(size): ... free(ptr): ... reset: ...`
+  - `gc mygc: mark(ptr): ... collect: ... trigger: ...`
+  - Both are stored as vtables (struct of function pointers) in BSS
+  - `use keyword X as mm Y` binds a keyword to a vtable at parse time
+
+─────────────────────────────────────────────────────────────────────────────
+2.9  PROTOCOLS — ADVANCED FEATURES
+─────────────────────────────────────────────────────────────────────────────
+
+2.9.1  Decorator `#memo` (✅ verify: must cache on all parameter combinations)
+  - Cache key: concatenate all parameters as bytes
+  - Cache storage: internal dict keyed by the byte-string of the parameters
+  - Cache hit: return immediately without re-entering the body
+  - Cache miss: run body, store result, return
+
+2.9.2  Decorator `#pure` (📋)
+  - No side effects — the compiler may elide a call if the result is unused
+  - May reorder calls to `#pure` protocols in any order the compiler chooses
+  - A `#pure` protocol that calls `output`, `err`, `warn`, or any I/O is a
+    compile-time error
+
+2.9.3  Decorator `#total` (📋)
+  - Hint that the protocol terminates for all inputs
+  - Compiler may apply more aggressive optimisations (unroll, inline)
+  - No runtime check — it is a programmer assertion
+
+2.9.4  Decorator `#hot` (📋)
+  - Align the protocol's entry label to 64 bytes (cache line boundary)
+  - Emit it early in the `.text` section so it is in the first page
+  - Disable inlining unless `#inline` is also present
+
+2.9.5  Decorator `#cold` (📋)
+  - Emit the protocol body in a separate `.cold` section
+  - Mark its jumps as cold (branch prediction hint prefix `0x2E`)
+
+2.9.6  Decorator `#safe` / `#unsafe` (📋)
+  - `#safe`: compiler scans the body; if `$` (syscall intercept) or direct
+    pointer arithmetic is found, it is a compile-time error
+  - `#unsafe`: `$` and pointer arithmetic are permitted; no safety checks
+  - Default (no decorator): `#safe` semantics
+
+2.9.7  Multiple return values (📋)
+  - Up to 2 return values: first in `rax`, second in `rdx` (SysV extended)
+  - More than 2: caller allocates a stack buffer and passes its address as an
+    implicit last argument in `rdi`; callee writes into it
+  - Destructuring on LHS: `int a, int b = @divmod(x, y)` — compiler generates
+    the right load sequence for each return style
+
+2.9.8  Lambda `fn` (📋)
+  - Anonymous protocols. Closed over by reference at the enclosing scope.
+  - Single-expression body: `fn(int x) -> int: x * 2` — the body is the RHS
+  - Multi-line body: indented block ending with `return`
+  - Stored in a `prot(T... -> U)` typed variable
+  - Closures capture the enclosing var_table frame pointer for free-variable
+    access. Non-capturing lambdas are function pointers with zero overhead.
+  - Passed to `.map()`, `.filter()`, `.each()`, `.all()`, `.any()`, `.none()`,
+    `.count()`, `.reduce()`, `.sort_by()`, `.find()`, `.find_index()`, etc.
+  - Higher-order protocols declare param type as `prot(T -> U)` in signature
+
+2.9.9  Parameter limit (currently 6 — expand to arbitrary via stack spill)
+  - First 6 params: rdi, rsi, rdx, rcx, r8, r9 (SysV ABI)
+  - 7th+ params: pushed to stack right-to-left before call, cleaned by caller
+  - The compiler must handle this transparently — the Rex programmer does not
+    need to know or care about register vs stack parameters
+
+─────────────────────────────────────────────────────────────────────────────
+2.10  MODULES AND IMPORTS
+─────────────────────────────────────────────────────────────────────────────
+
+  - `import math` — resolve `math.rex` in CWD, then `STDLIB_PATH/math.rex`
+  - `from math import sqrt` — import only `sqrt` into the current namespace
+  - `from math import sqrt as sq` — import with alias
+  - Module-qualified calls: `@math.sqrt(x)` — compiler resolves to the
+    module's protocol table at link time
+  - Circular imports: detect cycle in the import graph; emit compile-time error
+    naming the cycle (e.g., "rex: circular import: a → b → a")
+  - Module boundary: every top-level `prot` is public. There is no `private`.
+
+Standard library modules to implement (in this order of priority):
+  1. `math`     — sqrt, pow, log, sin, cos, tan, pi, e, floor, ceil, round, abs
+  2. `io`       — read_file, write_file, read_lines, append_file
+  3. `os`       — args (seq[str] of argv), env(key), exit(code), cwd, time_ns
+  4. `json`     — parse(str) → dict[str], stringify(dict[str]) → str
+  5. `net`      — tcp_connect, tcp_listen, send, recv, close
+  6. `complex`  — complex type reinstated as stdlib: real, imag, conj, magnitude
+  7. `str_utils`— format, encode_base64, decode_base64, encode_url, decode_url
+
+Math functions: implement natively in NASM using the x87 FPU (`fsin`, `fcos`,
+`fsqrt`, `fyl2x` for log) or SSE2 (`sqrtsd`). Do NOT use libm. For transcendentals
+that have no hardware instruction, implement a minimax polynomial approximation
+accurate to 53 bits (full double precision).
+
+─────────────────────────────────────────────────────────────────────────────
+2.11  MISSING SYNTAX TO IMPLEMENT FROM SYN.MD
+─────────────────────────────────────────────────────────────────────────────
+
+  - `const int LIMIT = 128` — stronger than immutable; blocks ALL mutation paths
+  - `volatile int tick` — disable register caching; force memory reads
+  - `own b = move a` — transfer ownership; `a` is invalid after this line
+  - `free buf` — manual free within pool/arena context
+  - `align 64` on variable declarations — `alignas(64)` in BSS/stack
+  - `unreachable` → emit `ud2`
+  - `assert expr` → check at runtime; on fail, print expr text + line, exit 1
+  - `blast item in items:` → SIMD vectorised iteration (`movdqa` / `movntdq`)
+  - `pipe result from source into sink:` → streaming pipeline with backpressure
+
+  Block comments `/* */` — must be handled in the lexer.
+  Doc comments `///` — must be parsed and stored in the AST for the LSP.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§3  COMPILER ARCHITECTURE — REQUIRED STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The compiler pipeline must pass through these stages in order:
+
+  ┌─────────────┐
+  │   Source    │  .rex file → byte buffer in arena
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │    Lexer    │  byte stream → token stream (tokens in arena)
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │   Parser    │  token stream → AST nodes (nodes in arena)
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  Semantic   │  type checking, mutation analysis, scope resolution,
+  │  Analysis   │  decorator validation, import resolution
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │   Codegen   │  AST → NASM text (emitted to string buffer in arena)
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  Optimizer  │  peephole passes over emitted NASM before write-out
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │    NASM     │  NASM assembles to .o; ld links to ELF binary
+  └─────────────┘
+
+Each stage must be a separate compilation unit (separate .asm source file).
+The arena used for AST nodes is freed after codegen — nothing persists past
+the link step.
+
+─────────────────────────────────────────────────────────────────────────────
+3.1  LEXER
+─────────────────────────────────────────────────────────────────────────────
+
+  - Single-pass, byte-by-byte scan with a fixed lookahead of 1
+  - All token types are small integers (enum values) stored in a flat array
+  - Token structure: `[type: 4 bytes][line: 4 bytes][start: 8 bytes][len: 4 bytes]`
+    — 20 bytes per token, naturally aligned
+  - Strings are not interned in the lexer — the token stores a pointer into the
+    source buffer and a length (no copy at lex time)
+  - Block comments `/* */` are consumed as whitespace by the lexer
+  - Doc comments `///` produce a TOK_DOC_COMMENT token (content is the line)
+  - String escape sequences: `\n \t \r \\ \" \' \0` — converted to raw bytes
+    during lex; `{` inside strings starts interpolation scanning
+
+─────────────────────────────────────────────────────────────────────────────
+3.2  PARSER
+─────────────────────────────────────────────────────────────────────────────
+
+  - Recursive descent, hand-written. No parser generator.
+  - AST nodes are tagged unions: `[tag: 1 byte][...fields]`
+  - All nodes allocated from the compilation arena — no malloc
+  - The parser must not backtrack. Rex grammar is LL(1) with one token of
+    lookahead except for two cases:
+      - `{expr}` inside strings requires lookahead to distinguish from `{key: val}`
+      - `fn(...)` inside an expression vs a statement requires one extra token
+    Both are resolved by the current lookahead token type alone.
+  - Error recovery: on a parse error, consume tokens until the next newline or
+    `:`-terminated block opener, then attempt to resume. Report ALL errors found
+    in one compiler run, not just the first.
+
+─────────────────────────────────────────────────────────────────────────────
+3.3  SEMANTIC ANALYSIS
+─────────────────────────────────────────────────────────────────────────────
+
+  - Two passes:
+    Pass 1: collect all top-level protocol names (enables forward references)
+    Pass 2: type check all expressions and statements
+  - Mutation analysis: track `:` write sites per variable. A variable with no
+    write site is a compile-time constant — eligible for constant folding.
+  - Uninitialised variable reads: track whether each variable has been assigned
+    before its first read. Error if not.
+  - Scope stack: a linked list of scope frames, each holding a var_table slice.
+    On scope entry, push a frame. On scope exit, pop it.
+  - Type compatibility: Rex has no implicit coercion except:
+    - `int` → `float` in arithmetic expressions (promote with `cvtsi2sd`)
+    - `char` → `int` in arithmetic expressions (zero-extend with `movzx`)
+    - `byte` → `int` in arithmetic expressions (zero-extend with `movzx`)
+  - All other type conversions require explicit cast functions.
+
+─────────────────────────────────────────────────────────────────────────────
+3.4  CODE GENERATION
+─────────────────────────────────────────────────────────────────────────────
+
+  - Emit NASM directly to a string buffer — no intermediate IR
+  - Register allocation: linear scan over live ranges in SSA-lite form.
+    Use rax, rbx, rcx, rdx, rsi, rdi, r8–r15 as the allocation pool.
+    Spill to stack when all registers are occupied.
+  - Calling convention: SysV AMD64 ABI throughout. The compiler must NEVER
+    corrupt rbx, rbp, r12–r15 across protocol call boundaries without saving
+    and restoring them.
+  - For loops: emit dec/jnz when the step is 1 and the bound is known.
+  - For loops with step > 1: emit add + cmp + jle.
+  - All jumps use short form (`jmp short`) when offset ≤ 127 bytes; long form
+    otherwise. Emit a two-pass approach: first pass uses long form, second pass
+    back-patches to short where possible.
+  - String constants: emit in `.rodata` section; reference by label.
+  - BSS variables: emit in `.bss` section with `resq` / `resb` as appropriate.
+  - Stack frame: each protocol uses a standard prologue:
+      `push rbp; mov rbp, rsp; sub rsp, N` where N is the local variable size
+    rounded up to 16-byte alignment (SysV ABI stack alignment requirement).
+
+─────────────────────────────────────────────────────────────────────────────
+3.5  OPTIMIZER — PEEPHOLE PASSES
+─────────────────────────────────────────────────────────────────────────────
+
+After codegen, run these peephole passes over the emitted NASM before writing
+it to disk. These are text-level passes over the NASM output buffer.
+
+  Pass 1: Constant folding
+    - `mov rax, 5; add rax, 3` → `mov rax, 8`
+    - `mov rax, 10; imul rax, 2` → `mov rax, 20`
+    - Only fold when both operands are immediate integer literals.
+    - Fold across up to 3 consecutive instructions in a basic block.
+
+  Pass 2: Strength reduction
+    - `imul rax, 2` → `lea rax, [rax + rax]` (lea is 1 cycle; imul is 3)
+    - `imul rax, 4` → `shl rax, 2`
+    - `imul rax, 8` → `shl rax, 3`
+    - `imul rax, 3` → `lea rax, [rax + rax*2]`
+    - `idiv rcx` where rcx is power of 2 → `sar rax, log2(rcx)`
+
+  Pass 3: Redundant move elimination
+    - `mov rax, rax` → eliminate
+    - `mov rax, rbx; mov rbx, rax` → eliminate the second if rbx is not used after
+
+  Pass 4: Jump chaining
+    - A jump that targets another unconditional jump → redirect to the final target
+
+  Pass 5: Dead code elimination
+    - Instructions after an unconditional `jmp` or `ret` and before the next label
+      are unreachable — remove them.
+
+  Pass 6: `#inline` expansion
+    - For protocols decorated `#inline`, inline the body at every call site.
+    - Limit: only inline if the body is ≤ 10 NASM instructions.
+    - Recursion: do NOT inline recursive protocols (would cause infinite expansion).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§4  PERFORMANCE — NON-NEGOTIABLE TARGETS AND HOW TO HIT THEM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rex runs on the bare metal. There is no VM, no JIT warmup, no GC pause unless
+the programmer explicitly opts into one. Every clock cycle wasted in Rex is
+wasted by YOUR code.
+
+─────────────────────────────────────────────────────────────────────────────
+4.1  REGISTER DISCIPLINE
+─────────────────────────────────────────────────────────────────────────────
+
+  - Keep loop counters in registers for the entire loop body.
+    Never reload from memory what was last stored to a register.
+  - For inner loops (hot paths): dedicate r12, r13, r14 as scratch registers
+    (save/restore in the protocol prologue/epilogue).
+  - Do NOT generate `mov rax, [rbp-N]; mov rbx, [rbp-M]; ...` for simple
+    arithmetic. Track which variables are in registers and emit direct register ops.
+  - Spill only when genuinely register-starved (more than 12 live values).
+
+─────────────────────────────────────────────────────────────────────────────
+4.2  MEMORY ACCESS PATTERNS
+─────────────────────────────────────────────────────────────────────────────
+
+  - `seq` element access: pointer arithmetic only — `[base + index*8]` for int/float.
+    No bounds check in `#unsafe` mode; checked with `cmp + jge` in safe mode.
+  - For the common case `seq[int]` iteration: the base pointer lives in a register;
+    the index lives in a register; the body is `mov rax, [r_base + r_idx*8]`.
+    This is one memory access per element — same as C.
+  - `seq.push()`: check capacity first (`cmp r_len, r_cap`), grow only if needed.
+    The capacity check is branch-predicted-not-taken in the common case.
+    Growth path: `call mm_grow` — this is cold; mark it as such.
+  - String data: the data pointer is `header + 16`. Cache this in a register
+    for the duration of any string method that loops over the string content.
+  - Dict lookup: after computing the hash, the slot is `[table_base + (hash % cap) * slot_size]`.
+    Keep `table_base` in a register during the probe loop.
+
+─────────────────────────────────────────────────────────────────────────────
+4.3  SIMD USAGE
+─────────────────────────────────────────────────────────────────────────────
+
+All processors capable of running Rex support at minimum SSE2 (x86-64 baseline).
+The following operations MUST use SSE2 or better:
+
+  String search (`.contains`, `.index_of`, `in` operator):
+    Load 16 bytes of haystack at a time using `movdqu`.
+    Broadcast the first byte of the needle using `movd + pshufb` (or punpcklbw).
+    Compare with `pcmpeqb`. Check result with `pmovmskb + test`.
+    This scans 16 bytes per iteration instead of 1.
+
+  String case conversion (`.upper()`, `.lower()`):
+    Use the SSE2 range-comparison trick:
+    Subtract 'a' (or 'A'), compare unsigned < 26 with `pcmpgtb` trick,
+    then OR/AND the 0x20 bit into matching bytes.
+    Processes 16 bytes per iteration.
+
+  `seq[int]` sum / min / max when N > 8:
+    Load 2 int64 values per iteration using `movdqu`.
+    Accumulate partial sums with `paddq` / compare with `pcmpgtq`.
+    Horizontal combine at the end with `psrldq + paddq`.
+
+  Memory copy for `str.join`, `str.repeat`, `seq.extend`, `seq.copy`:
+    Use `rep movsq` for aligned copies, `movdqu` for unaligned chunks < 128 bytes.
+    For copies > 128 bytes: `movntdq` (non-temporal store, bypasses cache write)
+    when the destination will not be read again immediately (e.g., `str.join`).
+
+  `blast` loop construct:
+    Emit `movdqa` / `movntdq` loops for the body; the user writes scalar code
+    and the compiler auto-vectorises where possible.
+
+─────────────────────────────────────────────────────────────────────────────
+4.4  BRANCH PREDICTION HYGIENE
+─────────────────────────────────────────────────────────────────────────────
+
+  - In growth checks (`seq.push`, `dict.insert`): the NOT-GROW branch is the
+    common case. Lay it out fallthrough; the grow branch jumps away.
+  - In bounds checks: the IN-BOUNDS branch is common. Lay fallthrough as in-bounds;
+    the out-of-bounds branch jumps to the error handler.
+  - Mark cold error paths with `#cold` sections so they are far from hot paths
+    and do not pollute the instruction cache.
+  - `each` loop: emit `prefetcht0 [r_base + r_idx*8 + 64]` at the start of
+    each iteration body. This pre-fetches the next cache line while the current
+    one is being processed.
+
+─────────────────────────────────────────────────────────────────────────────
+4.5  FLOAT PERFORMANCE
+─────────────────────────────────────────────────────────────────────────────
+
+  - All `float` operations use SSE2 scalar double instructions: `addsd`, `mulsd`,
+    `divsd`, `subsd`, `sqrtsd`, `maxsd`, `minsd`.
+  - Do NOT use x87 for float arithmetic — x87 has 80-bit precision that causes
+    result differences from IEEE 754 double.
+  - Float conversions:
+    `int → float`: `cvtsi2sd`
+    `float → int (truncate)`: `cvttsd2si`
+    `float → int (round)`: `cvtsd2si` with rounding mode set in MXCSR
+  - `float.ceil()` / `floor()` / `round()`: use SSE4.1 `roundsd` with the
+    appropriate mode immediate. Fall back to x87 `frndint` on SSE4.1-less CPUs
+    with a CPUID check at startup.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§5  MEMORY SAFETY REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rex programs must be safe by default. An untrusted Rex program should not be
+able to corrupt its own heap, access unowned memory, or trigger undefined
+behaviour by construction (within the safe subset of the language).
+
+─────────────────────────────────────────────────────────────────────────────
+5.1  BOUNDS CHECKING
+─────────────────────────────────────────────────────────────────────────────
+
+  Every `seq[i]`, `arr[i]`, `str[i]` index access emits:
+    `cmp r_idx, r_len; jge .bounds_error`
+  The `.bounds_error` handler prints:
+    "rex: bounds error: index N out of range [0..M] at file.rex:42"
+  Then calls `sys_exit(1)`.
+
+  Negative indices: before the bounds check, add `r_len` to `r_idx`:
+    `test r_idx, r_idx; jns .positive`
+    `add r_idx, r_len`
+    `test r_idx, r_idx; js .bounds_error`   // still negative after add
+    `.positive: cmp r_idx, r_len; jge .bounds_error`
+
+  In `#unsafe` blocks: bounds checks are suppressed. The programmer accepts
+  responsibility. A compile-time warning is emitted.
+
+─────────────────────────────────────────────────────────────────────────────
+5.2  NULL / UNINITIALIZED POINTER PROTECTION
+─────────────────────────────────────────────────────────────────────────────
+
+  - All heap pointers are initialised to 0 at declaration (seq, dict, str).
+  - Any method call on a null pointer emits a runtime error before the call:
+    `test r_ptr, r_ptr; jz .null_error`
+  - `.null_error` prints: "rex: null pointer dereference: variable 'X' was never
+    initialised at file.rex:42"
+  - The compiler's semantic analysis catches most cases at compile time
+    (uninitialised variable read detection in §3.3).
+
+─────────────────────────────────────────────────────────────────────────────
+5.3  ARITHMETIC OVERFLOW PROTECTION
+─────────────────────────────────────────────────────────────────────────────
+
+  - By default, integer overflow in Rex is CHECKED — not silent wraparound.
+  - After `add`, `sub`, `imul`, emit `jo .overflow_error`.
+  - `.overflow_error`: "rex: arithmetic overflow in 'a + b' at file.rex:42"
+  - In `#unsafe` blocks: overflow checks are suppressed. Behaviour is
+    two's-complement wraparound.
+  - The `carry` and `overflow` hardware flag reads (§2.2.9) are only meaningful
+    in `#unsafe` blocks where the check was suppressed.
+
+─────────────────────────────────────────────────────────────────────────────
+5.4  DICT MISSING-KEY PROTECTION
+─────────────────────────────────────────────────────────────────────────────
+
+  - `d[key]` on a missing key emits:
+    "rex: dict key not found: 'X' at file.rex:42"
+  - `.get_or(key, default)` and `.get_or_set(key, default)` are the safe alternatives.
+  - `.has(key)` for guard checks.
+
+─────────────────────────────────────────────────────────────────────────────
+5.5  ALLOCATOR OVERFLOW PROTECTION
+─────────────────────────────────────────────────────────────────────────────
+
+  - Arena overflow: "rex: arena overflow: requested N bytes but slab is full"
+  - Pool block too large: "rex: pool error: allocation of N bytes exceeds block size M"
+  - Stack overflow (use mm stack): not detected at runtime (hardware fault);
+    the compiler must estimate stack depth at compile time and warn if the
+    projected stack use exceeds 1 MB.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§6  LANGUAGE SERVER PROTOCOL (LSP)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The Rex toolchain must ship a fully functional LSP server. Editors that speak
+LSP (VSCode, Neovim, Emacs, Helix, Zed) will connect to it automatically.
+This is not optional — an uneditable language is a dead language.
+
+Start the LSP with: `rex lsp`
+
+The LSP server must implement the following LSP 3.17 capabilities:
+
+─────────────────────────────────────────────────────────────────────────────
+6.1  DIAGNOSTICS (textDocument/publishDiagnostics)
+─────────────────────────────────────────────────────────────────────────────
+
+  - Run the Rex compiler's lexer, parser, and semantic analysis on every file
+    change (with a 200ms debounce).
+  - Emit all errors and warnings as LSP Diagnostic objects with:
+    - Exact line and character range (start + end, not just line number)
+    - Severity: Error | Warning | Hint
+    - Source: "rex"
+    - Message: the same clear message as the CLI compiler
+  - Do NOT block the LSP thread during compilation — run compilation in a
+    worker thread or process.
+
+─────────────────────────────────────────────────────────────────────────────
+6.2  COMPLETION (textDocument/completion)
+─────────────────────────────────────────────────────────────────────────────
+
+  - Trigger characters: `.` (after a type for method completions), `@` (protocol
+    call completions), `{` (inside strings for interpolation expressions)
+  - After `.` on a `str`: return all str methods with signatures
+  - After `.` on a `seq[T]`: return all seq methods with T substituted
+  - After `.` on a `dict[T]`: return all dict methods with T substituted
+  - After `.` on a `float` / `int`: return the respective method sets
+  - After `@`: return all protocols defined in the current file and all imports
+  - Keyword completions: offer all Rex keywords in expression context
+  - Each completion item must include:
+    - `label`: the method/protocol name
+    - `insertText`: the name plus `($1)` snippet for cursor positioning
+    - `documentation`: the Notes column from the syn.md method table
+    - `kind`: Method | Function | Keyword
+
+─────────────────────────────────────────────────────────────────────────────
+6.3  HOVER (textDocument/hover)
+─────────────────────────────────────────────────────────────────────────────
+
+  - Hovering over a variable shows: `name: type`
+  - Hovering over a protocol call shows: signature + doc comment if present
+  - Hovering over a method call shows: method signature + Notes from syn.md
+  - Hovering over a type keyword (`int`, `float`, `str`, etc.) shows a brief
+    description from syn.md
+
+─────────────────────────────────────────────────────────────────────────────
+6.4  GO-TO-DEFINITION (textDocument/definition)
+─────────────────────────────────────────────────────────────────────────────
+
+  - F12 on a protocol call → jump to `prot` definition
+  - F12 on a module-qualified call → jump to the definition in the imported file
+  - F12 on a variable → jump to its declaration site
+  - For stdlib protocols: jump to a generated documentation file
+
+─────────────────────────────────────────────────────────────────────────────
+6.5  SIGNATURE HELP (textDocument/signatureHelp)
+─────────────────────────────────────────────────────────────────────────────
+
+  - Trigger: `(` after a protocol name
+  - Show the protocol signature with each parameter highlighted as the user types
+  - Multiple overloads (if Rex adds them later): show all and highlight the active one
+
+─────────────────────────────────────────────────────────────────────────────
+6.6  RENAME (textDocument/rename)
+─────────────────────────────────────────────────────────────────────────────
+
+  - Rename a variable, protocol, or parameter across the current file and all
+    files that import it
+  - Preview mode: show all affected locations before committing
+
+─────────────────────────────────────────────────────────────────────────────
+6.7  FORMAT (textDocument/formatting)
+─────────────────────────────────────────────────────────────────────────────
+
+  - Run `rex fmt` on the current file and return the result as a set of text
+    edits (do NOT rewrite the file from the LSP — return edits to the editor)
+
+─────────────────────────────────────────────────────────────────────────────
+6.8  LSP IMPLEMENTATION NOTES
+─────────────────────────────────────────────────────────────────────────────
+
+  - The LSP server is a separate binary: `rex-lsp`. It reads/writes LSP JSON-RPC
+    over stdio.
+  - Write the LSP server in Rex itself once Rex can compile itself. Until then,
+    write it in C or Zig as a bootstrap implementation.
+  - The protocol analysis (type resolution, scope lookup) is shared with the
+    main compiler — do not duplicate this logic.
+  - Response latency target: < 50ms for hover, completion, diagnostics on a
+    1000-line file. < 200ms for go-to-definition across a 10-file project.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§7  FORMATTER — `rex fmt`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rex has one canonical formatting style. There are no options. The formatter is
+not configurable. Consistency across all Rex codebases is a non-negotiable goal.
+
+Formatting rules:
+
+  - Indentation: 4 spaces. Never tabs.
+  - No trailing whitespace on any line.
+  - One blank line between top-level protocol definitions.
+  - No blank line between a decorator and the `prot` it decorates.
+  - Binary operators: one space each side (`a + b`, not `a+b`).
+  - Unary operators: no space (`-x`, `not x`, `~x`).
+  - Method chains: each `.method()` on the same line if total length ≤ 80 chars;
+    otherwise one method per line, indented 4 spaces from the base expression.
+  - Seq/dict literals: space after `[`, before `]` only if the literal has items;
+    space after each `,`.
+  - Comments: at least two spaces between code and `//`; preserve relative
+    spacing of block comment lines.
+  - Long lines (> 80 chars): break after the last `,` or operator that fits;
+    continuation indented 4 extra spaces.
+  - `for` / `while` / `each` / `if` / `elif` / `else` headers: no extra space
+    before `:`.
+  - `:=` write sigils: one space after `:` — `:x = 5`, not `:x=5`.
+  - Blank line before and after `try` / `use mm` / `use gc` blocks.
+
+`rex fmt` is idempotent: running it twice produces the same output as running
+it once. The formatter is tested on syn.md's examples — all examples in syn.md
+must be in canonical format.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§8  TOOLCHAIN — INSTALLABILITY AND CLI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rex must be trivially installable on any x86-64 Linux system. There are no
+runtime dependencies. The install process must work offline once the binary
+is downloaded.
+
+─────────────────────────────────────────────────────────────────────────────
+8.1  INSTALL
+─────────────────────────────────────────────────────────────────────────────
+
+  One-line install (for users who trust the internet):
+    curl -fsSL https://rex-lang.dev/install.sh | sh
+
+  The install script must:
+    1. Detect the user's OS and architecture (only x86-64 Linux is supported)
+    2. Download the latest `rex` static binary from the release page
+    3. Verify the SHA256 checksum printed on the release page
+    4. Copy to `/usr/local/bin/rex` (or `~/.local/bin/rex` if no sudo)
+    5. Print: "Rex installed. Run 'rex --version' to confirm."
+
+  Manual install: copy the single `rex` binary to anywhere on the PATH.
+  No additional files required. No configuration files. No library paths.
+
+  The `rex` binary is statically linked. `ldd rex` must print "not a dynamic
+  executable". It must run on any x86-64 Linux kernel >= 3.0.
+
+─────────────────────────────────────────────────────────────────────────────
+8.2  CLI COMMANDS
+─────────────────────────────────────────────────────────────────────────────
+
+  rex --version
+    Print: "Rex V5.0 (NASM ELF64) build <date>"
+
+  rex build [file.rex]
+    Compile file.rex (or main.rex in CWD if not specified).
+    Output: ./main (or ./basename without extension).
+    Exit 0 on success, 1 on error.
+
+  rex run [file.rex] [-- args...]
+    Compile and immediately execute. Pass args after `--` to the program.
+    Compile artefact is deleted after execution (no leftover binary).
+
+  rex check [file.rex]
+    Type-check and parse only. No NASM, no ld. Fast feedback loop.
+    Print all errors; exit 0 if clean, 1 if errors.
+
+  rex fmt [file.rex | --check]
+    Format file.rex in-place.
+    With `--check`: exit 0 if already formatted, 1 if changes would be made.
+    Useful in CI.
+
+  rex lsp
+    Start the language server on stdio. Editors connect via the LSP protocol.
+
+  rex new <project-name>
+    Create a new Rex project directory:
+      <project-name>/
+        main.rex       — starter "Hello, Rex!" program
+        tests/
+          test_main.rex — starter test file
+
+  rex test [file.rex]
+    Run the test suite. Tests are `.rex` files in `tests/` that call `assert`.
+    Print: "37/37 passed" or list failing tests with line numbers.
+    Exit 0 if all pass, 1 if any fail.
+
+  rex doc [file.rex]
+    Generate HTML documentation from `///` doc comments.
+    Output: `./doc/index.html`
+
+─────────────────────────────────────────────────────────────────────────────
+8.3  PROJECT STRUCTURE (created by `rex new`)
+─────────────────────────────────────────────────────────────────────────────
+
+  project/
+    main.rex           — program entry point
+    modules/           — local modules
+    tests/             — test files
+    rex.toml           — project manifest (name, version, dependencies)
+
+  rex.toml format:
+    [project]
+    name = "myapp"
+    version = "0.1.0"
+    author = "Your Name"
+
+    [build]
+    entry = "main.rex"
+
+    [deps]
+    # future package registry entries will go here
+
+─────────────────────────────────────────────────────────────────────────────
+8.4  PACKAGE REGISTRY (future)
+─────────────────────────────────────────────────────────────────────────────
+
+  The design must accommodate a future `rex add <package>` command. Reserve the
+  `rex.toml` [deps] section for this. Packages will be single `.rex` files or
+  directories fetched from a central registry. The implementation is out of scope
+  for V5.0 but the toolchain must not close any doors.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§9  TESTING REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The test suite lives in `tests/`. Each test is a `.rex` file. The test runner
+(`rex test`) compiles and runs each file, compares stdout to the expected output
+in a paired `.expected` file, and reports pass/fail.
+
+For every feature you implement, write tests covering:
+
+  T1: Normal case — typical input, expected output
+  T2: Boundary case — edge of a range, empty collection, single element
+  T3: Large input — N > 1000 to exercise growth/realloc paths
+  T4: Error case — input that should trigger a runtime error; verify the error
+      message text (capture stderr)
+  T5: Composition — use the feature alongside other features in a realistic
+      program (e.g., sort a dict by value, join the result, output it)
+
+Additionally write benchmarks in `bench/`. Each benchmark must:
+  - Run for at least 1 second of work
+  - Print a timing (nanoseconds per operation)
+  - Include a reference C implementation in `bench/ref/` for comparison
+
+The target: Rex within 2x of the equivalent C program for all operations.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§10  DOCUMENTATION UPDATE REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After every implementation session, you MUST:
+
+  1. Change every newly implemented feature's status in syn.md from 🔧/📋 to ✅.
+  2. Add or correct any "Planned semantics" blocks that are now actual semantics.
+  3. Remove "Planned emission:" sections when the code is live — replace with
+     the actual NASM patterns emitted.
+  4. Update the Data Types table if any type's implementation status changed.
+  5. Ensure every code example in syn.md compiles with your current implementation.
+     Run `rex check` on every code block in syn.md as a CI step.
+  6. Write a one-paragraph "Implementation Notes" subsection beneath any feature
+     whose implementation differs from the planned semantics. Explain why and
+     what the programmer-visible effect is.
+  7. If a syn.md design decision turns out to be wrong or impractical during
+     implementation, update syn.md and record the change with a "Design revision:"
+     note. Do not silently change the spec without a documented rationale.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§11  IMPLEMENTATION ORDER — RECOMMENDED PHASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Follow this order. Each phase must be fully passing before starting the next.
+Partial phases are not acceptable — finish what you start.
+
+  PHASE 1 — Core language completeness            (estimated: large)
+    - `not` operator (🔧 → ✅)
+    - `each` loop full implementation (🔧 → ✅)
+    - `repeat N:` (📋 → ✅)
+    - `stop N` / `skip N` (📋 → ✅)
+    - Loop `else:` (📋 → ✅)
+    - `match` (📋 → ✅)
+    - `is` / `is not` (📋 → ✅)
+    - `in` membership (📋 → ✅)
+    - `const` / `volatile` (📋 → ✅)
+    - Block comments / doc comments (📋 → ✅)
+
+  PHASE 2 — Full collection method sets           (estimated: large)
+    - All `seq[T]` methods (📋 sections → ✅)
+    - All `str` methods (📋 sections → ✅)
+    - All `dict[T]` methods (📋 sections → ✅)
+    - `set[T]` (📋 → ✅)
+    - `arr[T, N]` (📋 → ✅)
+    - String interpolation `{expr}` (📋 → ✅)
+    - Format specifiers `{expr:spec}` (📋 → ✅)
+
+  PHASE 3 — I/O and error handling                (estimated: medium)
+    - `fmt()` (📋 → ✅)
+    - `show()` / `flush()` / `debug()` / `write()` (📋 → ✅)
+    - `input()` (📋 → ✅)
+    - `warn()` (📋 → ✅)
+    - `try` / `except` / `finally` (📋 → ✅)
+    - File I/O stdlib module `io` (📋 → ✅)
+
+  PHASE 4 — Type system completeness              (estimated: large)
+    - `tup[T...]` (📋 → ✅)
+    - Type inference (📋 → ✅)
+    - Multiple return values (📋 → ✅)
+    - Lambda `fn` (📋 → ✅)
+    - Protocol decorators: `#pure`, `#total`, `#hot`, `#cold`, `#safe`, `#unsafe`,
+      `#noinline` (📋 → ✅)
+    - `#inline` expansion in optimizer (📋 → ✅)
+
+  PHASE 5 — Memory management                    (estimated: very large)
+    - Complete `use mm` (stack, heap, static — arena/pool already ✅)
+    - Named contexts `ctx` (📋 → ✅)
+    - GC modes `use gc` (all five) (📋 → ✅)
+    - User-defined allocators / GCs (📋 → ✅)
+    - `own` / `move` / `free` (📋 → ✅)
+    - `align` (📋 → ✅)
+
+  PHASE 6 — Operators and advanced syntax         (estimated: medium)
+    - `->` pipeline (📋 → ✅)
+    - `$` syscall intercept (📋 → ✅)
+    - `flip` / `rand` (📋 → ✅)
+    - `carry` / `overflow` flags (📋 → ✅)
+    - String `*` operator (📋 → ✅)
+    - `stop N` / `skip N` multi-level (📋 → ✅)
+    - `unreachable` / `assert` (📋 → ✅)
+    - `blast` / `pipe` (📋 → ✅)
+
+  PHASE 7 — Modules and standard library          (estimated: very large)
+    - Import system (`import`, `from ... import`, alias) (📋 → ✅)
+    - `math` stdlib module (📋 → ✅)
+    - `os` stdlib module (📋 → ✅)
+    - `io` stdlib module (📋 → ✅)
+    - `json` stdlib module (📋 → ✅)
+    - `complex` reinstated as stdlib (📋 → ✅)
+    - `str_utils` module (📋 → ✅)
+    - `net` module (📋 → ✅)
+
+  PHASE 8 — Optimizer                             (estimated: medium)
+    - Constant folding (📋 → ✅)
+    - Strength reduction (📋 → ✅)
+    - Redundant move elimination (📋 → ✅)
+    - Jump chaining (📋 → ✅)
+    - Dead code elimination (📋 → ✅)
+    - `#inline` expansion (📋 → ✅)
+
+  PHASE 9 — Toolchain                             (estimated: medium)
+    - `rex fmt` formatter (📋 → ✅)
+    - `rex check` fast type-check mode (📋 → ✅)
+    - `rex test` test runner (📋 → ✅)
+    - `rex new` project scaffold (📋 → ✅)
+    - `rex doc` documentation generator (📋 → ✅)
+    - Install script (📋 → ✅)
+    - Static binary build (📋 → ✅)
+    - `rex.toml` project manifest (📋 → ✅)
+
+  PHASE 10 — LSP                                  (estimated: very large)
+    - `rex lsp` server process (📋 → ✅)
+    - Diagnostics (📋 → ✅)
+    - Completion (📋 → ✅)
+    - Hover (📋 → ✅)
+    - Go-to-definition (📋 → ✅)
+    - Signature help (📋 → ✅)
+    - Rename (📋 → ✅)
+    - Formatter integration (📋 → ✅)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§12  WHAT "DONE" LOOKS LIKE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rex V5.0 is complete when ALL of the following are true:
+
+  [✓]  Every feature in syn.md is marked ✅ — nothing is 🔧 or 📋.
+  [✓]  `rex test` passes 100% of tests (not just the current 37).
+  [✓]  Every code example in syn.md compiles with `rex check` without error.
+  [✓]  `rex fmt` applied to syn.md's examples is idempotent.
+  [✓]  `ldd ./rex` prints "not a dynamic executable".
+  [✓]  `rex --version` prints the correct version string.
+  [✓]  The LSP server provides completion, hover, and diagnostics in VSCode and
+       Neovim without errors.
+  [✓]  All benchmarks in `bench/` show Rex within 2x of equivalent C.
+  [✓]  The install script works on a clean Ubuntu 22.04 LTS x86-64 VM.
+  [✓]  The compiler itself compiles in under 5 seconds on a 2020-era laptop.
+  [✓]  A "Hello, Rex!" program compiled with `rex build` is ≤ 4 KB in binary
+       size and runs in under 1ms (including process startup).
+  [✓]  No valgrind errors in the compiler process itself on any test input.
+  [✓]  `rex check` on a 1000-line Rex program completes in under 100ms.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§13  PHILOSOPHY — WHY REX EXISTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rex exists because most high-level languages hide what the hardware is doing.
+Rex does not. Every Rex program maps to a straightforward, readable sequence of
+x86-64 instructions. The programmer does not need to think in assembly — but
+they should be able to look at the compiler output and understand it.
+
+Rex is also an experiment in making mutability visible at a glance. The `:` sigil
+at every write site means you can scan a function and immediately see where state
+changes happen — without a linter, without an IDE, with just your eyes.
+
+Rex is an experiment in giving programmers control over memory without making it
+a full-time job. `use mm arena:` and `use gc sweep:` are opt-in; most programs
+run fine with the default heap allocator and never think about it. Power users
+can drop all the way down to `#unsafe` and `$` syscalls when they need to.
+
+Every implementation decision must be consistent with these goals.
+When in doubt: choose the option that is faster, clearer, and closer to the metal.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  END OF PROMPT
+  Read syn.md in full.
+  Follow the rules in §1.
+  Build in the order of §11.
+  Do not ship stubs.
+  Rex should feel as fast as it looks.
+================================================================================
