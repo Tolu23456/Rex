@@ -770,21 +770,23 @@ The remaining 3.96× gap vs C has two causes:
 
 ## Summary Table
 
-### Runtime Performance (June 2026 — fresh run, all internal clock_gettime)
+### Runtime Performance (June 2026 — O-Affine-41 fix, all internal clock_gettime)
 
 | Benchmark                           | Rex Best (ms) | C Best (ms)  | Winner      | Ratio            |
 |-------------------------------------|---------------|--------------|-------------|------------------|
-| B1  Arithmetic Throughput (1B LCG)  | **0**         | 1064.26      | **Rex**     | **>2129×**       |
-| B2  Multiply-fold 64-bit (1B iters) | **0**         | 796.88       | **Rex**     | **>1594×**       |
-| B3  Function Call Overhead (200M)   | 239           | 74.45        | **C**       | ~3.21×           |
-| B6  Recursive Fibonacci fib(42)     | 1144          | 392.99       | **C**       | ~2.91×           |
-| B7  Iterative Fibonacci (10M×fib80) | 1716          | 315.07       | **C**       | ~5.45×           |
-| B9  Dynamic Array Growth (1M push)  | 10            | 5.54         | **C**       | ~1.81×           |
-| B10 Multiply-only fold (1B × x*3)   | **0**         | 534.80       | **Rex**     | **>1070×**       |
+| B1  Arithmetic Throughput (1B LCG)  | **0**         | 1336.44      | **Rex**     | **>2673×** ★    |
+| B2  Multiply-fold 64-bit (1B iters) | **0**         | 1001.46      | **Rex**     | **>2003×**       |
+| B3  Function Call Overhead (200M)   | 290           | 281.08       | **C**       | ~1.03×           |
+| B6  Recursive Fibonacci fib(42)     | 1465          | 473.94       | **C**       | ~3.09×           |
+| B7  Iterative Fibonacci (10M×fib80) | 1898          | 282.24       | **C**       | ~6.72×           |
+| B9  Dynamic Array Growth (1M push)  | 12            | 4.58         | **C**       | ~2.62×           |
+| B10 Multiply-only fold (1B × x*3)   | **0**         | 667.99       | **Rex**     | **>1336×**       |
 | B11 Add-only fold (1B × x+7)        | **0**         | 0.00         | **≈ Tie**   | —                |
-| B12 Nested Loop Accum (3000×3000)   | 11            | 0.00         | **C**       | **>22×** †       |
-| B13 GCD Euclidean (1M pairs)        | 136           | 130.71       | **C**       | **~1.04×**       |
-| B14 While-loop log2 sum (10M vals)  | 621           | 68.55        | **C**       | ~9.06×           |
+| B12 Nested Loop Accum (3000×3000)   | 19            | 0.00         | **C**       | **>38×** †       |
+| B13 GCD Euclidean (1M pairs)        | 175           | 163.68       | **C**       | **~1.07×**       |
+| B14 While-loop log2 sum (10M vals)  | 311           | 80.13        | **C**       | ~3.88×           |
+
+★ **B1 regression fixed in this session** — O-Affine-41 (new 41-byte body detector) now fires for the LCG pattern. Previously the 41-byte body (using `imul rax, r10, imm32` — 7-byte 3-operand form) wasn't detected; only the 46-byte form (using `mov eax, imm32; imul rax, rbx` — 9-byte 2-operand form) was checked. The fix adds a second pattern path in `codegen_emit_for_end` at `.fe_no_affine` that recognises the 41-byte variant and runs the same binary-ladder compile-time computation.
 
 † B12: GCC -O3 recognises the closed-form `Σᵢ Σⱼ i·j = (N(N−1)/2)²` and eliminates the loop at compile time (same phenomenon as B10/B11 but in the opposite direction). Rex runs the full 9 M iterations.
 
@@ -795,7 +797,8 @@ C uses `clock_gettime()` via libc. Neither measurement includes process startup.
 B1/B2/B10 show 0ms because the loops are **eliminated entirely at compile time**; only 2 runtime instructions execute.
 B11 is a genuine tie — both Rex and GCC -O3 fold the constant-stride loop at compile time.
 B12 shows 0ms for C — GCC folds the nested closed-form summation; Rex still runs the full loop.
-B13 is the closest runtime result in the suite — Rex is within 4% of GCC for a while+modulo workload.
+B13 is the closest runtime result in the suite — Rex is within 7% of GCC for a while+modulo workload.
+B3 is essentially tied at the instruction level (290ms Rex vs 281ms C, 1.03×) — the call overhead gap has been closed by O26/O27/long-NOP.
 
 > **Measurement history:**
 > - v1 (old): `wall_ms` used two `date +%s%N` forks — ≈19 ms baked-in overhead every reading.

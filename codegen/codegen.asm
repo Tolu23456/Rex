@@ -1402,6 +1402,171 @@ codegen_emit_for_end:
     ; codegen_patch_breaks + codegen_pop_cont + O13 flush happen at .fe_no_combine/.fe_done
     jmp .fe_no_combine
 .fe_no_affine:
+    ; O-Affine-41: combined mul+add using 3-operand imul-imm32 form (41-byte body).
+    ; Fires when the multiplier A is a 32-bit constant so codegen emits
+    ;   `imul rax, r10, imm32`  (49 69 C2 + 4-byte imm = 7 bytes)
+    ; instead of the 9-byte `mov eax, A` + `imul rax, rbx` form.
+    ; Full 41-byte pattern:
+    ;   [0..7]  = 4C 89 F0 + 5×90  (O13 retroactive read + NOPs)
+    ;   [8..10] = 49 89 C2          (spill: mov r10, rax)
+    ;   [11..13]= 49 69 C2          (imul rax, r10, imm32 — prefix+opcode+ModRM)
+    ;   [14..17]= imm32(A)
+    ;   [18..20]= 49 89 C6          (first O13 store: mov r14, rax)
+    ;   [21..23]= 4C 89 F0          (second O13 read: mov rax, r14)
+    ;   [24..26]= 49 89 C2          (second spill)
+    ;   [27]    = B8                (mov eax, imm32)
+    ;   [28..31]= imm32(B)
+    ;   [32..34]= 4C 89 D3          (restore: mov rbx, r10)
+    ;   [35..37]= 48 01 D8          (add rax, rbx)
+    ;   [38..40]= 49 89 C6          (second O13 store: mov r14, rax)
+    cmp byte [loop_accum_active], 0
+    je .fe_no_affine41_pass
+    mov rax, [out_idx]
+    sub rax, [for_rotation_body_pc]
+    cmp rax, 41
+    jne .fe_no_affine41_pass
+    lea rcx, [out_buffer]
+    mov rdx, [for_rotation_body_pc]
+    ; [0..2] = 4C 89 F0 (O13 retroactive read)
+    cmp byte [rcx+rdx+0], 0x4C
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+1], 0x89
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+2], 0xF0
+    jne .fe_no_affine41_pass
+    ; [3] and [7] = 0x90 (spot-check 5 NOPs from retroactive read-first patch)
+    cmp byte [rcx+rdx+3], 0x90
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+7], 0x90
+    jne .fe_no_affine41_pass
+    ; [8..10] = 49 89 C2 (spill: mov r10, rax)
+    cmp byte [rcx+rdx+8], 0x49
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+9], 0x89
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+10], 0xC2
+    jne .fe_no_affine41_pass
+    ; [11..13] = 49 69 C2 (imul rax, r10, imm32 — 3-operand form)
+    cmp byte [rcx+rdx+11], 0x49
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+12], 0x69
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+13], 0xC2
+    jne .fe_no_affine41_pass
+    ; [18..20] = 49 89 C6 (first O13 store: mov r14, rax)
+    cmp byte [rcx+rdx+18], 0x49
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+19], 0x89
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+20], 0xC6
+    jne .fe_no_affine41_pass
+    ; [21..23] = 4C 89 F0 (second O13 read: mov rax, r14)
+    cmp byte [rcx+rdx+21], 0x4C
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+22], 0x89
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+23], 0xF0
+    jne .fe_no_affine41_pass
+    ; [24..26] = 49 89 C2 (second spill: mov r10, rax)
+    cmp byte [rcx+rdx+24], 0x49
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+25], 0x89
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+26], 0xC2
+    jne .fe_no_affine41_pass
+    ; [27] = B8 (mov eax, imm32 — load constant B)
+    cmp byte [rcx+rdx+27], 0xB8
+    jne .fe_no_affine41_pass
+    ; [32..34] = 4C 89 D3 (restore: mov rbx, r10)
+    cmp byte [rcx+rdx+32], 0x4C
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+33], 0x89
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+34], 0xD3
+    jne .fe_no_affine41_pass
+    ; [35..37] = 48 01 D8 (add rax, rbx)
+    cmp byte [rcx+rdx+35], 0x48
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+36], 0x01
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+37], 0xD8
+    jne .fe_no_affine41_pass
+    ; [38..40] = 49 89 C6 (second O13 store: mov r14, rax)
+    cmp byte [rcx+rdx+38], 0x49
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+39], 0x89
+    jne .fe_no_affine41_pass
+    cmp byte [rcx+rdx+40], 0xC6
+    jne .fe_no_affine41_pass
+    ; Pattern confirmed. Extract A from [14..17], B from [28..31] (zero-extended imm32).
+    mov r8d, dword [rcx+rdx+14]     ; r8 = A
+    mov r9d, dword [rcx+rdx+28]     ; r9 = B
+    ; N = end_val - from_val
+    mov r10, [for_rotation_end_val]
+    sub r10, [for_rotation_from_val]
+    ; Binary ladder — same algorithm as 46-byte affine path
+    push rbx
+    mov r11, 1
+    xor ebx, ebx
+.affine41_ladder:
+    test r10, r10
+    jz .affine41_done
+    test r10, 1
+    jz .affine41_even
+    imul rbx, r8
+    add rbx, r9
+    imul r11, r8
+.affine41_even:
+    lea rax, [r8+1]
+    imul r9, rax
+    imul r8, r8
+    shr r10, 1
+    jmp .affine41_ladder
+.affine41_done:
+    mov [affine_tmp_a], r11
+    mov [affine_tmp_b], rbx
+    pop rbx
+    ; Rewind output to body start, emit replacement (identical to 46-byte path)
+    mov rax, [for_rotation_body_pc]
+    mov [out_idx], rax
+    mov r11, [affine_tmp_a]
+    cmp r11, 1
+    je .affine41_skip_mul
+    mov al, 0x48                ; mov rax, imm64 = 48 B8 + 8 bytes
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, [affine_tmp_a]
+    call emit_q
+    mov al, 0x4C                ; imul r14, rax = 4C 0F AF F0
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xAF
+    call emit_b
+    mov al, 0xF0
+    call emit_b
+.affine41_skip_mul:
+    mov r11, [affine_tmp_b]
+    test r11, r11
+    jz .affine41_skip_add
+    mov al, 0x48                ; mov rax, imm64 = 48 B8 + 8 bytes
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov rax, [affine_tmp_b]
+    call emit_q
+    mov al, 0x49                ; add r14, rax = 49 01 C6
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+.affine41_skip_add:
+    call codegen_patch_jump
+    mov byte [loop_pin_active], 0
+    jmp .fe_no_combine
+.fe_no_affine41_pass:
     ; O-Affine-Mul: closed-form for multiply-only loops (:x = x*A).
     ; Two body-size variants:
     ;   26-byte: A is imm32 → uses mov eax,A + imul rax,rbx

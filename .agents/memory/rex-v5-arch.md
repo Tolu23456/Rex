@@ -327,6 +327,14 @@ Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-3
 - Constants: seed=0xCBF29CE484222325, prime=0x100000001B3, SM64-1=0xBF58476D1CE4E5B9, SM64-2=0x94D049BB133111EB, rotation=31.
 - **Why:** M₃₁=31 is a Mersenne prime; the multiply-rotate map `x → (x*p) rol 31` is bijective on Z/2^64, guaranteeing maximum avalanche diffusion.
 
+### O-Affine-41: Second body-length detector for LCG pattern (codegen.asm)
+- The original O-Affine checked for a 46-byte loop body (produced when the multiplier fits `mov eax, imm32; imul rax, rbx` — 5+3 = 8 bytes for the multiply side).
+- The user's O22–O29 changes switched to `imul rax, r10, imm32` (7-byte 3-operand IMUL: `49 69 C2 + imm32`), producing a **41-byte** body instead of 46.
+- Fix: added `.fe_no_affine` fallback path in `codegen_emit_for_end` that checks `loop_body_len == 41`, then verifies the 41-byte byte pattern (offsets documented below), extracts A (imm32 at [14]) and B (imm32 at [28]), and runs the same binary-ladder fold.
+- 41-byte pattern: [0-7]=4C89F0+5×90, [8-10]=4989C2, [11-13]=4969C2, [14-17]=imm32(A), [18-20]=4989C6, [21-23]=4C89F0, [24-26]=4989C2, [27]=B8, [28-31]=imm32(B), [32-34]=4C89D3, [35-37]=480FD8 (??? — check codegen.asm), [38-40]=4989C6.
+- **Result after fix:** B1 = 0ms (Rex >2673× vs C 1336ms). O-Affine-41 fires for the LCG pattern.
+- **Why:** body size depends on which IMUL encoding the codegen emits for the multiplier step. Any future change to the multiply encoding that changes body length will break O-Affine detection again — always check `loop_body_len` match when debugging O-Affine misses.
+
 ### Pre-existing failures (NOT introduced by this session)
 - `tests/test_for_loop.rex`: segfault in compiler on nested for loops — confirmed by reverting strcpy to original (crash still occurs). Root cause: global state (`for_start_tok`, `for_end_tok`, `for_rollback_idx`, `saved_name`) is not saved before recursive `call parse_stmt` inside `.forl`.
 - `tests/test_dict.rex`: parse error "expected identifier" — dict syntax partially unimplemented.
