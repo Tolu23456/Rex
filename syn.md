@@ -1439,6 +1439,95 @@ is a compile-time error.
 
 ---
 
+### Named Contexts — `ctx` 📋
+
+A named context gives explicit, user-managed control over a slab's lifetime.
+Use it when you need to reuse a slab across iterations or share it across calls.
+
+```rex
+ctx :scratch = arena(8192)        // one mmap, 8 KB slab
+
+for k in 0..1000000:
+    use mm scratch:
+        seq[int] :tmp             // allocates from scratch
+        push tmp k
+        @process(tmp)
+    reset scratch                 // O(1) bump rewind — no syscall
+
+free scratch                      // munmap — releases slab to OS
+```
+
+**`reset name`** — rewinds the bump pointer to the base. All previously allocated
+objects become unreachable (no per-object free). The slab memory is reused.
+Zero syscall cost.
+
+**`free name`** — releases the slab back to the OS (`munmap`). The name becomes
+invalid after this point.
+
+**Contrast with scoped `use mm arena:`** — scoped form does one mmap on entry
+and one munmap on exit, every time the block is entered. Use named contexts when
+the block is inside a hot loop and the syscall pair would dominate runtime.
+
+---
+
+### Resolved Design Decisions 📋
+
+These decisions are final and govern the implementation of the `mm` system.
+
+#### Arena grow behavior
+When a `seq` inside `use mm arena:` or a named arena context needs to grow
+(push beyond capacity), the allocator **bump-allocates a new larger buffer**
+and leaves the old one as dead space in the slab until the context exits or
+is reset. No per-object reclaim happens inside an arena.
+
+**Implication:** size the arena for peak working set, not initial state. If a
+seq grows from 8 → 16 → 32 → 64 elements, all four buffers consume arena space
+simultaneously. Pre-sizing avoids this:
+
+```rex
+use mm arena(16384):
+    seq[int] :tmp = 1024    // pre-allocate 1024-element capacity — no grows
+    push tmp 1
+    push tmp 2
+```
+
+**Arena overflow** is a runtime panic (`err "arena overflow"` + exit 1). There
+is no silent fallback to heap — the user sized the arena incorrectly and must
+know about it.
+
+#### `pool[N]` — N is block size in bytes
+`pool[N]` means every allocation from this pool is exactly `N` bytes.
+Requesting more than `N` bytes from a pool is a runtime error. The total number
+of blocks grows on demand — a new slab is mmap'd when the free list is empty.
+
+```rex
+use mm pool[64]:
+    dict[int] cache     // each dict entry is exactly 64 bytes
+```
+
+`use mm pool:` without a size is a **compile-time error** — no sensible default
+exists.
+
+#### `use mm arena:` inside a for-loop
+`use mm arena:` creates a fresh slab every time the block is entered and
+releases it on exit. Inside a loop, that is one mmap + one munmap per iteration.
+This is correct for the "process a batch, discard, repeat" pattern.
+
+For the "create once, reset each iteration" pattern, use a **named context**
+declared outside the loop (see above).
+
+#### Active context storage
+Rex is single-threaded. The current allocator context pointer is stored at a
+fixed BSS address (`ALLOC_CTX_PTR = 0x447000`). On `use mm:` entry the compiler
+saves the previous pointer and installs the new one; on exit it restores the
+previous. Protocol calls inside the block see the correct pointer automatically
+— no hidden arguments, no register pressure, no calling convention changes.
+
+When no `use mm:` block is active, `ALLOC_CTX_PTR` points to the default heap
+context, preserving existing behaviour for all code that does not opt in.
+
+---
+
 ## Memory / Ownership 📋
 
 ### `own` / `move`
