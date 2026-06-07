@@ -178,6 +178,18 @@ o28_var_addrs:       resq 2    ; addr32 (zero-extended) of each promoted variabl
 o28_inner_loop_var:  resq 1    ; var_idx of inner loop counter (excluded from scan)
 o28_header_pos:      resq 1    ; out_idx where 16-byte NOP header was emitted
 o28_body_start:      resq 1    ; out_idx of first inner loop body byte (after jge)
+; O31: while-loop variable register promotion — retroactive byte-patching for while loops
+; Promotes up to 2 global variables (r12=slot0, r13=slot1) accessed in a while loop.
+; Condition: regalloc_active==0 AND o28_active==0 (r12/r13 free from O18/O28)
+; Strategy: at while_start emit a 16-byte NOP prolog (2 × 8-byte long NOPs);
+;           at while_end scan condition+body for global load/store patterns and patch.
+o31_active:          resb 1    ; 1 if NOP prolog was emitted for current while loop
+o31_has_break:       resb 1    ; 1 if a break was detected inside this while body
+o31_var_count:       resb 1    ; number of promoted variables (0-2)
+o31_var_addrs:       resq 2    ; addr32 of each promoted var (r12=slot0, r13=slot1)
+o31_prolog_pos:      resq 1    ; out_idx where 16-byte NOP prolog starts
+o31_scan_start:      resq 1    ; out_idx of first while condition/body byte (after prolog)
+o31_jmp_back_pos:    resq 1    ; out_idx right before the 5-byte E9 jmp-back
 ; Dead blob elimination: actual VAs for each conditionally-emitted blob (0 = not included)
 actual_pri_va:       resq 1
 actual_prs_va:       resq 1
@@ -2491,10 +2503,56 @@ codegen_emit_for_start_dyn:
 
 ; ── while loop ────────────────────────────────────────────────────────────────
 codegen_emit_while_start:
+    ; O31: while-loop variable register promotion
+    ; Guard: r12/r13 must be free (regalloc_active==0 AND o28_active==0)
+    cmp byte [regalloc_active], 0
+    jne .ws_no_o31
+    cmp byte [o28_active], 0
+    jne .ws_no_o31
+    ; Emit 2 × 8-byte long NOPs (16 bytes) as prolog placeholder
+    mov rax, [out_idx]
+    mov [o31_prolog_pos], rax
+    mov byte [o31_var_count], 0
+    mov byte [o31_has_break], 0
+    ; NOP 1: 0F 1F 84 00 00000000
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x1F
+    call emit_b
+    mov al, 0x84
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    xor eax, eax
+    call emit_d
+    ; NOP 2: 0F 1F 84 00 00000000
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x1F
+    call emit_b
+    mov al, 0x84
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    xor eax, eax
+    call emit_d
+    ; Record scan start (first byte of condition, right after the prolog)
+    mov rax, [out_idx]
+    mov [o31_scan_start], rax
+    mov byte [o31_active], 1
+    ret
+.ws_no_o31:
+    mov byte [o31_active], 0
     ret
 
 codegen_emit_while_end:
-    ; rdi = loop_start_pc (out_idx value at start of condition)
+    ; rdi = loop_start_pc (out_idx value at start of condition = o31_scan_start)
+    ; O31: record jmp_back_pos before emitting the 5-byte jmp
+    cmp byte [o31_active], 0
+    je .we_jmp
+    mov rax, [out_idx]
+    mov [o31_jmp_back_pos], rax
+.we_jmp:
     mov al, 0xE9
     call emit_b
     mov rax, rdi
@@ -2505,8 +2563,199 @@ codegen_emit_while_end:
     sub rax, rdx
     call emit_d
     call codegen_patch_jump
+    ; O31: scan condition+body, patch body, patch prolog, emit epilog flushes
+    cmp byte [o31_active], 0
+    je .we_no_o31
+    cmp byte [o31_has_break], 0
+    jne .we_no_o31
+    call codegen_o31_scan_and_flush
+.we_no_o31:
     call codegen_patch_breaks
     call codegen_pop_cont
+    ret
+
+; ── O31: while-loop body scan — collect unique global var addresses, patch, and emit epilog ──
+; Scans out_buffer[o31_scan_start..o31_jmp_back_pos] for global load/store patterns:
+;   Load:  48 8B 04 25 addr32  →  4C 89 {E0+slot*8} 90 90 90 90 90  (mov rax,rXX + 5 NOPs)
+;   Store: 48 89 04 25 addr32  →  49 89 {C4+slot}   90 90 90 90 90  (mov rXX,rax + 5 NOPs)
+; Registers: slot0=r12 (ModRM E0/C4), slot1=r13 (ModRM E8/C5).
+; Patches the 16-byte NOP prolog at o31_prolog_pos with pre-load instructions:
+;   slot0: 4C 8B 24 25 addr32  (mov r12,[addr32])
+;   slot1: 4C 8B 2C 25 addr32  (mov r13,[addr32])
+; Emits epilog flushes at current out_idx (while-exit point):
+;   4C 89 {24+slot*8} 25 addr32  (mov [addr32],rXX) for each slot
+; Note: includes condition bytes in scan so condition loads (e.g. while b!=0) are also promoted.
+codegen_o31_scan_and_flush:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, [o31_scan_start]    ; scan start (first byte of condition)
+    mov r13, [o31_jmp_back_pos]  ; scan end (exclusive: right before the jmp-back)
+    lea r14, [out_buffer]        ; base of code buffer
+
+    ; === Phase 1: collect up to 2 unique global variable addresses ===
+.p1_loop:
+    lea rax, [r12+8]
+    cmp rax, r13
+    jge .p1_done
+    cmp byte [r14+r12+0], 0x48
+    jne .p1_next
+    movzx eax, byte [r14+r12+1]
+    cmp al, 0x8B                 ; global load: 48 8B 04 25 addr32
+    je .p1_candidate
+    cmp al, 0x89                 ; global store: 48 89 04 25 addr32
+    jne .p1_next
+.p1_candidate:
+    cmp byte [r14+r12+2], 0x04
+    jne .p1_next
+    cmp byte [r14+r12+3], 0x25
+    jne .p1_next
+    mov eax, dword [r14+r12+4]   ; read addr32
+    movzx rcx, byte [o31_var_count]
+    test rcx, rcx
+    jz .p1_add
+    lea rdi, [o31_var_addrs]
+    xor rdx, rdx
+.p1_search:
+    cmp rdx, rcx
+    jge .p1_add
+    cmp dword [rdi+rdx*8], eax   ; already seen this address?
+    je .p1_next
+    inc rdx
+    jmp .p1_search
+.p1_add:
+    cmp rcx, 2                   ; max 2 slots (r12, r13)
+    jge .p1_next
+    lea rdi, [o31_var_addrs]
+    mov dword [rdi+rcx*8], eax   ; store addr32 zero-extended into qword slot
+    inc byte [o31_var_count]
+.p1_next:
+    inc r12
+    jmp .p1_loop
+.p1_done:
+    cmp byte [o31_var_count], 0
+    je .o31_done                 ; no vars found: skip all patching
+
+    ; === Phase 2: patch body bytes (and condition bytes) ===
+    mov r12, [o31_scan_start]
+.p2_loop:
+    lea rax, [r12+8]
+    cmp rax, r13
+    jge .p2_done
+    cmp byte [r14+r12+0], 0x48
+    jne .p2_next
+    cmp byte [r14+r12+2], 0x04
+    jne .p2_next
+    cmp byte [r14+r12+3], 0x25
+    jne .p2_next
+    mov eax, dword [r14+r12+4]
+    movzx rcx, byte [o31_var_count]
+    lea rdi, [o31_var_addrs]
+    xor rdx, rdx
+.p2_find:
+    cmp rdx, rcx
+    jge .p2_next
+    cmp dword [rdi+rdx*8], eax
+    je .p2_patch
+    inc rdx
+    jmp .p2_find
+.p2_patch:
+    movzx eax, byte [r14+r12+1]
+    cmp al, 0x8B
+    je .p2_patch_load
+    cmp al, 0x89
+    je .p2_patch_store
+    jmp .p2_next
+.p2_patch_load:
+    ; 4C 89 {E0+slot*8} 90×5  — mov rax,rXX + 5 NOPs
+    ; slot0(r12): ModRM=E0  slot1(r13): ModRM=E8
+    mov byte [r14+r12+0], 0x4C
+    mov byte [r14+r12+1], 0x89
+    mov al, 0xE0
+    shl edx, 3                   ; slot * 8
+    add al, dl
+    mov byte [r14+r12+2], al
+    mov byte [r14+r12+3], 0x90
+    mov byte [r14+r12+4], 0x90
+    mov byte [r14+r12+5], 0x90
+    mov byte [r14+r12+6], 0x90
+    mov byte [r14+r12+7], 0x90
+    jmp .p2_next
+.p2_patch_store:
+    ; 49 89 {C4+slot} 90×5  — mov rXX,rax + 5 NOPs
+    ; slot0(r12): ModRM=C4  slot1(r13): ModRM=C5
+    mov byte [r14+r12+0], 0x49
+    mov byte [r14+r12+1], 0x89
+    mov al, 0xC4
+    add al, dl                   ; dl = slot (0 or 1), no shift here
+    mov byte [r14+r12+2], al
+    mov byte [r14+r12+3], 0x90
+    mov byte [r14+r12+4], 0x90
+    mov byte [r14+r12+5], 0x90
+    mov byte [r14+r12+6], 0x90
+    mov byte [r14+r12+7], 0x90
+.p2_next:
+    inc r12
+    jmp .p2_loop
+.p2_done:
+
+    ; === Phase 3: patch NOP prolog with pre-load instructions ===
+    ; slot0: 4C 8B 24 25 addr32  (mov r12,[addr32])  — 8 bytes, replaces 8-byte NOP
+    ; slot1: 4C 8B 2C 25 addr32  (mov r13,[addr32])  — 8 bytes, replaces 8-byte NOP
+    lea rdi, [o31_var_addrs]
+    mov r12, [o31_prolog_pos]    ; write position = start of 16-byte NOP prolog
+    movzx rbx, byte [o31_var_count]
+    xor r15, r15                 ; slot index
+.p3_loop:
+    cmp r15, rbx
+    jge .p3_done
+    mov byte [r14+r12+0], 0x4C
+    mov byte [r14+r12+1], 0x8B
+    mov al, 0x24
+    mov rdx, r15
+    shl edx, 3                   ; slot * 8 → ModRM: 0x24(slot0) or 0x2C(slot1)
+    add al, dl
+    mov byte [r14+r12+2], al
+    mov byte [r14+r12+3], 0x25   ; SIB: scale=0 index=rsp(none) base=disp32
+    mov edx, dword [rdi+r15*8]   ; addr32 for this slot
+    mov dword [r14+r12+4], edx   ; write 4-byte address
+    add r12, 8                   ; advance to next 8-byte slot
+    inc r15
+    jmp .p3_loop
+.p3_done:
+
+    ; === Phase 4: emit epilog flushes at current out_idx (while-exit point) ===
+    ; 4C 89 {24+slot*8} 25 addr32  (mov [addr32],rXX) for each promoted slot
+    ; slot0(r12): ModRM=24  slot1(r13): ModRM=2C
+    lea r12, [o31_var_addrs]
+    movzx rbx, byte [o31_var_count]
+    xor r13, r13                 ; slot index
+.p4_loop:
+    cmp r13, rbx
+    jge .o31_done
+    mov al, 0x4C
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x24
+    mov rdx, r13
+    shl edx, 3                   ; slot * 8
+    add al, dl
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    mov eax, dword [r12+r13*8]   ; addr32 for this slot
+    call emit_d
+    inc r13
+    jmp .p4_loop
+.o31_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
 
 codegen_emit_loop_base:
@@ -2520,6 +2769,11 @@ codegen_emit_loop_base:
 ; ── break / continue ──────────────────────────────────────────────────────────
 codegen_emit_break:
     push rbx
+    ; O31: if a while loop prolog was emitted, mark that a break occurred (disables O31)
+    cmp byte [o31_active], 0
+    je .brk_no_o31
+    mov byte [o31_has_break], 1
+.brk_no_o31:
     ; if there is an active loop-else flag, mark the loop as broken (set flag=1)
     cmp qword [loop_else_flag_depth], 0
     je .do_break
@@ -4665,12 +4919,12 @@ codegen_emit_seq_alloc:
     ret
 
 codegen_emit_seq_push:
-    ; rdi=var_idx; value in rax: push val; load ptr→rbx; load len→rcx; pop val; store; inc len
+    ; rdi=var_idx; value in rax.
+    ; O-SeqPushFast: push rax moved into grow path only; fast path (jb) preserves rax and
+    ; uses register-increment (inc rcx + mov [rbx+8],rcx) to break the store-forward chain.
+    ; Hot path: mov rbx,[ptr]; mov rcx,[rbx+8]; cmp rcx,[rbx]; jb .fast; [grow+push+pop]; .fast: store; inc rcx; mov [rbx+8],rcx
     push rdi
-    ; push rax (save value)
-    mov al, 0x50
-    call emit_b
-    ; mov rbx,[ptr_addr]
+    ; mov rbx,[ptr_addr]  →  48 8B 1C 25 <addr32>  (load seq header pointer)
     mov al, 0x48
     call emit_b
     mov al, 0x8B
@@ -4683,7 +4937,7 @@ codegen_emit_seq_push:
     push rdi
     call get_var_va
     call emit_d
-    ; mov rcx,[rbx+8]
+    ; mov rcx,[rbx+8]  →  48 8B 4B 08
     mov al, 0x48
     call emit_b
     mov al, 0x8B
@@ -4693,35 +4947,36 @@ codegen_emit_seq_push:
     mov al, 0x08
     call emit_b
     ; bounds check: cmp rcx,[rbx]  →  48 3B 0B
-    ; if rcx < cap (CF=1) skip 57-byte grow block; else double-and-realloc (#19)
     mov al, 0x48
     call emit_b
     mov al, 0x3B
     call emit_b
     mov al, 0x0B
     call emit_b
-    ; jb +56  →  72 38  (skip grow code when len < cap)
-    ; grow block is exactly 56 bytes; landing on pop rax restores saved value
+    ; jb +58  →  72 3A  (skip grow block when len < cap; grow block is now 58 bytes)
+    ; Grow block now contains: push rax + original grow (56 bytes) + pop rax = 58 bytes.
+    ; rax is preserved on fast path (no rt_alc call), so no push/pop needed there.
     mov al, 0x72
     call emit_b
-    mov al, 0x38
+    mov al, 0x3A
     call emit_b
-    ; ── inline grow (57 bytes) ───────────────────────────────────────────────
-    ; Strategy: new_cap = old_cap*2; new_size = 16 + new_cap*8;
-    ;           rt_alc(new_size) → rax (new ptr);
-    ;           copy header+elements; update var slot; restore rbx/rcx.
-    ; At entry: rbx=old_ptr rcx=old_len(=old_cap at overflow) stack=[value]
-    ; push rcx          →  51        (save old cap across rt_alc call)
+    ; ── inline grow (58 bytes) ──────────────────────────────────────────────
+    ; push rax moved here: only save value when actually growing (rare path)
+    ; At entry: rbx=old_ptr rcx=old_len(=old_cap at overflow) rax=value
+    ; push rax         →  50  (save value across rt_alc; moved out of hot path)
+    mov al, 0x50
+    call emit_b
+    ; push rcx         →  51  (save old cap across rt_alc call)
     mov al, 0x51
     call emit_b
-    ; mov rdi,[rbx]     →  48 8B 3B  (rdi = old cap)
+    ; mov rdi,[rbx]    →  48 8B 3B  (rdi = old cap)
     mov al, 0x48
     call emit_b
     mov al, 0x8B
     call emit_b
     mov al, 0x3B
     call emit_b
-    ; shl rdi,4         →  48 C1 E7 04  (rdi = old_cap*16 = new_size-16)
+    ; shl rdi,4        →  48 C1 E7 04
     mov al, 0x48
     call emit_b
     mov al, 0xC1
@@ -4730,7 +4985,7 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x04
     call emit_b
-    ; add rdi,16        →  48 83 C7 10  (rdi = new_size = 16 + old_cap*16)
+    ; add rdi,16       →  48 83 C7 10
     mov al, 0x48
     call emit_b
     mov al, 0x83
@@ -4739,7 +4994,7 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x10
     call emit_b
-    ; call rt_alc       →  E8 <rel32>   (rax = new buffer ptr)
+    ; call rt_alc      →  E8 <rel32>  (rax = new buffer ptr)
     mov al, 0xE8
     call emit_b
     mov rax, [actual_alc_va]
@@ -4748,34 +5003,34 @@ codegen_emit_seq_push:
     add rdx, LOAD_BASE
     sub rax, rdx
     call emit_d
-    ; pop rcx           →  59           (rcx = old cap; syscall clobbered it)
+    ; pop rcx          →  59  (rcx = old cap)
     mov al, 0x59
     call emit_b
-    ; push rax          →  50           (save new ptr)
+    ; push rax         →  50  (save new ptr)
     mov al, 0x50
     call emit_b
-    ; mov r11,rcx       →  49 89 CB     (r11 = old cap)
+    ; mov r11,rcx      →  49 89 CB
     mov al, 0x49
     call emit_b
     mov al, 0x89
     call emit_b
     mov al, 0xCB
     call emit_b
-    ; shl r11,1         →  49 D1 E3     (r11 = new cap = old_cap*2)
+    ; shl r11,1        →  49 D1 E3  (new cap = old_cap*2)
     mov al, 0x49
     call emit_b
     mov al, 0xD1
     call emit_b
     mov al, 0xE3
     call emit_b
-    ; mov [rax],r11     →  4C 89 18     ([new_ptr+0] = new cap)
+    ; mov [rax],r11    →  4C 89 18
     mov al, 0x4C
     call emit_b
     mov al, 0x89
     call emit_b
     mov al, 0x18
     call emit_b
-    ; mov [rax+8],rcx   →  48 89 48 08  ([new_ptr+8] = len)
+    ; mov [rax+8],rcx  →  48 89 48 08
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -4784,7 +5039,7 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x08
     call emit_b
-    ; lea rdi,[rax+16]  →  48 8D 78 10  (dst for rep movsq)
+    ; lea rdi,[rax+16] →  48 8D 78 10
     mov al, 0x48
     call emit_b
     mov al, 0x8D
@@ -4793,7 +5048,7 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x10
     call emit_b
-    ; lea rsi,[rbx+16]  →  48 8D 73 10  (src = old ptr + 16)
+    ; lea rsi,[rbx+16] →  48 8D 73 10
     mov al, 0x48
     call emit_b
     mov al, 0x8D
@@ -4802,17 +5057,17 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x10
     call emit_b
-    ; rep movsq         →  F3 48 A5     (copy rcx qwords old→new)
+    ; rep movsq        →  F3 48 A5
     mov al, 0xF3
     call emit_b
     mov al, 0x48
     call emit_b
     mov al, 0xA5
     call emit_b
-    ; pop rbx           →  5B           (rbx = new ptr)
+    ; pop rbx          →  5B  (rbx = new ptr)
     mov al, 0x5B
     call emit_b
-    ; mov [var_addr],rbx → 48 89 1C 25 <addr32>  (update var slot with new ptr)
+    ; mov [var_addr],rbx → 48 89 1C 25 <addr32>
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -4821,11 +5076,11 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x25
     call emit_b
-    pop rdi              ; peek var_idx (left on stack at function entry)
+    pop rdi
     push rdi
     call get_var_va
     call emit_d
-    ; mov rcx,[rbx+8]   →  48 8B 4B 08  (reload len; rbx is now new ptr)
+    ; mov rcx,[rbx+8]  →  48 8B 4B 08  (reload len; movsq clobbered rcx)
     mov al, 0x48
     call emit_b
     mov al, 0x8B
@@ -4834,12 +5089,13 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x08
     call emit_b
-    ; ── end grow block ──────────────────────────────────────────────────────
-    ; fall through: rbx=new_ptr rcx=len stack=[value]  → store proceeds
-    ; pop rax (restore value)
+    ; pop rax          →  58  (restore original value; grow path rejoins .fast here)
     mov al, 0x58
     call emit_b
-    ; mov [rbx+rcx*8+16],rax
+    ; ── end grow block ──────────────────────────────────────────────────────
+    ; .fast: (both fast path and grow path arrive here)
+    ; rbx=ptr  rcx=len  rax=value
+    ; mov [rbx+rcx*8+16],rax  →  48 89 44 CB 10
     mov al, 0x48
     call emit_b
     mov al, 0x89
@@ -4850,12 +5106,19 @@ codegen_emit_seq_push:
     call emit_b
     mov al, 0x10
     call emit_b
-    ; inc qword [rbx+8]
+    ; inc rcx  →  48 FF C1  (register increment: avoids memory read-modify-write)
     mov al, 0x48
     call emit_b
     mov al, 0xFF
     call emit_b
-    mov al, 0x43
+    mov al, 0xC1
+    call emit_b
+    ; mov [rbx+8],rcx  →  48 89 4B 08  (write back new len)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x4B
     call emit_b
     mov al, 0x08
     call emit_b

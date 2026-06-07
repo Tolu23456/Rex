@@ -1580,7 +1580,9 @@ parse_stmt:
     xor rsi, rsi
     call codegen_emit_assign_var     ; emit: __le = 0
 .whl_le_cont:
-    ; save loop top (AFTER __le init, BEFORE condition check)
+    ; O31: emit 16-byte NOP prolog placeholder (register-promotes loop vars into r12/r13)
+    call codegen_emit_while_start
+    ; save loop top (AFTER prolog, BEFORE condition check)
     mov r15, [out_idx]
     mov rdi, r15
     call codegen_push_cont
