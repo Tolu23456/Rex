@@ -1289,28 +1289,50 @@ on in new code.
 ## Output ✅ / 📋
 
 ### `output` — print with newline ✅
-Print any value followed by a newline. Rex auto-dispatches to the correct printer
-based on the variable's declared type.
+
+Print one expression followed by a newline. Rex auto-dispatches to the correct
+printer based on the value's declared type.
+
 ```rex
 output 42
 output x
 output "hello"
-output flag        // bool: prints true / false / unknown
-output pi          // float
-output c           // char: prints the character
-output b           // byte: prints the numeric value
+output flag        // bool: true / false / unknown
+output pi          // float: 3.14159...
+output c           // char: prints the character glyph
+output b           // byte: prints the numeric value (0–255)
 ```
 
-### `show` — print without newline 📋
-Like `output` but no trailing newline. Use when building a line incrementally.
+`output` takes **one expression**. For multiple values on one line use string
+interpolation or `show` chains — there is no `output a, b, c` form.
+
+### Collection output format
+
+Collections print using their literal syntax, making output readable and
+round-trippable:
+
 ```rex
-show "Loading"
-show "..."
-output "done"      // newline lands here — prints: Loading...done
+seq[int] nums = [1, 2, 3]
+output nums          // [1, 2, 3]
+
+dict[int] scores = {"alice": 95, "bob": 87}
+output scores        // {"alice": 95, "bob": 87}
+
+arr[float, 3] v = [1.0, 0.0, 0.0]
+output v             // [1.0, 0.0, 0.0]
 ```
+
+Nested collections follow the same rule recursively:
+```rex
+seq[seq[int]] matrix
+output matrix        // [[1, 2], [3, 4]]
+```
+
+---
 
 ### String interpolation — `{expr}` 📋
-Any string literal can embed expressions inside `{ }`. No prefix needed — all Rex
+
+Any string literal embeds expressions inside `{ }`. No prefix needed — all Rex
 strings support interpolation. The expression is evaluated and converted to its
 string representation at runtime.
 
@@ -1322,20 +1344,161 @@ output "name: {name}, age: {age}"
 output "half of {n} is {n / 2}"
 ```
 
-**Rule:** `{` in a string literal opens an interpolation block. Any valid Rex
-expression is allowed inside — arithmetic, protocol calls, casts, boolean ops.
-`}` closes it. A literal `{` is written `{{`.
+**Rule:** `{` opens an interpolation block. Any valid Rex expression is allowed
+inside — arithmetic, protocol calls, casts, boolean ops. `}` closes it.
+A literal `{` is written `{{`.
 
 ```rex
-output "{{not interpolated}}"    // prints: {not interpolated}
-output "{x * x} squared"         // prints: 25 squared  (if x == 5)
+output "{{not interpolated}}"    // {not interpolated}
+output "{x * x} squared"         // 25 squared  (if x == 5)
 ```
+
+---
+
+### Format specifiers — `{expr:spec}` 📋
+
+A `:` inside an interpolation block activates format mode. The specifier
+controls width, precision, and base representation.
+
+```
+{val:.Nf}   — float with N decimal places
+{val:Nd}    — integer with minimum width N (right-aligned, space-padded)
+{val:0Nd}   — integer with minimum width N (zero-padded)
+{val:x}     — hex lowercase
+{val:X}     — hex uppercase
+{val:b}     — binary
+{val:o}     — octal
+{val:Ns}    — string with minimum width N (right-padded with spaces)
+```
+
+```rex
+float pi = 3.14159
+output "pi = {pi:.2f}"         // pi = 3.14
+output "pi = {pi:.4f}"         // pi = 3.1416
+
+int n = 255
+output "{n:x}"                 // ff
+output "{n:X}"                 // FF
+output "{n:b}"                 // 11111111
+output "{n:08b}"               // 11111111  (8 wide, zero-padded)
+output "{n:10d}"               // '       255' (10 wide, space-padded)
+
+str name = "Rex"
+output "{name:10s}"            // 'Rex       ' (10 wide, right-padded)
+```
+
+Specifiers compose with expressions:
+```rex
+output "avg: {total / count:.1f}"
+output "hex addr: {addr:x}"
+```
+
+---
+
+### `fmt` — format to string 📋
+
+Same interpolation and format-specifier syntax as `output`, but produces a
+`str` value instead of printing. Use when you need a formatted string for
+further processing.
+
+```rex
+str label = fmt("score: {score:.1f} / 100")
+str hex_addr = fmt("0x{addr:X}")
+str report = fmt("{name}: {val:8.2f}")
+output report
+```
+
+`fmt` accepts exactly one string expression — the template. Any `{expr}` or
+`{expr:spec}` inside it is evaluated at the call site.
+
+---
+
+### `show` — print without newline 📋
+
+Like `output` but no trailing newline. Use to build a line incrementally, then
+land the newline with a final `output`.
+
+```rex
+show "Loading"
+show "."
+show "."
+show "."
+output "done"       // prints: Loading...done
+```
+
+`show` accepts the same expression types and format specifiers as `output`:
+```rex
+show "{progress:.0f}%  \r"    // overwrite the current line (carriage return)
+```
+
+---
+
+### `flush` — explicit stdout flush 📋
+
+Drain the stdout buffer immediately. Normally stdout is flushed on newline
+(`output`) or program exit. Use `flush` after a `show` chain when you need
+output to appear before a blocking operation.
+
+```rex
+show "Connecting..."
+flush               // ensure "Connecting..." is visible before the syscall blocks
+@connect()
+output "done"
+```
+
+---
+
+### `debug` — typed diagnostic output to stderr 📋
+
+Print `type: value` to stderr. Never pollutes stdout. Intended for development
+and diagnostic use — strip before release.
+
+```rex
+int x = 42
+debug x             // stderr: int: 42
+
+seq[int] nums = [1, 2, 3]
+debug nums          // stderr: seq[int]: [1, 2, 3]
+
+dict[str] d = {"a": "b"}
+debug d             // stderr: dict[str]: {"a": "b"}
+```
+
+`debug` shows both the declared type and the runtime value in one line.
+
+---
+
+### `write` — raw bytes to stdout 📋
+
+Write a `seq[byte]` or `arr[byte, N]` directly to stdout with no conversion,
+no newline, and no encoding. Use for binary protocols and file content.
+
+```rex
+seq[byte] buf = [0x48, 0x65, 0x6C, 0x6C, 0x6F]
+write buf           // writes raw bytes: Hello
+```
+
+---
+
+### Complete I/O keyword reference
+
+| Keyword | Destination | Newline | Format | Exits? |
+|---|---|---|---|---|
+| `output x` | stdout | ✅ yes | type-dispatched | no |
+| `show x` | stdout | ✗ no | type-dispatched | no |
+| `write buf` | stdout | ✗ no | raw bytes only | no |
+| `flush` | stdout | — | — | no |
+| `debug x` | stderr | ✅ yes | `type: value` | no |
+| `warn "msg"` | stderr | ✅ yes | string only | no |
+| `err "msg"` | stderr | ✅ yes | string only | yes — code 1 |
+| `input "prompt"` | stdin (read) | — | returns `str` | no |
 
 ---
 
 ## I/O ✅ / 📋
 
 ### `input` — read from stdin 📋
+
 Prints a prompt (no trailing newline — cursor stays inline), reads until `\n`,
 returns a `str`.
 
@@ -1343,9 +1506,30 @@ returns a `str`.
 str name = input "Enter your name: "
 output "Hello, {name}!"
 
-int age = int(input "Enter your age: ")   // cast after reading
+int age = int(input "Enter your age: ")
 output "You are {age} years old."
 ```
+
+### File I/O 📋
+
+File reading and writing are planned as a standard library (`use file`). The
+design uses explicit open/close handles with a method API:
+
+```rex
+use file:
+    file :f = open("data.txt", "r")
+    str contents = f.read()
+    f.close()
+
+use file:
+    file :f = open("out.txt", "w")
+    f.write("hello\n")
+    f.writeln("world")
+    f.close()
+```
+
+Modes: `"r"` (read), `"w"` (write/truncate), `"a"` (append), `"rb"` / `"wb"`
+(binary). File handles respect the active `use mm:` context for internal buffers.
 
 ---
 
