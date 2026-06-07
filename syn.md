@@ -928,51 +928,149 @@ output rgb[-1]          // 0 — negative index supported
 
 ## Dictionaries ✅ / 📋
 
-Dictionaries are typed by value. Keys are always `str`. Method-call syntax
-is the primary API.
+Hash maps keyed by `str`, typed by value. SipHash-2-4 internally.
+Keys are always `str` — no exceptions. Method-call syntax is the canonical API.
+
+### Declaration and literals 📋
 
 ```rex
-dict[int] scores
-scores.set("alice", 95)
-scores.set("bob", 87)
-
-output scores.get("alice")     // 95
-output scores.has("carol")     // false
-output scores.len()            // 2
+dict[int] scores                                    // empty dict
+dict[int] scores = {"alice": 95, "bob": 87}        // literal initialisation
+dict[str] config = {"host": "localhost", "port": "8080"}
 ```
 
-Bracket syntax is also supported for get and set:
+`{key: val, ...}` is only valid at a dict declaration site. The compiler
+verifies each value matches `T` — a type mismatch is a compile-time error.
+Key iteration order is unspecified (hash-determined). For sorted keys use
+`.keys().sort()`.
+
+### Index syntax
+
+Bracket syntax is canonical for single-key read and write:
+
 ```rex
-scores["alice"] = 95
-output scores["alice"]
+scores["alice"] = 95          // write — no `:` sigil needed (key is explicit)
+output scores["alice"]        // read
 ```
+
+`.get()` and `.set()` are the method equivalents.
+
+### Missing-key behaviour
+
+`.get(key)` and `d[key]` on a missing key are a **runtime error**.
+Use `.get_or()` or `.has()` to guard:
+
+```rex
+if scores.has("carol"):
+    output scores["carol"]
+
+int val = scores.get_or("carol", 0)     // 0 if missing — no insert
+```
+
+---
 
 ### `dict[T]` method reference
+
+#### Core ✅
 
 | Method | Returns | Notes |
 |---|---|---|
 | `.set(key, val)` | — | Insert or overwrite; same as `d[key] = val` |
-| `.get(key)` | `T` | Retrieve value; same as `d[key]` |
-| `.has(key)` | `bool` | Returns `true` if key exists |
-| `.remove(key)` | — | Delete key-value pair |
-| `.keys()` | `seq[str]` | All keys as a sequence |
-| `.values()` | `seq[T]` | All values as a sequence |
+| `.get(key)` | `T` | Retrieve value; runtime error if missing |
+| `.has(key)` | `bool` | `true` if key exists |
+| `.remove(key)` | — | Delete key-value pair; no-op if missing |
+| `.keys()` | `seq[str]` | All keys; order unspecified |
+| `.values()` | `seq[T]` | All values; order mirrors `.keys()` |
 | `.len()` | `int` | Number of entries |
 | `.clear()` | — | Remove all entries; keep allocation |
+| `.is_empty()` | `bool` | `true` when `len() == 0` |
+
+#### Safe access 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.get_or(key, default)` | `T` | Return `default` if key missing; does NOT insert |
+| `.get_or_set(key, default)` | `T` | Return value if present; insert `default` and return it if not |
+
+#### Search 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.has_value(val)` | `bool` | Linear scan over values; `true` if any value equals `val` |
+| `.find_key(val)` | `str` | First key whose value equals `val`; empty string if none |
+
+#### Bulk operations 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.update(other)` | — | Merge `other` into self; `other`'s values overwrite on key conflict |
+| `.copy()` | `dict[T]` | Independent shallow copy; same SipHash seed |
+| `.entries()` | `seq[tup[str,T]]` | All key-value pairs as tuples — **blocked on `tup` implementation** |
+
+#### Functional 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.each(fn)` | — | Call `fn(key, val)` for every entry |
+| `.map(fn)` | `dict[U]` | New dict — transform every value; `fn(str key, T val) -> U` |
+| `.filter(fn)` | `dict[T]` | New dict — keep entries where `fn(str key, T val) -> bool` |
+| `.any(fn)` | `bool` | `true` if at least one entry satisfies `fn(str key, T val) -> bool` |
+| `.all(fn)` | `bool` | `true` if every entry satisfies `fn(str key, T val) -> bool` |
+| `.count(fn)` | `int` | Number of entries satisfying `fn(str key, T val) -> bool` |
+
+#### Structural 📋
+
+| Method | Returns | Notes |
+|---|---|---|
+| `.invert()` | `dict[str]` | Swap keys and values; `T` must be `str`; duplicate values → last key wins |
+
+---
 
 ### Examples
 
 ```rex
-dict[str] labels
-labels.set("en", "Hello")
-labels.set("es", "Hola")
-labels.set("fr", "Bonjour")
+dict[int] scores = {"alice": 95, "bob": 87, "carol": 72}
 
-seq[str] langs = labels.keys()
-langs.each(fn(str k): output "{k}: {labels.get(k)}")
+// basic access
+output scores["alice"]                   // 95
+output scores.has("dave")               // false
+output scores.get_or("dave", 0)         // 0
 
-labels.remove("fr")
-output labels.len()    // 2
+// safe insert-if-missing
+int s = scores.get_or_set("dave", 50)   // inserts 50, returns 50
+output scores.len()                      // 4
+
+// searching
+output scores.has_value(87)             // true
+output scores.find_key(95)              // "alice"
+
+// iteration
+scores.each(fn(str k, int v): output "{k}: {v}")
+
+// transformation
+dict[str] labels = scores.map(fn(str k, int v) -> str: str(v) + " pts")
+// {"alice": "95 pts", "bob": "87 pts", ...}
+
+dict[int] passing = scores.filter(fn(str k, int v) -> bool: v >= 75)
+// {"alice": 95, "bob": 87}
+
+// aggregation
+output scores.any(fn(str k, int v) -> bool: v == 100)    // false
+output scores.all(fn(str k, int v) -> bool: v > 50)      // true
+output scores.count(fn(str k, int v) -> bool: v >= 80)   // 2
+
+// bulk
+dict[int] extras = {"eve": 88, "alice": 99}
+scores.update(extras)       // alice → 99, eve → 88 added
+output scores.len()         // 5
+
+// sorted keys (deterministic output)
+seq[str] sorted_keys = scores.keys().sort()
+sorted_keys.each(fn(str k): output "{k}: {scores[k]}")
+
+// invert (requires str values)
+dict[str] abbrevs = {"en": "English", "es": "Spanish", "fr": "French"}
+dict[str] rev = abbrevs.invert()    // {"English": "en", "Spanish": "es", ...}
 ```
 
 A compile-time error is raised when a value's type mismatches `T`.
