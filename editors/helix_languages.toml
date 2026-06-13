@@ -1,0 +1,36 @@
+# helix_languages.toml — Rex language support for Helix editor
+#
+# Installation:
+#   Append or merge this into ~/.config/helix/languages.toml
+#
+# Prerequisites:
+#   - `rex` binary on PATH  (sudo make install)
+#
+# Features:
+#   - .rex filetype detection
+#   - LSP integration (rex lsp)
+#   - Indentation config (4 spaces)
+
+[[language]]
+name              = "rex"
+scope             = "source.rex"
+injection-regex   = "rex"
+file-types        = ["rex"]
+comment-token     = "//"
+indent            = { tab-width = 4, unit = "    " }
+language-servers  = ["rex-lsp"]
+
+# Formatter integration (rex fmt)
+formatter = { command = "rex", args = ["fmt", "--stdout"] }
+auto-format = true
+
+[language-server.rex-lsp]
+command = "rex"
+args    = ["lsp"]
+
+# ─── Highlight queries ─────────────────────────────────────────────────────────
+# If you have a tree-sitter grammar for Rex, reference it here.
+# grammar = "rex"
+#
+# Without a tree-sitter grammar, Helix falls back to LSP semantic tokens,
+# which `rex lsp` provides via textDocument/semanticTokens/full.

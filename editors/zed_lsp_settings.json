@@ -1,0 +1,9 @@
+{
+  "rex-lsp": {
+    "binary": {
+      "path": "rex",
+      "arguments": ["lsp"]
+    },
+    "settings": {}
+  }
+}

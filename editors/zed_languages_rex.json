@@ -1,0 +1,11 @@
+{
+  "name": "Rex",
+  "path_suffixes": ["rex"],
+  "line_comment": "//",
+  "block_comment": ["/*", "*/"],
+  "language_servers": ["rex-lsp"],
+  "tab_size": 4,
+  "hard_tabs": false,
+  "prettier_parser": null,
+  "indent_guide_depth": 4
+}

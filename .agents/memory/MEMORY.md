@@ -1,3 +1,4 @@
 - [Rex V5.0 compiler architecture](rex-v5-arch.md) — modular NASM ELF64 compiler; key bugs, offsets, conventions, and FLC/O18 encoding rules to preserve across sessions.
 - [Rex V5.0 markdown doc conventions](doc-conventions.md) — status markers, cross-doc consistency rules, and 5-feature doc spec implemented in this session.
 - [Rex language design decisions](lang-design.md) — mutability sigil rules, type system decisions, bool Kleene logic — agreed in design session, written to syn.md.
+- [Rex LSP & CLI toolchain](rex-lsp-cli.md) — LSP server in C (lsp/rex_lsp.c), rex CLI dispatcher (rex_main.c), install targets, cross-device rename fix.
