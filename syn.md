@@ -900,6 +900,7 @@ seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
 | `.min()` | `T` | Minimum value; runtime error if empty |
 | `.max()` | `T` | Maximum value; runtime error if empty |
 | `.count(fn)` | `int` | Number of elements where `fn` returns `true` |
+| `.dot(other)` | `float` | Dot product with `other`; `T` must be `float`; lengths must match |
 
 #### Predicate checks ✅
 
@@ -1979,7 +1980,7 @@ use mm pool gc ref:
 
 use mm arena gc region:
     seq scratch
-    push scratch 42
+    scratch.push(42)
 
 use mm heap gc sweep:
     dict live_objects
@@ -2017,7 +2018,7 @@ Use it identically to a built-in mode:
 ```rex
 use mm myalloc:
     seq data
-    push data 99
+    data.push(99)
 ```
 
 Pair with any GC:
