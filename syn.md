@@ -800,7 +800,7 @@ in brackets. Method-call syntax is the canonical API.
 ### Declaration and literals ✅
 
 ```rex
-seq[int] nums               // empty seq — push elements in
+seq[int] nums               // empty seq — extend or insert elements
 seq[int] nums = [1, 2, 3]  // literal initialisation — type inferred from declaration
 seq[str] words = ["hello", "world"]
 seq[float] vals = [1.0, 2.5, 3.14]
@@ -816,7 +816,7 @@ grows when the final size is roughly known:
 
 ```rex
 seq[int] buf = 1024     // capacity 1024, length 0 — no elements yet
-buf.push(42)            // first push; no allocation needed
+buf.extend([42])        // first element; no allocation needed
 ```
 
 ### Index access and negative indexing
@@ -851,7 +851,6 @@ seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
 
 | Method | Returns | Notes |
 |---|---|---|
-| `.push(val)` | — | Append to end; grows if needed |
 | `.pop()` | `T` | Remove and return last element (LIFO) |
 | `.get(i)` | `T` | Same as `s[i]`; supports negative indices |
 | `.set(i, val)` | — | Same as `:s[i] = val`; supports negative indices |
