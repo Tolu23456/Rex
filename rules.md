@@ -16,7 +16,7 @@ corresponding test source file (`.rex`) in the `tests/` directory.
 
 **Scope:** This rule applies to:
 - New language keywords and statement types (`if`, `while`, `for`, `stop`, `return`,
-  `err`, `push`, `pop`, `len`, etc.)
+  `err`, `pop`, `len`, etc.)
 - New value types (`int`, `float`, `bool`, `str`, `complex`, `seq`, `dict`)
 - Control-flow constructs (if/elif/else chains, while loops, for loops, break)
 - Protocol features (zero-arg protocols, parameterized protocols, protocol return values)

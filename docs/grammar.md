@@ -291,11 +291,9 @@ the planned `str(expr)` cast.
 ## 19. Sequence Operations ✅
 
 ```ebnf
-push_stmt       ::= "push" <IDENT> expr <NEWLINE>
 pop_stmt        ::= "pop" <IDENT> <NEWLINE>
 ```
 
-`push` appends to a sequence, growing automatically on overflow.
 `pop` removes and returns the last element; the result is available as
 an expression atom — see `pop_expr` in Section 24.
 
@@ -493,7 +491,7 @@ protocol names:
 |---|---|
 | Types | `int` `float` `bool` `str` `complex` `seq` `dict` |
 | Literals | `true` `false` `unknown` |
-| Statements | `output` `if` `elif` `else` `when` `is` `for` `in` `while` `stop` `skip` `pass` `repeat` `return` `err` `push` `pop` `swap` `prot` `use` |
+| Statements | `output` `if` `elif` `else` `when` `is` `for` `in` `while` `stop` `skip` `pass` `repeat` `return` `err` `pop` `swap` `prot` `use` |
 | Operators | `and` `or` `not` `abs` `len` `cap` `typeof` `typeof` `swap` |
 | Memory | `mm` `gc` `arena` `pool` `stack` `heap` `static` `sweep` `ref` `gen` `inc` `region` `own` `move` `free` `align` `const` `volatile` |
 | Future | `blast` `pipe` `each` `match` `repeat` `hash` `flip` `rand` `carry` `overflow` `sign` `clz` `ceil` `floor` `fract` `real` `imag` `conj` `assert` `unreachable` |

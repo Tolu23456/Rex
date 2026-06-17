@@ -391,7 +391,7 @@ prot add(int a, int b) -> int:
 ### Calling with `@`
 
 `@` is Rex's protocol call prefix. It visually separates **user-defined protocols**
-from **built-in statements** (`output`, `push`, `pop`, `err`, etc.). Every `@` in
+from **built-in statements** (`output`, `pop`, `err`, etc.). Every `@` in
 Rex code means: "this is yours."
 
 ```rex
