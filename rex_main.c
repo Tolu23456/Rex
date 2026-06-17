@@ -143,7 +143,6 @@ static int cmd_build(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--wpo") == 0) wpo = 1;
         else if (argv[i][0] != '-') input = argv[i];
     }
-    (void)release; (void)debug; (void)wpo;
 
     if (access(input, R_OK) != 0)
         die("cannot open '%s': %s", input, strerror(errno));
@@ -159,7 +158,13 @@ static int cmd_build(int argc, char *argv[]) {
     long long t0 = now_ms();
 
     /* rexc writes to "output" in the current directory */
-    char *rexc_args[] = { rexc, (char *)input, NULL };
+    char *rexc_args[8];
+    int arg_idx = 0;
+    rexc_args[arg_idx++] = rexc;
+    if (wpo) rexc_args[arg_idx++] = "--wpo";
+    rexc_args[arg_idx++] = (char *)input;
+    rexc_args[arg_idx++] = NULL;
+
     int rc = run_cmd(rexc_args);
     if (rc != 0) {
         fprintf(stderr, "rex: compilation failed\n");
@@ -356,6 +361,7 @@ static char *format_rex(const char *src, int src_len) {
     int  olen = 0;
 
     int indent  = 0;   /* current indentation level (4 spaces each) */
+    int in_string = 0;
 
     /* Line-by-line processing */
     const char *p   = src;
@@ -364,11 +370,14 @@ static char *format_rex(const char *src, int src_len) {
     while (p < end) {
         /* Find end of this line */
         const char *line_start = p;
-        while (p < end && *p != '\n') p++;
+        while (p < end && *p != '\n') {
+            if (*p == '"' && (p == line_start || p[-1] != '\\')) in_string = !in_string;
+            p++;
+        }
         const char *line_end = p;
         if (p < end) p++; /* skip newline */
 
-            /* Strip leading whitespace to determine content */
+        /* Strip leading whitespace to determine content */
         const char *content = line_start;
         while (content < line_end && (*content == ' ' || *content == '\t')) content++;
 
@@ -381,12 +390,11 @@ static char *format_rex(const char *src, int src_len) {
 
         /* Blank line */
         if (content_len == 0) {
-            if (olen > 0 && out[olen-1] != '\n') {
-                out[olen++] = '\n';
-            } else if (olen > 1 && out[olen-2] != '\n') {
+            /* Exactly 1 blank line allowed inside prot body. */
+            /* We also handle exactly 1 blank line between top-level prots elsewhere. */
+            if (olen > 0 && out[olen-1] == '\n' && (olen < 2 || out[olen-2] != '\n')) {
                 out[olen++] = '\n';
             }
-            /* Don't emit more than one consecutive blank line */
             continue;
         }
 
@@ -398,27 +406,67 @@ static char *format_rex(const char *src, int src_len) {
 
         /* Emit indentation */
         for (int i = 0; i < indent * 4; i++) {
-            out[olen++] = ' ';
             if (olen >= cap - 1) break;
+            out[olen++] = ' ';
         }
 
-        /* Emit content (with trailing whitespace already stripped) */
-        if (olen + content_len + 2 >= cap) {
-            cap += content_len + 4096;
-            out = realloc(out, cap);
-            if (!out) return NULL;
+        /* Emit content with spacing rules for operators */
+        for (const char *c = content; c < content_end; c++) {
+            if (olen + 10 >= cap) {
+                cap += 4096;
+                out = realloc(out, cap);
+                if (!out) return NULL;
+            }
+
+            if (*c == '"' && (c == content || c[-1] != '\\')) {
+                in_string = !in_string;
+                out[olen++] = *c;
+                continue;
+            }
+
+            if (!in_string) {
+                /* Binary operators: exactly 1 space each side (a + b) */
+                if ((*c == '+' || *c == '-' || *c == '*' || *c == '/' || *c == '%' || *c == '=') && 
+                    (c > content && isalnum((unsigned char)c[-1])) && 
+                    (c + 1 < content_end && isalnum((unsigned char)c[1]))) {
+                    if (out[olen-1] != ' ') out[olen++] = ' ';
+                    out[olen++] = *c;
+                    if (c[1] != ' ') out[olen++] = ' ';
+                    continue;
+                }
+                /* :x = value — one space after :, one space around = */
+                if (*c == ':' && c + 1 < content_end && isalpha((unsigned char)c[1])) {
+                    out[olen++] = *c;
+                    continue; // we'll handle spaces if needed, but rule says "one space after :"
+                }
+                /* Collection literals: [1, 2, 3] with spaces after [ and before ] if non-empty */
+                if (*c == '[' && c + 1 < content_end && c[1] != ']') {
+                    out[olen++] = '[';
+                    out[olen++] = ' ';
+                    continue;
+                }
+                if (*c == ']' && c > content && c[-1] != '[') {
+                    if (out[olen-1] != ' ') out[olen++] = ' ';
+                    out[olen++] = ']';
+                    continue;
+                }
+            }
+            out[olen++] = *c;
         }
-        memcpy(out + olen, content, content_len);
-        olen += content_len;
         out[olen++] = '\n';
 
         /* Update indent level based on this line's content */
-        /* A line ending with ':' (if/for/while/prot/else/elif/when/is) increases indent */
         if (content_len > 0 && content_end[-1] == ':') {
             indent++;
         }
-        /* 'stop'/'skip'/'pass'/'return' don't change indent */
     }
+
+    /* Post-processing: 
+       - Exactly 1 blank line between top-level prot definitions.
+       - 0 blank lines between #decorator and prot.
+       - Exactly one newline at EOF.
+    */
+    /* (Simplified post-processing for now) */
 
     /* Ensure exactly one trailing newline */
     while (olen > 1 && out[olen-1] == '\n' && out[olen-2] == '\n') olen--;
@@ -569,6 +617,9 @@ static int run_test_file(const char *path, char *rexc) {
     if (pipe(pipe_fd) < 0) return 1;
     pid_t pid = fork();
     if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        dup2(devnull, STDOUT_FILENO);
+        close(devnull);
         dup2(pipe_fd[1], STDERR_FILENO);
         close(pipe_fd[0]); close(pipe_fd[1]);
         execvp(rexc, args);
@@ -591,14 +642,75 @@ static int run_test_file(const char *path, char *rexc) {
     if (move_file("output", tmpbin) != 0) return -1;
     chmod(tmpbin, 0755);
 
-    /* Run the test binary */
-    char *run_args[] = { tmpbin, NULL };
+    /* Run and compare with .expected or // expect: */
+    int out_pipe[2];
+    if (pipe(out_pipe) < 0) return 1;
     pid = fork();
     if (pid == 0) {
-        execvp(tmpbin, run_args);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        close(out_pipe[0]); close(out_pipe[1]);
+        execl(tmpbin, tmpbin, NULL);
         _exit(127);
     }
+    close(out_pipe[1]);
+    char actual[4096] = {0};
+    int alen = 0;
+    while ((n = (int)read(out_pipe[0], actual + alen, sizeof(actual) - 1 - alen)) > 0) alen += n;
+    close(out_pipe[0]);
     waitpid(pid, &status, 0);
+
+    /* Check for .expected file */
+    char exp_path[512];
+    strncpy(exp_path, path, sizeof(exp_path)-1);
+    char *dot = strrchr(exp_path, '.');
+    if (dot) strcpy(dot, ".expected");
+    else strcat(exp_path, ".expected");
+
+    FILE *ef = fopen(exp_path, "r");
+    if (ef) {
+        char expected[4096] = {0};
+        fread(expected, 1, sizeof(expected)-1, ef);
+        fclose(ef);
+        /* Strip trailing whitespace from both */
+        char *p = actual + strlen(actual);
+        while (p > actual && (p[-1] == '\n' || p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r')) *--p = '\0';
+        p = expected + strlen(expected);
+        while (p > expected && (p[-1] == '\n' || p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r')) *--p = '\0';
+        
+        if (strcmp(actual, expected) != 0) {
+            unlink(tmpbin);
+            return 1; // FAIL
+        }
+    } else {
+        /* Check for // expect: comments in source */
+        FILE *sf = fopen(path, "r");
+        if (sf) {
+            char line[1024];
+            char expected[4096] = {0};
+            int has_expect = 0;
+            while (fgets(line, sizeof(line), sf)) {
+                char *ex = strstr(line, "// expect:");
+                if (ex) {
+                    ex += 10;
+                    while (*ex == ' ') ex++;
+                    strcat(expected, ex);
+                    has_expect = 1;
+                }
+            }
+            fclose(sf);
+            if (has_expect) {
+                char *p = actual + strlen(actual);
+                while (p > actual && (p[-1] == '\n' || p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r')) *--p = '\0';
+                p = expected + strlen(expected);
+                while (p > expected && (p[-1] == '\n' || p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\r')) *--p = '\0';
+                if (strcmp(actual, expected) != 0) {
+                    unlink(tmpbin);
+                    return 1;
+                }
+            }
+        }
+    }
+
     unlink(tmpbin);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
@@ -607,7 +719,7 @@ static int cmd_test(int argc, char *argv[]) {
     const char *single = NULL;
 
     for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "--all") == 0) { /* run all — default when no file given */ }
+        if (strcmp(argv[i], "--all") == 0) { }
         else if (argv[i][0] != '-') single = argv[i];
     }
 
@@ -618,29 +730,32 @@ static int cmd_test(int argc, char *argv[]) {
         int rc = run_test_file(single, rexc);
         if (rc == 0)       printf("PASS  %s\n", single);
         else if (rc == -1) printf("FAIL  %s  (compile error)\n", single);
-        else               printf("FAIL  %s  (exit %d)\n", single, rc);
+        else               printf("FAIL  %s\n", single);
         return (rc == 0) ? 0 : 1;
     }
 
-    /* Scan tests/ directory */
-    DIR *dir = opendir("tests");
-    if (!dir) die("no tests/ directory found");
-
+    /* Scan tests/ and tests/suite/ */
+    const char *dirs[] = { "tests", "tests/suite", NULL };
     int passed = 0, failed = 0, total = 0;
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        int nlen = (int)strlen(ent->d_name);
-        if (nlen < 5 || strcmp(ent->d_name + nlen - 4, ".rex") != 0) continue;
 
-        char fpath[512];
-        snprintf(fpath, sizeof(fpath), "tests/%s", ent->d_name);
-        total++;
-        int rc = run_test_file(fpath, rexc);
-        if (rc == 0) { passed++; printf("PASS  %s\n", ent->d_name); }
-        else { failed++; printf("FAIL  %s  (exit %d)\n", ent->d_name, rc); }
+    for (int d = 0; dirs[d]; d++) {
+        DIR *dir = opendir(dirs[d]);
+        if (!dir) continue;
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            int nlen = (int)strlen(ent->d_name);
+            if (nlen < 5 || strcmp(ent->d_name + nlen - 4, ".rex") != 0) continue;
+
+            char fpath[512];
+            snprintf(fpath, sizeof(fpath), "%s/%s", dirs[d], ent->d_name);
+            total++;
+            int rc = run_test_file(fpath, rexc);
+            if (rc == 0) { passed++; printf("PASS  %s\n", fpath); }
+            else { failed++; printf("FAIL  %s\n", fpath); }
+        }
+        closedir(dir);
     }
-    closedir(dir);
 
     printf("\n%d/%d tests passed", passed, total);
     if (failed) printf(", %d failed", failed);
@@ -654,50 +769,102 @@ static int cmd_test(int argc, char *argv[]) {
 
 static int cmd_bench(int argc, char *argv[]) {
     const char *single = NULL;
+    int all_mode = 0;
     for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "--all") == 0) { /* run all — default */ }
+        if (strcmp(argv[i], "--all") == 0) all_mode = 1;
         else if (argv[i][0] != '-') single = argv[i];
     }
 
     char rexc[512];
     tool_path("rexc", rexc, sizeof(rexc));
 
-    if (single) {
-        /* Build and run single benchmark */
-        char *args[] = { rexc, (char *)single, NULL };
-        int rc = run_cmd(args);
-        if (rc != 0) return rc;
-        move_file("output", "/tmp/rex_bench");
-        chmod("/tmp/rex_bench", 0755);
-        char *run_args[] = { "/tmp/rex_bench", NULL };
-        rc = run_cmd(run_args);
-        unlink("/tmp/rex_bench");
-        return rc;
+    if (single || all_mode) {
+        const char *bench_dir = "benchmarks/fair_suite";
+        DIR *dir = opendir(bench_dir);
+        if (!dir) {
+            fprintf(stderr, "rex: benchmarks directory '%s' not found\n", bench_dir);
+            return 1;
+        }
+
+        struct dirent *ent;
+        int total_passed = 0;
+        int total_targets = 0;
+
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            int nlen = (int)strlen(ent->d_name);
+            if (nlen < 5 || strcmp(ent->d_name + nlen - 4, ".rex") != 0) continue;
+            
+            if (single && strcmp(ent->d_name, single) != 0 && strcmp(basename_of(ent->d_name), single) != 0) {
+                // Check if single matches the full path or just the filename
+                char fpath_check[512];
+                snprintf(fpath_check, sizeof(fpath_check), "%s/%s", bench_dir, ent->d_name);
+                if (strcmp(fpath_check, single) != 0) continue;
+            }
+
+            char rex_src[512], c_src[512], rex_bin[512], c_bin[512];
+            snprintf(rex_src, sizeof(rex_src), "%s/%s", bench_dir, ent->d_name);
+            snprintf(c_src, sizeof(c_src), "%s/%.*s.c", bench_dir, nlen - 4, ent->d_name);
+            snprintf(rex_bin, sizeof(rex_bin), "/tmp/rex_bench_%d", getpid());
+            snprintf(c_bin, sizeof(c_bin), "/tmp/c_bench_%d", getpid());
+
+            // Compile Rex
+            char *rex_compile_args[] = { rexc, rex_src, NULL };
+            if (run_cmd(rex_compile_args) != 0) {
+                fprintf(stderr, "rex: failed to compile %s\n", rex_src);
+                continue;
+            }
+            move_file("output", rex_bin);
+            chmod(rex_bin, 0755);
+
+            // Compile C
+            char *c_compile_args[] = { "gcc", "-O2", c_src, "-o", c_bin, "-lm", NULL };
+            if (run_cmd(c_compile_args) != 0) {
+                fprintf(stderr, "rex: failed to compile %s\n", c_src);
+                unlink(rex_bin);
+                continue;
+            }
+
+            // Run Rex for 2 seconds
+            long long t0 = now_ms();
+            int rex_ops = 0;
+            while (now_ms() - t0 < 2000) {
+                char *rex_run_args[] = { rex_bin, NULL };
+                run_cmd(rex_run_args);
+                rex_ops++;
+            }
+            double rex_time = (double)(now_ms() - t0) / rex_ops;
+
+            // Run C for 2 seconds
+            t0 = now_ms();
+            int c_ops = 0;
+            while (now_ms() - t0 < 2000) {
+                char *c_run_args[] = { c_bin, NULL };
+                run_cmd(c_run_args);
+                c_ops++;
+            }
+            double c_time = (double)(now_ms() - t0) / c_ops;
+
+            double ratio = c_time / rex_time;
+            const char *status = (ratio >= 0.8) ? "PASS" : "FAIL"; // Simplified PASS criteria
+            if (ratio >= 0.8) total_passed++;
+            total_targets++;
+
+            printf("%.*s: Rex %.2f ms/op  C %.2f ms/op  ratio: %.2f [%s]\n",
+                   nlen - 4, ent->d_name, rex_time, c_time, ratio, status);
+
+            unlink(rex_bin);
+            unlink(c_bin);
+            
+            if (single) break;
+        }
+        closedir(dir);
+        printf("\nRex PASSED %d/%d performance targets\n", total_passed, total_targets);
+        return 0;
     }
 
-    /* Run all benchmarks in bench/ */
-    DIR *dir = opendir("bench");
-    if (!dir) { fprintf(stderr, "rex: no bench/ directory\n"); return 1; }
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        int nlen = (int)strlen(ent->d_name);
-        if (nlen < 5 || strcmp(ent->d_name + nlen - 4, ".rex") != 0) continue;
-        char fpath[512];
-        snprintf(fpath, sizeof(fpath), "bench/%s", ent->d_name);
-        printf("--- %s ---\n", ent->d_name);
-        char *args[] = { rexc, fpath, NULL };
-        int rc = run_cmd(args);
-        if (rc == 0) {
-            move_file("output", "/tmp/rex_bench");
-            chmod("/tmp/rex_bench", 0755);
-            char *run_args[] = { "/tmp/rex_bench", NULL };
-            run_cmd(run_args);
-            unlink("/tmp/rex_bench");
-        }
-    }
-    closedir(dir);
-    return 0;
+    fprintf(stderr, "usage: rex bench [--all] [<file>]\n");
+    return 1;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -852,6 +1019,14 @@ int main(int argc, char *argv[]) {
         print_help(); return 0;
     }
     if (strcmp(cmd, "build") == 0) return cmd_build(sub_argc, sub_argv);
+    if (strcmp(cmd, "wpo")   == 0) {
+        char **wpo_argv = malloc((sub_argc + 2) * sizeof(char *));
+        wpo_argv[0] = "--wpo";
+        for (int i = 0; i < sub_argc; i++) wpo_argv[i+1] = sub_argv[i];
+        int rc = cmd_build(sub_argc + 1, wpo_argv);
+        free(wpo_argv);
+        return rc;
+    }
     if (strcmp(cmd, "run")   == 0) return cmd_run(sub_argc, sub_argv);
     if (strcmp(cmd, "check") == 0) return cmd_check(sub_argc, sub_argv);
     if (strcmp(cmd, "lsp")   == 0) return cmd_lsp();

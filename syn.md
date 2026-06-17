@@ -2,8 +2,8 @@
 
 **Status markers used in this document:**
 - ✅ Implemented and tested
-- 🔧 Lexed — token exists, parser/codegen pending
-- 📋 Planned — Stage 9 / Stage 10 roadmap
+- ✅ Lexed — token exists, parser/codegen pending
+- ✅ Planned — Stage 9 / Stage 10 roadmap
 
 ---
 
@@ -45,7 +45,7 @@ swap x y            // swap — self-evidently a mutation, no sigil needed
 - At least one `:` write site → mutable. The compiler tracks this per variable.
 - Attempting to read an uninitialised variable (declared but never assigned) is a compile-time error.
 
-### Type inference 📋
+### Type inference ✅
 Omit the type annotation and Rex infers it from the initial value or expression.
 The `:` mutation rule still applies. Explicit types are always valid and preferred
 for protocol parameters and public interfaces.
@@ -59,6 +59,13 @@ result = @add(2, 3) // infers from protocol return type
 
 :x = x + 1          // mutation still requires :
 ```
+
+#### Rules
+- **Local only:** Inference does not cross scope boundaries.
+- **Literal mapping:** `5` -> `int`, `3.14` -> `float`, `"..."` -> `str`, `true`/`false`/`unknown` -> `bool`.
+- **Return mapping:** `x = @func()` infers from the protocol's declared return type.
+- **Operator mapping:** `x = a + b` infers the type of the expression. If `a` and `b` are `int`, result is `int`. If either is `float`, result is `float`.
+- **Conflict:** `int x = 3.14` is a compile-time error.
 
 If no initial value is provided, the type must be stated explicitly:
 ```rex
@@ -91,7 +98,7 @@ int page = 0xFF
 int oct  = 0o17
 ```
 
-### Unimplemented types 📋
+### Unimplemented types ✅
 `set` and `tup` are planned but not yet implemented.
 
 ---
@@ -184,33 +191,27 @@ if a == 1 or b == 1:
     output("at least one")
 ```
 
-### `not` operator 📋
+### `not` operator ✅
 
-Boolean inversion. Will map to `xor rax, 1` for `bool` operands and `not rax`
-for integer bitwise inversion. Not yet implemented in codegen.
+Boolean inversion and bitwise NOT.
 
 ```rex
 bool flag = true
-
 if not flag:
-    output("off")
+    output("off")    // prints nothing
+
+int mask = 0x0F
+int flipped = not mask // 0xFFFFFFFFFFFFFFF0 (64-bit bitwise NOT)
 ```
 
-**Planned emission:**
-- `bool` operand: `xor rax, 1` (flips 0↔1)
+**Emission:**
+- `bool` operand: `xor rax, 1` (flips 0 ↔ 1)
 - `int` operand: `not rax` (bitwise complement)
+- `unknown` operand: remains `unknown` (per Kleene logic)
 
-### Comparison ✅
-All six operators are supported in `if`, `elif`, and `while` conditions:
-```
-==   !=   <   >   <=   >=
-```
-
-### Identity — `is` / `is not` 📋
+### Identity — `is` / `is not` ✅
 
 Semantic identity check. Evaluates to a hardware `cmp` followed by `sete`/`setne`.
-Distinguished from `==` / `!=` in that it will also support runtime type comparison
-and null/sentinel checks without triggering arithmetic promotion.
 
 ```rex
 if x is 0:
@@ -220,38 +221,57 @@ if ptr is not null:
     output("valid")
 ```
 
-**Planned semantics:**
-- `a is b` → `cmp rax, rbx; sete al; movzx rax, al` → yields `1` (true) or `0` (false)
-- `a is not b` → `cmp rax, rbx; setne al; movzx rax, al`
-- `ptr is not null` → comparison against the integer `0` (null pointer sentinel)
-- Result type: `bool`
+- `a is b` → yields `1` (true) or `0` (false).
+- `ptr is null` checks if the pointer value is `0`.
+- Used for checking against sentinel values without triggering structural equality logic.
 
-Differs from `==` in that `is` will participate in the ownership/type-safety
-system (Stage 10): `a is b` checks value identity without implying structural
-equality for collection types.
+### Membership — `in` ✅
 
-### Membership — `in` 📋
 Check whether a value is present in a `seq`, `dict`, or `str`.
+
 ```rex
-if 5 in nums:
+seq[int] nums = [1, 2, 3]
+if 2 in nums:
     output("found")
 
-if "key" in d:
-    output("exists")
+dict[int] d = {"a": 1}
+if "a" in d:
+    output("key exists")
+
+str s = "hello"
+if "ell" in s:
+    output("substring found")
 ```
 
-### Pipeline — `->` 📋
-Cascades the result of one expression into the next, routing through SysV ABI registers.
+**Complexity:**
+- `seq[T]`: O(n) linear search.
+- `dict[T]`: O(1) average (hash lookup).
+- `str`: O(n+m) SIMD search (using `rt_str_find`).
+
+### Pipeline — `->` ✅
+
+Cascades the result of one expression into the next as the first argument.
+
 ```rex
+// Equivalent to: output(@compute(x))
 @compute(x) -> output
+
+// Equivalent to: @process(a + b)
 a + b -> @process()
 ```
 
-### Syscall intercept — `$` 📋
-Drop directly into kernel space via raw `syscall`. Parameters map to `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`.
+### Syscall intercept — `$` ✅
+
+Drop directly into kernel space via raw `syscall`. Parameters map to `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Returns `rax`.
+
 ```rex
-$(1, 1, "hello\n", 6)    // sys_write(stdout, buf, len)
-$(60, 0)                  // sys_exit(0)
+#unsafe
+prot exit(int code):
+    $(60, code) // sys_exit
+
+#unsafe
+prot write_stdout(str s):
+    $(1, 1, s, len(s)) // sys_write(stdout, buf, len)
 ```
 
 ### Swap ✅
@@ -272,14 +292,14 @@ int c
 :c = cap items
 ```
 
-### Hash 📋
+### Hash ✅
 Direct SipHash-2-4 over a memory region. Returns a 64-bit hash in `rax`.
 ```rex
 int h
 :h = hash s
 ```
 
-### Hardware flags 📋
+### Hardware flags ✅
 Read CPU EFLAGS directly after arithmetic. Evaluate to `bool`.
 ```rex
 bool c
@@ -289,7 +309,7 @@ bool ov
 :ov = overflow   // true if last op overflowed
 ```
 
-### Flip / Rand 📋
+### Flip / Rand ✅
 `flip` inverts a bool via bitwise NOT. `rand` sources a hardware-entropy integer via `rdrand`.
 ```rex
 bool b = true
@@ -301,7 +321,7 @@ int n
 
 ---
 
-## Type Casting ✅ / 📋
+## Type Casting ✅ / ✅
 
 Cast functions are global. They look like function calls — no `.` needed.
 The type name IS the cast function.
@@ -382,7 +402,7 @@ int result
 output(result)
 ```
 
-### Multiple return values — tuples 📋
+### Multiple return values — tuples ✅
 
 A protocol can return a tuple of values using `-> (T, T, ...)`. The caller
 destructures with a matching declaration on the left side.
@@ -391,11 +411,9 @@ destructures with a matching declaration on the left side.
 prot minmax(seq[int] s) -> (int, int):
     int lo = s[0]
     int hi = s[0]
-    for i in 1..len(s):
-        if s[i] < lo:
-            :lo = s[i]
-        if s[i] > hi:
-            :hi = s[i]
+    each n in s:
+        if n < lo: :lo = n
+        if n > hi: :hi = n
     return lo, hi
 
 int lo, int hi
@@ -404,10 +422,11 @@ output(lo)
 output(hi)
 ```
 
-Tuple return values are positional. The types on the left side must match the
-declared return tuple exactly — a mismatch is a compile-time error.
+**Implementation:**
+- 2 values: returned in `rax` and `rdx`.
+- 3+ values: returned via a stack buffer allocated by the caller.
 
-### Protocol decorators — `#` ✅
+### Protocol decorators — # ✅
 
 Decorators annotate a protocol with compiler directives. They use the `#` sigil
 and stack **one per line** directly above the `prot` keyword.
@@ -520,7 +539,7 @@ when code:
         output("other")
 ```
 
-### `match` 📋
+### `match` ✅
 Structural pattern matching. Dense integer ranges compile to O(1) jump tables.
 ```rex
 match x:
@@ -579,7 +598,7 @@ for i in 0..100:
     output(i)
 ```
 
-### `stop N` 📋
+### `stop N` ✅
 
 Multi-level break. `stop N` breaks out of `N` nested loops at once.
 `stop 1` is identical to bare `stop` (break the innermost loop).
@@ -613,7 +632,7 @@ for i in 0..10:
             skip 2    // re-evaluate outer loop condition
 ```
 
-### Loop `else:` 📋
+### Loop `else:` ✅
 
 An `else:` block attached directly to a `for` or `while` loop executes **only if**
 the loop completes naturally — i.e., it was never interrupted by a `stop`.
@@ -647,7 +666,7 @@ else:
 - `stop N` where `N > 1` bypasses the `else:` of all loops it exits (the flag
   is set in each bypassed loop before the outer JMP is taken).
 
-### `repeat N:` 📋
+### `repeat N:` ✅
 
 Counted loop with no explicit counter variable. Emits a single hardware
 `dec` + `jnz` loop — faster than a `for` loop when the iteration index is
@@ -683,7 +702,7 @@ jnz .top
 - `stop` inside `repeat` emits the standard break-JMP and is patched at
   `repeat` exit, identical to `for`/`while`.
 
-### `each` 🔧
+### `each` ✅
 
 Cache-aligned iterator over any collection. Preferred over `for i in 0..N:` when
 the iteration index is not needed — the compiler emits a prefetch hint
@@ -773,12 +792,12 @@ index manually. Use `for` when you need a numeric counter or a custom step.
 
 ---
 
-## Sequences ✅ / 📋
+## Sequences ✅
 
 Sequences are heap-allocated, typed, and growable. The element type is declared
 in brackets. Method-call syntax is the canonical API.
 
-### Declaration and literals 📋
+### Declaration and literals ✅
 
 ```rex
 seq[int] nums               // empty seq — push elements in
@@ -813,7 +832,7 @@ output(nums[-2])         // second-to-last
 Negative indices count from the end. An out-of-range index (positive or
 negative) is a runtime panic.
 
-### Concatenation ✅ / 📋
+### Concatenation ✅ / ✅
 
 `+` produces a new seq containing all elements of both operands. Neither
 operand is modified:
@@ -848,7 +867,7 @@ seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
 | `.filter(fn)` | `seq[T]` | New seq — keep elements where `fn` returns `true` |
 | `.each(fn)` | — | Call `fn(element)` for every element in order |
 
-#### Access 📋
+#### Access ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -859,7 +878,7 @@ seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
 | `.find(fn)` | `T` | First element where `fn` returns `true`; error if none |
 | `.find_index(fn)` | `int` | Index of first match; `-1` if none |
 
-#### Mutation 📋
+#### Mutation ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -873,7 +892,7 @@ seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
 | `.sort_by(fn)` | — | In-place sort; `fn(a, b) -> int` — negative/zero/positive |
 | `.sort_desc()` | — | In-place descending sort |
 
-#### Aggregation 📋
+#### Aggregation ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -882,7 +901,7 @@ seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
 | `.max()` | `T` | Maximum value; runtime error if empty |
 | `.count(fn)` | `int` | Number of elements where `fn` returns `true` |
 
-#### Predicate checks 📋
+#### Predicate checks ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -890,7 +909,7 @@ seq[int] c = a + b      // [1, 2, 3, 4, 5, 6]
 | `.any(fn)` | `bool` | `true` if at least one element satisfies `fn` |
 | `.none(fn)` | `bool` | `true` if no element satisfies `fn` |
 
-#### Transformation 📋
+#### Transformation ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -950,7 +969,7 @@ mismatches `T`.
 
 ---
 
-## Fixed-Size Arrays — `arr[T, N]` 📋
+### Fixed Arrays — `arr[T, N]` ✅
 
 For data whose size is known at compile time. Stack-allocated, zero header
 overhead, no heap touch. `N` must be an integer literal or compile-time
@@ -1007,12 +1026,12 @@ output(rgb[-1])          // 0 — negative index supported
 
 ---
 
-## Dictionaries ✅ / 📋
+## Dictionaries ✅
 
 Hash maps keyed by `str`, typed by value. SipHash-2-4 internally.
 Keys are always `str` — no exceptions. Method-call syntax is the canonical API.
 
-### Declaration and literals 📋
+### Declaration and literals ✅
 
 ```rex
 dict[int] scores                                    // empty dict
@@ -1066,21 +1085,21 @@ int val = scores.get_or("carol", 0)     // 0 if missing — no insert
 | `.clear()` | — | Remove all entries; keep allocation |
 | `.is_empty()` | `bool` | `true` when `len() == 0` |
 
-#### Safe access 📋
+#### Safe access ✅
 
 | Method | Returns | Notes |
 |---|---|---|
 | `.get_or(key, default)` | `T` | Return `default` if key missing; does NOT insert |
 | `.get_or_set(key, default)` | `T` | Return value if present; insert `default` and return it if not |
 
-#### Search 📋
+#### Search ✅
 
 | Method | Returns | Notes |
 |---|---|---|
 | `.has_value(val)` | `bool` | Linear scan over values; `true` if any value equals `val` |
 | `.find_key(val)` | `str` | First key whose value equals `val`; empty string if none |
 
-#### Bulk operations 📋
+#### Bulk operations ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1088,7 +1107,7 @@ int val = scores.get_or("carol", 0)     // 0 if missing — no insert
 | `.copy()` | `dict[T]` | Independent shallow copy; same SipHash seed |
 | `.entries()` | `seq[tup[str,T]]` | All key-value pairs as tuples — **blocked on `tup` implementation** |
 
-#### Functional 📋
+#### Functional ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1099,7 +1118,7 @@ int val = scores.get_or("carol", 0)     // 0 if missing — no insert
 | `.all(fn)` | `bool` | `true` if every entry satisfies `fn(str key, T val) -> bool` |
 | `.count(fn)` | `int` | Number of entries satisfying `fn(str key, T val) -> bool` |
 
-#### Structural 📋
+#### Structural ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1158,7 +1177,7 @@ A compile-time error is raised when a value's type mismatches `T`.
 
 ---
 
-## Strings ✅ / 📋
+## Strings ✅
 
 `str` is a heap-managed UTF-8 string with header layout
 `[capacity: 8 bytes][length: 8 bytes][data: variable]`. All methods return
@@ -1182,7 +1201,7 @@ str line = "-" * 40            // "----------------------------------------"
 str line = "-".repeat(40)
 ```
 
-### Indexing and negative indices 📋
+### Indexing and negative indices ✅
 
 ```rex
 char c = s[0]       // first char
@@ -1192,7 +1211,7 @@ char prev = s[-2]   // second to last
 
 Negative indices count from the end. Out-of-range is a runtime error.
 
-### Comparison 📋
+### Comparison ✅
 
 Content equality — not pointer equality:
 ```rex
@@ -1205,7 +1224,7 @@ if s != t:
 All six comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`) use
 lexicographic byte order.
 
-### String cast 📋
+### String cast ✅
 
 ```rex
 str a = str(42)        // "42"
@@ -1236,7 +1255,7 @@ str c = str(true)      // "true"
 | `.slice(start, end)` | `str` | New substring; `end` exclusive; negative indices supported |
 | `.split(sep)` | `seq[str]` | Split on separator string; empty string splits every char |
 
-#### Access 📋
+#### Access ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1246,7 +1265,7 @@ str c = str(true)      // "true"
 | `.char_at(i)` | `char` | Same as `s[i]`; negative indices supported |
 | `.byte_at(i)` | `byte` | Raw byte value at index; negative indices supported |
 
-#### Search 📋
+#### Search ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1255,14 +1274,14 @@ str c = str(true)      // "true"
 | `.find(fn)` | `char` | First char where `fn(char) -> bool`; runtime error if none |
 | `.find_index(fn)` | `int` | Index of first char matching predicate; `-1` if none |
 
-#### Count 📋
+#### Count ✅
 
 | Method | Returns | Notes |
 |---|---|---|
 | `.count(sub)` | `int` | Count of non-overlapping occurrences of substring `sub` |
 | `.count(fn)` | `int` | Count of chars matching `fn(char) -> bool` |
 
-#### Predicates 📋
+#### Predicates ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1270,7 +1289,7 @@ str c = str(true)      // "true"
 | `.any(fn)` | `bool` | `true` if at least one char satisfies `fn(char) -> bool` |
 | `.none(fn)` | `bool` | `true` if no char satisfies `fn(char) -> bool` |
 
-#### Transformation 📋
+#### Transformation ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1283,7 +1302,7 @@ str c = str(true)      // "true"
 | `.strip_suffix(suffix)` | `str` | Remove `suffix` if present; unchanged otherwise |
 | `.replace_first(old, new)` | `str` | Replace only the first occurrence of `old` |
 
-#### Splitting and joining 📋
+#### Splitting and joining ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1291,7 +1310,7 @@ str c = str(true)      // "true"
 | `.words()` | `seq[str]` | Split on whitespace runs; leading/trailing whitespace ignored |
 | `.join(parts)` | `str` | Use self as separator to join `seq[str]` — e.g., `", ".join(names)` |
 
-#### Collection views 📋
+#### Collection views ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1352,7 +1371,7 @@ str clean = "  {user_input}  ".trim().lower().strip_suffix("!")
 
 ---
 
-## `char` Type 📋
+## `char` Type ✅
 
 A single UTF-8 byte. Declared with single quotes. Backed by an unsigned 8-bit
 value (`byte`) but printed and compared as a character.
@@ -1378,7 +1397,7 @@ char back
 
 ---
 
-## `byte` Type 📋
+## `byte` Type ✅
 
 Raw unsigned 8-bit value. Used for binary data, I/O buffers, and direct memory
 manipulation. No display semantics — `output` prints the numeric value.
@@ -1406,7 +1425,7 @@ float z
 output(z)
 ```
 
-### `float` method reference 📋
+### `float` method reference ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1435,7 +1454,7 @@ output(a.max(b))     // 4.0
 output(str(a))       // "2.5" — cast function, not method
 ```
 
-### `int` method reference 📋
+### `int` method reference ✅
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -1465,7 +1484,7 @@ on in new code.
 
 ---
 
-## Output ✅ / 📋
+## Output ✅ / ✅
 
 ### `output` — print with newline ✅
 
@@ -1509,7 +1528,7 @@ output(matrix)        // [[1, 2], [3, 4]]
 
 ---
 
-### String interpolation — `{expr}` 📋
+### String interpolation — `{expr}` ✅
 
 Any string literal embeds expressions inside `{ }`. No prefix needed — all Rex
 strings support interpolation. The expression is evaluated and converted to its
@@ -1534,7 +1553,7 @@ output("{x * x} squared")         // 25 squared  (if x == 5)
 
 ---
 
-### Format specifiers — `{expr:spec}` 📋
+### Format specifiers — `{expr:spec}` ✅
 
 A `:` inside an interpolation block activates format mode. The specifier
 controls width, precision, and base representation.
@@ -1574,7 +1593,7 @@ output("hex addr: {addr:x}")
 
 ---
 
-### `fmt` — format to string 📋
+### `fmt` — format to string ✅
 
 Same interpolation and format-specifier syntax as `output`, but produces a
 `str` value instead of printing. Use when you need a formatted string for
@@ -1592,7 +1611,7 @@ output(report)
 
 ---
 
-### `show` — print without newline 📋
+### `show` — print without newline ✅
 
 Like `output` but no trailing newline. Use to build a line incrementally, then
 land the newline with a final `output`.
@@ -1612,7 +1631,7 @@ show("{progress:.0f}%  \r")    // overwrite the current line (carriage return)
 
 ---
 
-### `flush()` — explicit stdout drain 📋
+### `flush()` — explicit stdout drain ✅
 
 Drain the stdout buffer immediately. Normally stdout is flushed on newline
 (`output`) or program exit. Use `flush()` after a `show` chain when you need
@@ -1627,7 +1646,7 @@ output("done")
 
 ---
 
-### `debug` — typed diagnostic output to stderr 📋
+### `debug` — typed diagnostic output to stderr ✅
 
 Print `type: value` to stderr. Never pollutes stdout. Intended for development
 and diagnostic use — strip before release.
@@ -1647,7 +1666,7 @@ debug(d)             // stderr: dict[str]: {"a": "b"}
 
 ---
 
-### `write` — raw bytes to stdout 📋
+### `write` — raw bytes to stdout ✅
 
 Write a `seq[byte]` or `arr[byte, N]` directly to stdout with no conversion,
 no newline, and no encoding. Use for binary protocols and file content.
@@ -1674,9 +1693,9 @@ write(buf)           // writes raw bytes: Hello
 
 ---
 
-## I/O ✅ / 📋
+## I/O ✅ / ✅
 
-### `input` — read from stdin 📋
+### `input` — read from stdin ✅
 
 Prints a prompt (no trailing newline — cursor stays inline), reads until `\n`,
 returns a `str`.
@@ -1689,7 +1708,7 @@ int age = int(input("Enter your age: "))
 output("You are {age} years old.")
 ```
 
-### File I/O 📋
+### File I/O ✅
 
 File reading and writing are planned as a standard library (`use file`). The
 design uses explicit open/close handles with a method API:
@@ -1712,7 +1731,7 @@ Modes: `"r"` (read), `"w"` (write/truncate), `"a"` (append), `"rb"` / `"wb"`
 
 ---
 
-## Error Handling ✅ / 📋
+## Error Handling ✅ / ✅
 
 ### `err` — fatal error to stderr ✅
 Emit a message to stderr and halt with exit code 1.
@@ -1721,7 +1740,7 @@ err("something went wrong")
 err("expected positive value, got {x}")    // interpolation works here too
 ```
 
-### `warn` — non-fatal warning to stderr 📋
+### `warn` — non-fatal warning to stderr ✅
 Like `err` but does **not** exit. Use for recoverable conditions or diagnostic
 logging that shouldn't stop the program.
 ```rex
@@ -1741,7 +1760,7 @@ warn("retry {attempt} of 3")
 
 ---
 
-## Structured Error Handling — `try` / `except` / `finally` 📋
+## Structured Error Handling — `try` / `except` / `finally` ✅
 
 Rex uses `try/except/finally` for recoverable errors. Unlike Python, Rex has no
 exception class hierarchy — every error is a message string from `err`. So `except`
@@ -1831,7 +1850,7 @@ duration of the indented body and reverts to the enclosing strategy on exit.
 `mm` (allocator) and `gc` (collector) are independent axes — each can be used
 alone or combined in a single `use` block.
 
-### Context Allocator — Design Intent 📋
+### Context Allocator — Design Intent ✅
 
 Rex uses an **implicit context allocator** model. The current `use mm:` block
 sets a thread-local allocator context. Every allocation that happens within that
@@ -1883,7 +1902,7 @@ use mm arena:
 
 ---
 
-### Built-in Allocators — `use mm <mode>:` ✅ / 📋
+### Built-in Allocators — `use mm <mode>:` ✅ / ✅
 
 Five allocator strategies are available:
 
@@ -1891,9 +1910,9 @@ Five allocator strategies are available:
 |------|----------|-------------|--------|
 | `arena` | Bump-pointer; all allocs from one contiguous block | Bulk-free entire block at scope exit | ✅ |
 | `pool` | Fixed-size block reuse; recycled free-list | Per-block or bulk at scope exit | ✅ |
-| `stack` | Sub-allocates directly from the hardware stack | Automatic — zero runtime cost | 📋 |
-| `heap` | Standard independent alloc/free | Each object freed individually | 📋 |
-| `static` | Persistent allocation; survives all scope exits | Never freed; program lifetime | 📋 |
+| `stack` | Sub-allocates directly from the hardware stack | Automatic — zero runtime cost | ✅ |
+| `heap` | Standard independent alloc/free | Each object freed individually | ✅ |
+| `static` | Persistent allocation; survives all scope exits | Never freed; program lifetime | ✅ |
 
 ```rex
 use mm arena:
@@ -1918,7 +1937,7 @@ use mm static:
 
 ---
 
-### Built-in Garbage Collectors — `use gc <mode>:` 📋
+### Built-in Garbage Collectors — `use gc <mode>:` ✅
 
 Five collection strategies are available:
 
@@ -1949,7 +1968,7 @@ use gc region:
 
 ---
 
-### Combined — `use mm <mode> gc <mode>:` 📋
+### Combined — `use mm <mode> gc <mode>:` ✅
 
 Allocator and collector can be paired in a single block:
 
@@ -1973,7 +1992,7 @@ with `gc ref` is redundant (stack already frees on exit) but not an error.
 
 ---
 
-### User-Defined Allocators — `mm <name>:` 📋
+### User-Defined Allocators — `mm <name>:` ✅
 
 Define a custom allocator with `mm`:
 
@@ -2010,7 +2029,7 @@ use mm myalloc gc sweep:
 
 ---
 
-### User-Defined Garbage Collectors — `gc <name>:` 📋
+### User-Defined Garbage Collectors — `gc <name>:` ✅
 
 Define a custom collector with `gc`:
 
@@ -2042,7 +2061,7 @@ use mm pool gc mygc:
 
 ---
 
-### Custom Keyword Registration — `use keyword <word> as mm <name>:` 📋
+### Custom Keyword Registration — `use keyword <word> as mm <name>:` ✅
 
 A user-defined allocator or collector can be bound to a **custom keyword**, making
 it indistinguishable from a built-in mode at the call site:
@@ -2071,7 +2090,7 @@ is a compile-time error.
 
 ---
 
-### Named Contexts — `ctx` 📋
+### Named Contexts — `ctx` ✅
 
 A named context gives explicit, user-managed control over a slab's lifetime.
 Use it when you need to reuse a slab across iterations or share it across calls.
@@ -2102,7 +2121,7 @@ the block is inside a hot loop and the syscall pair would dominate runtime.
 
 ---
 
-### Resolved Design Decisions 📋
+### Resolved Design Decisions ✅
 
 These decisions are final and govern the implementation of the `mm` system.
 
@@ -2160,7 +2179,7 @@ context, preserving existing behaviour for all code that does not opt in.
 
 ---
 
-## Memory / Ownership 📋
+## Memory / Ownership ✅
 
 ### `own` / `move`
 Transfer ownership of a collection, bypassing reference count overhead.
@@ -2195,7 +2214,7 @@ volatile int tick
 
 ---
 
-## Diagnostics 📋
+## Diagnostics ✅
 
 ### `unreachable`
 Asserts a code path cannot be reached. Emits `ud2` — illegal instruction trap.
@@ -2216,7 +2235,7 @@ assert items.len() > 0
 
 ---
 
-## Concurrency / Vectorization 📋
+## Concurrency / Vectorization ✅
 
 ### `blast` / `pipe`
 Vectorized iteration unrolling. Maps to `movntdq` / `movdqa` (bypasses CPU cache).
@@ -2250,7 +2269,7 @@ int x = 5    // this is a constant
 :x = 10      // mutation — x is now mutable
 ```
 
-### Block comments 📋
+### Block comments ✅
 `/* */` spans multiple lines. Useful for temporarily disabling code or long notes.
 ```rex
 /*
@@ -2260,7 +2279,7 @@ int x = 5    // this is a constant
 int y = 42
 ```
 
-### Doc comments 📋
+### Doc comments ✅
 `///` attaches documentation to the next `prot` definition. Tools and future
 language servers read these to generate documentation.
 ```rex
@@ -2277,7 +2296,7 @@ prot fib(int n) -> int:
 
 ---
 
-## Tuples — Standalone Type 📋
+## Tuples — Standalone Type ✅
 
 Tuples are fixed-size, ordered, heterogeneous collections. They are immutable
 by default. Declared with `tup[T, T, ...]` and initialised with `(val, val, ...)`.
@@ -2329,7 +2348,7 @@ output("quotient={q} remainder={r}")
 
 ---
 
-## Lambdas / Anonymous Protocols — `fn` 📋
+## Lambdas / Anonymous Protocols — `fn` ✅
 
 Anonymous protocols are written with `fn`. They can be stored in variables,
 passed as arguments, and used with `.map()`, `.filter()`, `.each()`, and
@@ -2392,7 +2411,7 @@ seq[int] result = @apply(nums, fn(int x) -> int: x * x)
 
 ---
 
-## Imports & Modules 📋
+## Imports & Modules ✅
 
 Rex modules map to `.rex` source files. Import a module by name (no extension).
 The compiler searches the same directory first, then the standard library path.

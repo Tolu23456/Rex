@@ -745,114 +745,50 @@ static int parse_diag_line(const char *line, const char *filename, Diagnostic *d
 }
 
 static void publish_diagnostics(const char *uri, const char *text) {
-    /* Write text to a temp file */
+    char path[512];
+    uri_to_path(uri, path, sizeof(path));
+
+    /* Build rex command: rex check --json path */
+    char rex_exe[512];
+    snprintf(rex_exe, sizeof(rex_exe), "%s", rexc_path);
+    char *slash = strrchr(rex_exe, '/');
+    if (slash) { strcpy(slash + 1, "rex"); }
+    else        { strcpy(rex_exe, "rex"); }
+
+    /* Write current text to temp file to check it without saving */
     char tmpfile[64];
-    snprintf(tmpfile, sizeof(tmpfile), "/tmp/rex_lsp_%d.rex", (int)getpid());
-    {
-        FILE *f = fopen(tmpfile, "w");
-        if (!f) goto no_diags;
-        fputs(text, f);
-        fclose(f);
-    }
+    snprintf(tmpfile, sizeof(tmpfile), "/tmp/rex_diag_%d.rex", (int)getpid());
+    FILE *f = fopen(tmpfile, "w");
+    if (!f) return;
+    fputs(text, f);
+    fclose(f);
 
-    /* Fork rexc to compile the temp file */
-    int pipe_fd[2];
-    if (pipe(pipe_fd) < 0) goto no_diags;
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "%s check --json %s 2>/dev/null", rex_exe, tmpfile);
 
-    pid_t pid = fork();
-    if (pid < 0) { close(pipe_fd[0]); close(pipe_fd[1]); goto no_diags; }
+    FILE *fp = popen(cmd, "r");
+    if (!fp) { unlink(tmpfile); return; }
 
-    if (pid == 0) {
-        /* Child: redirect stderr to pipe_fd[1], stdout to /dev/null */
-        int devnull = open("/dev/null", O_WRONLY);
-        dup2(devnull, STDOUT_FILENO);
-        close(devnull);
-        dup2(pipe_fd[1], STDERR_FILENO);
-        close(pipe_fd[0]);
-        close(pipe_fd[1]);
-        execl(rexc_path, "rexc", tmpfile, NULL);
-        /* If exec fails: */
-        _exit(127);
-    }
-
-    close(pipe_fd[1]);
-
-    /* Read stderr from child */
-    char stderr_buf[4096] = {0};
-    int  stderr_len = 0;
-    {
-        int n;
-        while ((n = (int)read(pipe_fd[0], stderr_buf + stderr_len,
-                              sizeof(stderr_buf) - 1 - stderr_len)) > 0) {
-            stderr_len += n;
-        }
-    }
-    close(pipe_fd[0]);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
+    char *json_out = malloc(JSON_BUF_SIZE);
+    if (!json_out) { pclose(fp); unlink(tmpfile); return; }
+    int n = (int)fread(json_out, 1, JSON_BUF_SIZE - 1, fp);
+    json_out[n] = '\0';
+    pclose(fp);
     unlink(tmpfile);
 
-    /* Build diagnostics JSON */
-    JBuf diags_json = jbuf_new();
-    jbuf_append(&diags_json, "[");
-    int diag_count = 0;
-
-    if (WEXITSTATUS(status) != 0 && stderr_len > 0) {
-        /* Parse stderr line by line */
-        char *line = stderr_buf;
-        while (*line) {
-            char *nl = strchr(line, '\n');
-            if (nl) *nl = '\0';
-
-            Diagnostic d;
-            char path[MAX_URI];
-            uri_to_path(uri, path, sizeof(path));
-            const char *fname = strrchr(path, '/');
-            fname = fname ? fname + 1 : path;
-
-            if (parse_diag_line(line, fname, &d)) {
-                if (diag_count > 0) jbuf_append(&diags_json, ",");
-                jbuf_appendf(&diags_json,
-                    "{\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
-                    "\"end\":{\"line\":%d,\"character\":%d}},"
-                    "\"severity\":%d,\"source\":\"rex\",\"message\":",
-                    d.line, d.col, d.end_line, d.end_col, d.severity);
-                jbuf_append_str(&diags_json, d.message);
-                jbuf_append(&diags_json, "}");
-                diag_count++;
-                if (diag_count >= MAX_DIAG) break;
-            }
-
-            if (nl) { line = nl + 1; } else break;
-        }
+    /* The 'rex check --json' output should be exactly the params for publishDiagnostics */
+    if (n > 2 && json_out[0] == '{') {
+        /* Need to replace the temp filename in JSON with original URI if rex check
+           doesn't handle the filename parameter cleanly.
+           Assuming 'rex check --json' returns a full publishDiagnostics notification body. */
+        lsp_notify("textDocument/publishDiagnostics", json_out);
+    } else {
+        /* Fallback to clearing diagnostics if check --json failed or returned nothing */
+        char clear_params[1024];
+        snprintf(clear_params, sizeof(clear_params), "{\"uri\":\"%s\",\"diagnostics\":[]}", uri);
+        lsp_notify("textDocument/publishDiagnostics", clear_params);
     }
-
-    jbuf_append(&diags_json, "]");
-
-    /* Build and send publishDiagnostics notification */
-    JBuf params = jbuf_new();
-    jbuf_append(&params, "{\"uri\":");
-    jbuf_append_str(&params, uri);
-    jbuf_append(&params, ",\"diagnostics\":");
-    jbuf_append(&params, diags_json.buf);
-    jbuf_append(&params, "}");
-
-    lsp_notify("textDocument/publishDiagnostics", params.buf);
-    jbuf_free(&params);
-    jbuf_free(&diags_json);
-    return;
-
-no_diags:
-    unlink(tmpfile);
-    {
-        JBuf params = jbuf_new();
-        jbuf_append(&params, "{\"uri\":");
-        jbuf_append_str(&params, uri);
-        jbuf_append(&params, ",\"diagnostics\":[]}");
-        lsp_notify("textDocument/publishDiagnostics", params.buf);
-        jbuf_free(&params);
-    }
+    free(json_out);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -1040,11 +976,18 @@ static void handle_completion(JsonNode *req, JsonNode *params) {
         /* Method completion: find type of variable before the dot */
         /* Scan backwards past the dot to find the identifier */
         int scan = off - 1;
-        while (scan > 0 && text[scan] != '.') scan--;
-        /* now go back more to find the variable name */
-        while (scan > 0 && text[scan] == '.') scan--;
+        while (scan > 0 && (isspace((unsigned char)text[scan]) || text[scan] == '.')) scan--;
         char varname[64] = {0};
-        ident_at(text, scan, varname, sizeof(varname));
+        int vlen = 0;
+        while (scan >= 0 && (isalnum((unsigned char)text[scan]) || text[scan] == '_')) {
+            if (vlen < 63) varname[vlen++] = text[scan];
+            scan--;
+        }
+        /* Reverse varname */
+        for (int i = 0; i < vlen / 2; i++) {
+            char t = varname[i]; varname[i] = varname[vlen - 1 - i]; varname[vlen - 1 - i] = t;
+        }
+        varname[vlen] = '\0';
         char vartype[32] = {0};
         var_type_at(text, varname, vartype, sizeof(vartype));
 
@@ -1065,9 +1008,31 @@ static void handle_completion(JsonNode *req, JsonNode *params) {
     } else if (prev == '@') {
         /* Protocol name completion */
         for (int i = 0; i < proto_count; i++) {
-            if (strcmp(proto_table[i].uri, uri) == 0) {
-                ITEM(proto_table[i].name, 3, proto_table[i].sig, proto_table[i].doc,
-                     proto_table[i].name);
+            ITEM(proto_table[i].name, 3, proto_table[i].sig, proto_table[i].doc,
+                 proto_table[i].name);
+        }
+    } else if (prev == '{') {
+        /* Inside { in string: return all in-scope variables */
+        /* Simple scan for local variables in current doc */
+        const char *p = text;
+        while (p < text + off) {
+            if (isalpha((unsigned char)*p) || *p == '_') {
+                char name[64]; int len = 0;
+                while (p < text + off && (isalnum((unsigned char)*p) || *p == '_')) {
+                    if (len < 63) name[len++] = *p;
+                    p++;
+                }
+                name[len] = '\0';
+                /* Check if it's a variable (not keyword) */
+                int is_kw = 0;
+                for (int i = 0; REX_KEYWORDS[i]; i++) {
+                    if (strcmp(name, REX_KEYWORDS[i]) == 0) { is_kw = 1; break; }
+                }
+                if (!is_kw && len > 0) {
+                    ITEM(name, 6, "variable", "", name);
+                }
+            } else {
+                p++;
             }
         }
     } else {
@@ -1134,6 +1099,18 @@ static void handle_hover(JsonNode *req, JsonNode *params) {
             jbuf_append(&result, "{\"contents\":{\"kind\":\"markdown\",\"value\":");
             char md[128];
             snprintf(md, sizeof(md), "**`%s`** — Rex keyword", ident);
+            jbuf_append_str(&result, md);
+            jbuf_append(&result, "}}");
+        } else if (isdigit((unsigned char)ident[0]) || (ident[0] == '-' && isdigit((unsigned char)ident[1]))) {
+            /* Literal hover */
+            jbuf_append(&result, "{\"contents\":{\"kind\":\"markdown\",\"value\":");
+            char md[128];
+            if (strchr(ident, '.')) {
+                snprintf(md, sizeof(md), "```rex\nfloat\n```\nValue: %s", ident);
+            } else {
+                long long val = strtoll(ident, NULL, 0);
+                snprintf(md, sizeof(md), "```rex\nint\n```\nDecimal: %lld\nHex: 0x%llx", val, val);
+            }
             jbuf_append_str(&result, md);
             jbuf_append(&result, "}}");
         } else if (ident[0]) {
@@ -1273,20 +1250,45 @@ static void handle_signature_help(JsonNode *req, JsonNode *params) {
     if (pname_len > 0 && pname_len < 63) {
         memcpy(proto_name, d->text + name_end, pname_len);
         proto_name[pname_len] = '\0';
-        /* strip leading '@' */
-        if (proto_name[0] == '@') memmove(proto_name, proto_name+1, pname_len);
+        /* strip leading '@' if it's there */
+        if (proto_name[0] == '@') {
+            memmove(proto_name, proto_name + 1, pname_len);
+            pname_len--;
+        }
     }
 
     /* Find in proto_table */
     for (int i = 0; i < proto_count; i++) {
         if (strcmp(proto_table[i].name, proto_name) == 0) {
             JBuf result = jbuf_new();
-            jbuf_appendf(&result,
-                "{\"signatures\":[{\"label\":");
+            jbuf_append(&result, "{\"signatures\":[{\"label\":");
             jbuf_append_str(&result, proto_table[i].sig);
             jbuf_append(&result, ",\"documentation\":");
             jbuf_append_str(&result, proto_table[i].doc);
-            jbuf_append(&result, ",\"parameters\":[]}]");
+            jbuf_append(&result, ",\"parameters\":[");
+
+            /* Extract parameters from signature to create character offsets */
+            const char *s = proto_table[i].sig;
+            const char *p_start = strchr(s, '(');
+            const char *p_end = strrchr(s, ')');
+            if (p_start && p_end && p_end > p_start + 1) {
+                const char *curr = p_start + 1;
+                int param_idx = 0;
+                while (curr < p_end) {
+                    while (curr < p_end && isspace((unsigned char)*curr)) curr++;
+                    const char *p_item_start = curr;
+                    while (curr < p_end && *curr != ',') curr++;
+                    const char *p_item_end = curr;
+                    if (p_item_end > p_item_start) {
+                        if (param_idx > 0) jbuf_append(&result, ",");
+                        jbuf_appendf(&result, "{\"label\":[%d,%d]}",
+                                     (int)(p_item_start - s), (int)(p_item_end - s));
+                        param_idx++;
+                    }
+                    if (*curr == ',') curr++;
+                }
+            }
+            jbuf_append(&result, "]}]");
             jbuf_appendf(&result, ",\"activeSignature\":0,\"activeParameter\":%d}", comma_count);
             lsp_respond(req, result.buf);
             jbuf_free(&result);

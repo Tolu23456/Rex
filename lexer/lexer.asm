@@ -1,6 +1,6 @@
 default rel
 %include "include/rex_defs.inc"
-global lexer_init, lexer_next, tok_type, tok_int, tok_ident
+global lexer_init, lexer_next, tok_type, tok_int, tok_ident, tok_line, tok_col
 section .bss
 lex_src:       resq 1
 lex_len:       resq 1
@@ -12,6 +12,8 @@ pending_dedents: resq 1
 tok_type:      resb 1
 tok_int:       resq 1
 tok_ident:     resb 64
+tok_line:      resq 1   ; current source line (1-indexed)
+tok_col:       resq 1   ; current source column (0-indexed byte offset)
 section .text
 lexer_init:
     push rbp
@@ -23,6 +25,8 @@ lexer_init:
     mov qword [indent_depth], 0
     mov qword [pending_dedents], 0
     mov qword [indent_stack], 0
+    mov qword [tok_line], 1
+    mov qword [tok_col], 0
     leave
     ret
 
@@ -189,6 +193,8 @@ lexer_next:
     je .emi
     cmp al, '#'
     je .ehash
+    cmp al, '$'
+    je .edollar
     inc qword [lex_pos]
     jmp .r
 .elb:
@@ -332,10 +338,17 @@ lexer_next:
     jge .pipe1
     movzx eax, byte [rdi+rcx]
     cmp al, '|'
-    jne .pipe1
+    jne .pipe_arrow_chk
     inc rcx
     mov [lex_pos], rcx
     mov byte [tok_type], TOK_OR
+    jmp .done
+.pipe_arrow_chk:
+    cmp al, '>'
+    jne .pipe1
+    inc rcx
+    mov [lex_pos], rcx
+    mov byte [tok_type], TOK_PIPE_ARROW
     jmp .done
 .pipe1:
     mov [lex_pos], rcx
@@ -659,9 +672,15 @@ lexer_next:
     leave
     ret
 
+; ── '$' dollar handler: TOK_DOLLAR (syscall intercept) ───────────────────────
+.edollar:
+    inc qword [lex_pos]
+    mov byte [tok_type], TOK_DOLLAR
+    jmp .done
+
 ; ── #decorator handler (local to lexer_next) ─────────────────────────────────
 ; Reached when dispatch sees '#'. Reads the following identifier word.
-; "memo" → TOK_MEMO, "memo_reset" → TOK_MEMO_RESET, else skip to end of line.
+; Supported decorators: memo, memo_reset, pure, total, hot, cold, safe, unsafe, inline
 ; On entry: rcx = position of '#', rdi = lex_src base.
 .ehash:
     inc rcx                    ; skip '#'
@@ -692,6 +711,7 @@ lexer_next:
 .ehash_done:
     mov byte [tok_ident+rbx], 0
     mov [lex_pos], rcx
+    ; --- #memo ---
     cmp dword [tok_ident], 0x6F6D656D  ; "memo" LE
     jne .ehash_chk_mr
     cmp byte [tok_ident+4], 0
@@ -699,23 +719,91 @@ lexer_next:
     mov byte [tok_type], TOK_MEMO
     jmp .done
 .ehash_chk_mr:
+    ; --- #memo_reset ---
     cmp dword [tok_ident], 0x6F6D656D
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     cmp byte [tok_ident+4], '_'
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     cmp byte [tok_ident+5], 'r'
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     cmp byte [tok_ident+6], 'e'
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     cmp byte [tok_ident+7], 's'
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     cmp byte [tok_ident+8], 'e'
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     cmp byte [tok_ident+9], 't'
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     cmp byte [tok_ident+10], 0
-    jne .ehash_skip_line
+    jne .ehash_chk_pure
     mov byte [tok_type], TOK_MEMO_RESET
+    jmp .done
+.ehash_chk_pure:
+    ; --- #pure: p,u,r,e → 0x65727570, len=4 ---
+    cmp dword [tok_ident], 0x65727570
+    jne .ehash_chk_total
+    cmp byte [tok_ident+4], 0
+    jne .ehash_chk_total
+    mov byte [tok_type], TOK_PURE
+    jmp .done
+.ehash_chk_total:
+    ; --- #total: t,o,t,a,l → dword=0x6174six6F74 → t=74,o=6F,t=74,a=61 → 0x6174oT ---
+    ; "tota" = 0x61746F74 LE, [4]='l', [5]=0
+    cmp dword [tok_ident], 0x61746F74
+    jne .ehash_chk_hot
+    cmp byte [tok_ident+4], 'l'
+    jne .ehash_chk_hot
+    cmp byte [tok_ident+5], 0
+    jne .ehash_chk_hot
+    mov byte [tok_type], TOK_TOTAL
+    jmp .done
+.ehash_chk_hot:
+    ; --- #hot: h,o,t → 0x00746F68 LE, len=3 ---
+    cmp dword [tok_ident], 0x00746F68
+    jne .ehash_chk_cold
+    cmp byte [tok_ident+3], 0
+    jne .ehash_chk_cold
+    mov byte [tok_type], TOK_HOT
+    jmp .done
+.ehash_chk_cold:
+    ; --- #cold: c,o,l,d → 0x646C6F63 LE, len=4, [4]=0 ---
+    cmp dword [tok_ident], 0x646C6F63
+    jne .ehash_chk_safe
+    cmp byte [tok_ident+4], 0
+    jne .ehash_chk_safe
+    mov byte [tok_type], TOK_COLD
+    jmp .done
+.ehash_chk_safe:
+    ; --- #safe: s,a,f,e → 0x65666173 LE, len=4, [4]=0 ---
+    cmp dword [tok_ident], 0x65666173
+    jne .ehash_chk_unsafe
+    cmp byte [tok_ident+4], 0
+    jne .ehash_chk_unsafe
+    mov byte [tok_type], TOK_SAFE_KW
+    jmp .done
+.ehash_chk_unsafe:
+    ; --- #unsafe: u,n,s,a,f,e → dword=0x61736E75 [4]='f',[5]='e',[6]=0 ---
+    cmp dword [tok_ident], 0x61736E75
+    jne .ehash_chk_inline
+    cmp byte [tok_ident+4], 'f'
+    jne .ehash_chk_inline
+    cmp byte [tok_ident+5], 'e'
+    jne .ehash_chk_inline
+    cmp byte [tok_ident+6], 0
+    jne .ehash_chk_inline
+    mov byte [tok_type], TOK_UNSAFE
+    jmp .done
+.ehash_chk_inline:
+    ; --- #inline: i,n,l,i,n,e → dword=0x696C6E69 [4]='n',[5]='e',[6]=0 ---
+    cmp dword [tok_ident], 0x696C6E69
+    jne .ehash_skip_line
+    cmp byte [tok_ident+4], 'n'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+5], 'e'
+    jne .ehash_skip_line
+    cmp byte [tok_ident+6], 0
+    jne .ehash_skip_line
+    mov byte [tok_type], TOK_INLINE_KW
     jmp .done
 .ehash_skip_line:
     mov rcx, [lex_pos]
@@ -971,14 +1059,234 @@ lexer_classify:
 .nkw_asr:
     ; "assert": a,s,s,e,r,t → dword=0x65737361, [4]='r',[5]='t',[6]=0
     cmp eax, 0x65737361
-    jne .kid
+    jne .nkw_const
     cmp byte [tok_ident+4], 'r'
-    jne .kid
+    jne .nkw_const
     cmp byte [tok_ident+5], 't'
-    jne .kid
+    jne .nkw_const
     cmp byte [tok_ident+6], 0
-    jne .kid
+    jne .nkw_const
     mov byte [tok_type], TOK_ASSERT
+    ret
+.nkw_const:
+    ; "const": c,o,n,s,t → dword=0x736E6F63, [4]='t',[5]=0
+    cmp eax, 0x736E6F63
+    jne .nkw_volatile
+    cmp byte [tok_ident+4], 't'
+    jne .nkw_volatile
+    cmp byte [tok_ident+5], 0
+    jne .nkw_volatile
+    mov byte [tok_type], TOK_CONST
+    ret
+.nkw_volatile:
+    ; "volatile": v,o,l,a,t,i,l,e → dword=0x616C6F76, [4]='t',[5]='i',[6]='l',[7]='e',[8]=0
+    cmp eax, 0x616C6F76
+    jne .nkw_set
+    cmp byte [tok_ident+4], 't'
+    jne .nkw_set
+    cmp byte [tok_ident+5], 'i'
+    jne .nkw_set
+    cmp byte [tok_ident+6], 'l'
+    jne .nkw_set
+    cmp byte [tok_ident+7], 'e'
+    jne .nkw_set
+    cmp byte [tok_ident+8], 0
+    jne .nkw_set
+    mov byte [tok_type], TOK_VOLATILE
+    ret
+.nkw_set:
+    ; "set": s,e,t → dword 3 bytes = 0x00746573, byte[3]=0
+    cmp eax, 0x00746573
+    jne .nkw_tup
+    cmp byte [tok_ident+3], 0
+    jne .nkw_tup
+    mov byte [tok_type], TOK_TYPE_SET
+    ret
+.nkw_tup:
+    ; "tup": t,u,p → 0x00707574, byte[3]=0
+    cmp eax, 0x00707574
+    jne .nkw_arr
+    cmp byte [tok_ident+3], 0
+    jne .nkw_arr
+    mov byte [tok_type], TOK_TYPE_TUP
+    ret
+.nkw_arr:
+    ; "arr": a,r,r → 0x00727261, byte[3]=0
+    cmp eax, 0x00727261
+    jne .nkw_fn
+    cmp byte [tok_ident+3], 0
+    jne .nkw_fn
+    mov byte [tok_type], TOK_TYPE_ARR
+    ret
+.nkw_fn:
+    ; "fn": f,n → 0x00006E66, byte[2]=0
+    cmp eax, 0x00006E66
+    jne .nkw_import
+    cmp byte [tok_ident+2], 0
+    jne .nkw_import
+    mov byte [tok_type], TOK_FN
+    ret
+.nkw_import:
+    ; "import": i,m,p,o,r,t → dword=0x6F706D69, [4]='r',[5]='t',[6]=0
+    cmp eax, 0x6F706D69
+    jne .nkw_from
+    cmp byte [tok_ident+4], 'r'
+    jne .nkw_from
+    cmp byte [tok_ident+5], 't'
+    jne .nkw_from
+    cmp byte [tok_ident+6], 0
+    jne .nkw_from
+    mov byte [tok_type], TOK_IMPORT
+    ret
+.nkw_from:
+    ; "from": f,r,o,m → 0x6D6F7266, [4]=0
+    cmp eax, 0x6D6F7266
+    jne .nkw_blast
+    cmp byte [tok_ident+4], 0
+    jne .nkw_blast
+    mov byte [tok_type], TOK_FROM
+    ret
+.nkw_blast:
+    ; "blast": b,l,a,s,t → dword=0x73616C62, [4]='t',[5]=0
+    cmp eax, 0x73616C62
+    jne .nkw_match
+    cmp byte [tok_ident+4], 't'
+    jne .nkw_match
+    cmp byte [tok_ident+5], 0
+    jne .nkw_match
+    mov byte [tok_type], TOK_BLAST
+    ret
+.nkw_match:
+    ; "match": m,a,t,c,h → dword=0x6374616D, [4]='h',[5]=0
+    cmp eax, 0x6374616D
+    jne .nkw_try
+    cmp byte [tok_ident+4], 'h'
+    jne .nkw_try
+    cmp byte [tok_ident+5], 0
+    jne .nkw_try
+    mov byte [tok_type], TOK_MATCH
+    ret
+.nkw_try:
+    ; "try": t,r,y → 0x00797274, byte[3]=0
+    cmp eax, 0x00797274
+    jne .nkw_except
+    cmp byte [tok_ident+3], 0
+    jne .nkw_except
+    mov byte [tok_type], TOK_TRY
+    ret
+.nkw_except:
+    ; "except": e,x,c,e,p,t → dword=0x65636578, [4]='p',[5]='t',[6]=0
+    cmp eax, 0x65636578
+    jne .nkw_finally
+    cmp byte [tok_ident+4], 'p'
+    jne .nkw_finally
+    cmp byte [tok_ident+5], 't'
+    jne .nkw_finally
+    cmp byte [tok_ident+6], 0
+    jne .nkw_finally
+    mov byte [tok_type], TOK_EXCEPT
+    ret
+.nkw_finally:
+    ; "finally": f,i,n,a,l,l,y → dword=0x616E6966, [4]='l',[5]='l',[6]='y',[7]=0
+    cmp eax, 0x616E6966
+    jne .nkw_ctx
+    cmp byte [tok_ident+4], 'l'
+    jne .nkw_ctx
+    cmp byte [tok_ident+5], 'l'
+    jne .nkw_ctx
+    cmp byte [tok_ident+6], 'y'
+    jne .nkw_ctx
+    cmp byte [tok_ident+7], 0
+    jne .nkw_ctx
+    mov byte [tok_type], TOK_FINALLY
+    ret
+.nkw_ctx:
+    ; "ctx": c,t,x → 0x00787463, byte[3]=0
+    cmp eax, 0x00787463
+    jne .nkw_show
+    cmp byte [tok_ident+3], 0
+    jne .nkw_show
+    mov byte [tok_type], TOK_CTX
+    ret
+.nkw_show:
+    ; "show": s,h,o,w → 0x776F6873, [4]=0
+    cmp eax, 0x776F6873
+    jne .nkw_warn
+    cmp byte [tok_ident+4], 0
+    jne .nkw_warn
+    mov byte [tok_type], TOK_SHOW
+    ret
+.nkw_warn:
+    ; "warn": w,a,r,n → 0x6E726177, [4]=0
+    cmp eax, 0x6E726177
+    jne .nkw_debug
+    cmp byte [tok_ident+4], 0
+    jne .nkw_debug
+    mov byte [tok_type], TOK_WARN
+    ret
+.nkw_debug:
+    ; "debug": d,e,b,u,g → dword=0x75626564, [4]='g',[5]=0
+    cmp eax, 0x75626564
+    jne .nkw_write
+    cmp byte [tok_ident+4], 'g'
+    jne .nkw_write
+    cmp byte [tok_ident+5], 0
+    jne .nkw_write
+    mov byte [tok_type], TOK_DEBUG_KW
+    ret
+.nkw_write:
+    ; "write": w,r,i,t,e → dword=0x74697277, [4]='e',[5]=0
+    cmp eax, 0x74697277
+    jne .nkw_flush
+    cmp byte [tok_ident+4], 'e'
+    jne .nkw_flush
+    cmp byte [tok_ident+5], 0
+    jne .nkw_flush
+    mov byte [tok_type], TOK_WRITE
+    ret
+.nkw_flush:
+    ; "flush": f,l,u,s,h → dword=0x73756C66, [4]='h',[5]=0
+    cmp eax, 0x73756C66
+    jne .nkw_input
+    cmp byte [tok_ident+4], 'h'
+    jne .nkw_input
+    cmp byte [tok_ident+5], 0
+    jne .nkw_input
+    mov byte [tok_type], TOK_FLUSH
+    ret
+.nkw_input:
+    ; "input": i,n,p,u,t → dword=0x7570 6E69 → bytes: 0x69,0x6E,0x70,0x75 → 0x75706E69, [4]='t',[5]=0
+    cmp eax, 0x75706E69
+    jne .nkw_flip
+    cmp byte [tok_ident+4], 't'
+    jne .nkw_flip
+    cmp byte [tok_ident+5], 0
+    jne .nkw_flip
+    mov byte [tok_type], TOK_INPUT
+    ret
+.nkw_flip:
+    ; "flip": f,l,i,p → 0x70696C66, [4]=0
+    cmp eax, 0x70696C66
+    jne .nkw_rand
+    cmp byte [tok_ident+4], 0
+    jne .nkw_rand
+    mov byte [tok_type], TOK_FLIP
+    ret
+.nkw_rand:
+    ; "rand": r,a,n,d → 0x646E6172, [4]=0
+    cmp eax, 0x646E6172
+    jne .nkw_fmt
+    cmp byte [tok_ident+4], 0
+    jne .nkw_fmt
+    mov byte [tok_type], TOK_RAND
+    ret
+.nkw_fmt:
+    ; "fmt": f,m,t → 0x00746D66, byte[3]=0
+    cmp eax, 0x00746D66
+    jne .kid
+    cmp byte [tok_ident+3], 0
+    jne .kid
+    mov byte [tok_type], TOK_FMT
     ret
 .kid:
     mov byte [tok_type], TOK_IDENT

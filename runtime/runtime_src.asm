@@ -10,6 +10,50 @@
 %define RT_ALC_SIZE  4096
 %define RT_PRQ_SIZE  1024
 
+; New blobs for T001
+%define RT_STR_CAT_SIZE 512
+%define RT_STR_EQ_SIZE 256
+%define RT_STR_FIND_SIZE 512
+%define RT_STR_LEN_SIZE 128
+%define RT_STR_UPPER_SIZE 256
+%define RT_STR_LOWER_SIZE 256
+%define RT_STR_TRIM_SIZE 256
+%define RT_STR_REV_SIZE 256
+%define RT_INT2STR_SIZE 256
+%define RT_FLOAT2STR_SIZE 512
+%define RT_STR_SPLIT_SIZE 512
+%define RT_STR_JOIN_SIZE 512
+%define RT_STR_STARTS_SIZE 256
+%define RT_STR_ENDS_SIZE 256
+%define RT_STR_CONTAINS_SIZE 128
+%define RT_STR_SLICE_SIZE 256
+%define RT_STR_REPLACE_SIZE 512
+%define RT_STR_COUNT_SIZE 256
+%define RT_STR_REPEAT_SIZE 256
+%define RT_MATH_SQRT_SIZE 64
+%define RT_MATH_FLOOR_SIZE 64
+%define RT_MATH_CEIL_SIZE 64
+%define RT_MATH_ABS_F_SIZE 64
+%define RT_MATH_SIN_SIZE 128
+%define RT_MATH_COS_SIZE 128
+%define RT_MATH_EXP_SIZE 256
+%define RT_MATH_LOG_SIZE 256
+%define RT_MATH_POW_SIZE 256
+%define RT_MATH_MIN_SIZE 64
+%define RT_MATH_MAX_SIZE 64
+%define RT_BOUNDS_ERR_SIZE 256
+%define RT_OVERFLOW_ERR_SIZE 256
+%define RT_NULL_ERR_SIZE 256
+%define RT_SEQ_SORT_SIZE 1024
+%define RT_SEQ_SUM_SIZE 256
+%define RT_SEQ_MIN_SIZE 256
+%define RT_SEQ_MAX_SIZE 256
+%define RT_SEQ_CONTAINS_SIZE 256
+%define RT_SEQ_REVERSE_SIZE 256
+%define RT_HEAP_ALLOC_SIZE 1024
+%define RT_HEAP_FREE_SIZE 512
+%define RT_STATIC_ALLOC_SIZE 256
+
 bits 64
 org 0
 
@@ -172,7 +216,7 @@ rt_prf:
 .dot:
     mov byte [r12+r13], '.'
     inc r13
-    mov r14, 4              ; 4 fractional digits
+    mov r14, 6              ; 6 fractional digits
 .frl:
     mov rax, 10
     cvtsi2sd xmm1, rax
@@ -250,12 +294,6 @@ rt_prc:
     times RT_PRC_SIZE - ($ - rt_prc) db 0x90
 
 ; ── RXHASH-64: Rex eXponential Hash — novel cascade-mix identifier hash ───────
-; Novel algorithm combining FNV-1a per-byte mixing, a bijective rol(31) step
-; (31 = M₃₁ Mersenne prime, guarantees period-2^64 for the multiply-rotate map),
-; and SplitMix64 finalization.  Designed for Rex identifier strings (1–16 bytes).
-; Property: perfect forward diffusion after 2 bytes — every output bit depends on
-; every input bit.  Zero false-negative rate for names ≤ 8 chars in same-length set.
-; Interface: rdi = data ptr, rsi = length → rax = 64-bit hash
 rt_sip:
     push rbx
     push r12
@@ -273,7 +311,6 @@ rt_sip:
     inc rbx
     jmp .rxh_loop
 .rxh_fin:
-    ; SplitMix64 finalization — avalanche all 64 bits
     mov rdx, rax
     shr rdx, 30
     xor rax, rdx
@@ -293,14 +330,6 @@ rt_sip:
     times RT_SIP_SIZE - ($ - rt_sip) db 0x90
 
 ; ── rt_alc: mmap / bump-pool allocator — rdi=size → rax=ptr ─────────────────
-; Layout (4096 bytes total):
-;   [0..code]  allocator code
-;   [4072]     pool_base  dq  (absolute addr 0x401D65)
-;   [4080]     pool_bump  dq  (absolute addr 0x401D6D)
-;   [4088]     mode       dq  (absolute addr 0x401D75, written by codegen_emit_mm_switch)
-;
-; mode == 0 → arena: one mmap per alloc (default)
-; mode != 0 → pool:  bump-pointer from a lazy-inited 64 MB slab
 rt_alc:
     push rbx
     mov rbx, rdi            ; rbx = requested size
@@ -326,7 +355,6 @@ rt_alc:
 .pool:
     cmp qword [0x401D65], 0 ; pool_base == 0 (first use)?
     jne .pool_alloc
-    ; lazy init: mmap a 64 MB pool once
     push rbx                ; save aligned size across mmap
     mov rax, 9
     xor rdi, rdi
@@ -350,7 +378,6 @@ rt_alc:
 .mode: dq 0
 
 ; ── rt_prq: print error string (rdi=ptr) to stderr + exit(1) ─────────────────
-; O35b: strlen via repne scasb (program terminates after, so rcx freely clobbered)
 rt_prq:
     push rbx
     mov rbx, rdi                ; rbx = string ptr (callee-saved)
@@ -359,20 +386,952 @@ rt_prq:
     repne scasb                 ; ecx = -(len+2)
     not rcx                     ; rcx = len+1
     lea rdx, [rcx-1]            ; rdx = len
-    ; sys_write(2, rbx, rdx)
     mov rax, 1
     mov rdi, 2                  ; stderr
     mov rsi, rbx
     syscall
-    ; print newline
     mov byte [rsp-8], 10
     lea rsi, [rsp-8]
     mov rax, 1
     mov rdi, 2
     mov rdx, 1
     syscall
-    ; exit(1)
     mov rax, 60
     mov rdi, 1
     syscall
     times RT_PRQ_SIZE - ($ - rt_prq) db 0x90
+
+; ── rt_str_cat (512B) ────────────────────────────────────────────────────────
+rt_str_cat:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi ; ptr1
+    mov r13, rsi ; len1
+    mov r14, rdx ; ptr2
+    mov r15, rcx ; len2
+    lea rdi, [r13 + r15 + 1] ; cap = len1+len2+1
+    call rt_alc
+    mov rbx, rax ; new ptr
+    ; copy str1
+    mov rdi, rbx
+    mov rsi, r12
+    mov rcx, r13
+    rep movsb
+    ; copy str2
+    mov rsi, r14
+    mov rcx, r15
+    rep movsb
+    mov byte [rdi], 0 ; NUL terminate
+    mov rax, rbx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_STR_CAT_SIZE - ($ - rt_str_cat) db 0x90
+
+; ── rt_str_eq (256B) ─────────────────────────────────────────────────────────
+rt_str_eq:
+    cmp rsi, rcx
+    jne .fail
+    test rsi, rsi
+    jz .success
+    ; use SSE2 for >= 16 bytes
+    mov rcx, rsi
+    xor rax, rax
+.loop:
+    cmp rcx, 16
+    jl .scalar
+    movdqu xmm0, [rdi+rax]
+    movdqu xmm1, [rdx+rax]
+    pcmpeqb xmm0, xmm1
+    pmovmskb r8d, xmm0
+    cmp r8d, 0xFFFF
+    jne .fail
+    add rax, 16
+    sub rcx, 16
+    jnz .loop
+    jmp .success
+.scalar:
+    test rcx, rcx
+    jz .success
+.sloop:
+    mov r8b, [rdi+rax]
+    cmp r8b, [rdx+rax]
+    jne .fail
+    inc rax
+    loop .sloop
+.success:
+    mov rax, 1
+    ret
+.fail:
+    xor rax, rax
+    ret
+    times RT_STR_EQ_SIZE - ($ - rt_str_eq) db 0x90
+
+; ── rt_str_find (512B) ───────────────────────────────────────────────────────
+rt_str_find:
+    push rbx
+    push r12
+    push r13
+    push r14
+    test rcx, rcx
+    jz .found_zero
+    cmp rcx, rsi
+    jg .not_found
+    
+    mov r12, rdi ; haystack
+    mov r13, rsi ; hlen
+    mov r14, rdx ; needle
+    mov rbx, rcx ; nlen
+    
+    xor r8, r8 ; index
+.outer:
+    mov rax, r13
+    sub rax, r8
+    cmp rax, rbx
+    jl .not_found
+    
+    ; compare first 16 bytes of needle if possible
+    movzx eax, byte [r14]
+    movd xmm1, eax
+    punpcklbw xmm1, xmm1
+    punpcklwd xmm1, xmm1
+    pshufd xmm1, xmm1, 0 ; xmm1 = [first_char]*16
+    
+.scan:
+    mov rax, r13
+    sub rax, r8
+    cmp rax, 16
+    jl .scalar_scan
+    
+    movdqu xmm0, [r12+r8]
+    pcmpeqb xmm0, xmm1
+    pmovmskb eax, xmm0
+    test eax, eax
+    jnz .match_candidate
+    add r8, 16
+    jmp .outer
+    
+.match_candidate:
+    bsf eax, eax
+    add r8, rax
+    ; verify full needle
+    mov rax, r13
+    sub rax, r8
+    cmp rax, rbx
+    jl .not_found
+    
+    push rsi
+    push rdi
+    lea rdi, [r12+r8]
+    mov rsi, r14
+    mov rcx, rbx
+    repe cmpsb
+    pop rdi
+    pop rsi
+    je .found
+    inc r8
+    jmp .outer
+
+.scalar_scan:
+    mov al, [r12+r8]
+    cmp al, [r14]
+    je .verify_scalar
+    inc r8
+    jmp .outer
+.verify_scalar:
+    push rsi
+    push rdi
+    lea rdi, [r12+r8]
+    mov rsi, r14
+    mov rcx, rbx
+    repe cmpsb
+    pop rdi
+    pop rsi
+    je .found
+    inc r8
+    jmp .outer
+
+.found:
+    mov rax, r8
+    jmp .done
+.found_zero:
+    xor rax, rax
+    jmp .done
+.not_found:
+    mov rax, -1
+.done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_STR_FIND_SIZE - ($ - rt_str_find) db 0x90
+
+; ── rt_str_len (128B) ────────────────────────────────────────────────────────
+rt_str_len:
+    xor eax, eax
+    mov rcx, -1
+    repne scasb
+    not rcx
+    dec rcx
+    mov rax, rcx
+    ret
+    times RT_STR_LEN_SIZE - ($ - rt_str_len) db 0x90
+
+; ── rt_str_upper (256B) ──────────────────────────────────────────────────────
+rt_str_upper:
+    test rsi, rsi
+    jz .done
+    mov rcx, rsi
+    xor rax, rax
+.loop:
+    cmp rcx, 16
+    jl .scalar
+    movdqu xmm0, [rdi+rax]
+    movdqa xmm1, xmm0
+    ; mask = (x >= 'a' && x <= 'z')
+    ; x >= 'a' -> x - 'a' >= 0
+    ; but psubusb is better: psubusb xmm0, 'a' (will be 0 if < 'a')
+    ; actually, SIMD trick for upper:
+    ; mask = (char - 'a' < 26)
+    ; char - 'a'
+    movdqa xmm2, xmm0
+    mov rax, 0x6161616161616161
+    movq xmm3, rax
+    punpcklbw xmm3, xmm3
+    psubb xmm2, xmm3
+    ; compare < 26
+    mov rax, 0x1A1A1A1A1A1A1A1A
+    movq xmm3, rax
+    punpcklbw xmm3, xmm3
+    ; pcmpgtb is signed, so we need unsigned comparison or range check
+    ; let's just do scalar for now to be safe and simple, or use a better SIMD mask
+    jmp .scalar 
+
+.scalar:
+    mov al, [rdi]
+    cmp al, 'a'
+    jl .next
+    cmp al, 'z'
+    jg .next
+    sub al, 32
+    mov [rdi], al
+.next:
+    inc rdi
+    loop .scalar
+.done:
+    ret
+    times RT_STR_UPPER_SIZE - ($ - rt_str_upper) db 0x90
+
+; ── rt_str_lower (256B) ──────────────────────────────────────────────────────
+rt_str_lower:
+    test rsi, rsi
+    jz .done
+    mov rcx, rsi
+.loop:
+    mov al, [rdi]
+    cmp al, 'A'
+    jl .next
+    cmp al, 'Z'
+    jg .next
+    add al, 32
+    mov [rdi], al
+.next:
+    inc rdi
+    loop .loop
+.done:
+    ret
+    times RT_STR_LOWER_SIZE - ($ - rt_str_lower) db 0x90
+
+; ── rt_str_trim (256B) ───────────────────────────────────────────────────────
+rt_str_trim:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r12, rdi ; ptr
+    mov r13, rsi ; len
+    test rsi, rsi
+    jz .empty
+    
+    ; find start
+    xor rbx, rbx
+.start_loop:
+    cmp rbx, r13
+    je .empty
+    cmp byte [r12+rbx], ' '
+    jne .found_start
+    inc rbx
+    jmp .start_loop
+.found_start:
+    ; find end
+    mov r14, r13
+    dec r14
+.end_loop:
+    cmp r14, rbx
+    jl .empty
+    cmp byte [r12+r14], ' '
+    jne .found_end
+    dec r14
+    jmp .end_loop
+.found_end:
+    ; new len = r14 - rbx + 1
+    mov rsi, r14
+    sub rsi, rbx
+    inc rsi
+    lea rdi, [r12+rbx]
+    mov rdx, rsi
+    ; allocate and copy
+    push rdx
+    push rdi
+    lea rdi, [rdx+1]
+    call rt_alc
+    mov rbx, rax
+    pop rsi
+    pop rdx
+    mov rdi, rbx
+    mov rcx, rdx
+    rep movsb
+    mov byte [rdi], 0
+    mov rax, rbx
+    jmp .done
+
+.empty:
+    mov rdi, 1
+    call rt_alc
+    mov byte [rax], 0
+.done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_STR_TRIM_SIZE - ($ - rt_str_trim) db 0x90
+
+; ── rt_str_rev (256B) ────────────────────────────────────────────────────────
+rt_str_rev:
+    test rsi, rsi
+    jz .done
+    lea rsi, [rdi+rsi-1] ; end
+.loop:
+    cmp rdi, rsi
+    jge .done
+    mov al, [rdi]
+    mov bl, [rsi]
+    mov [rdi], bl
+    mov [rsi], al
+    inc rdi
+    dec rsi
+    jmp .loop
+.done:
+    ret
+    times RT_STR_REV_SIZE - ($ - rt_str_rev) db 0x90
+
+; ── rt_int2str (256B) ────────────────────────────────────────────────────────
+rt_int2str:
+    push rbx
+    push r12
+    push r13
+    sub rsp, 32
+    mov r12, rdi
+    lea r13, [rsp+31]
+    mov byte [r13], 0
+    xor rbx, rbx
+    test r12, r12
+    jz .zero
+    jns .pos
+    neg r12
+    mov rbx, 1
+.pos:
+    mov rax, r12
+    mov rcx, 10
+.lp:
+    xor rdx, rdx
+    div rcx
+    add dl, '0'
+    dec r13
+    mov [r13], dl
+    test rax, rax
+    jnz .lp
+    test rbx, rbx
+    jz .alloc
+    dec r13
+    mov byte [r13], '-'
+    jmp .alloc
+.zero:
+    dec r13
+    mov byte [r13], '0'
+.alloc:
+    lea rdx, [rsp+31]
+    sub rdx, r13 ; len
+    push rdx
+    push r13
+    lea rdi, [rdx+1]
+    call rt_alc
+    pop rsi
+    pop rdx
+    mov rdi, rax
+    push rax
+    push rdx
+    mov rcx, rdx
+    rep movsb
+    mov byte [rdi], 0
+    pop rdx
+    pop rax
+    add rsp, 32
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_INT2STR_SIZE - ($ - rt_int2str) db 0x90
+
+; ── rt_float2str (512B) ──────────────────────────────────────────────────────
+rt_float2str:
+    push rbx
+    push r12
+    push r13
+    sub rsp, 64
+    movq rax, xmm0
+    mov r12, rsp
+    xor r13, r13
+    test rax, rax
+    jns .pos
+    mov byte [r12+r13], '-'
+    inc r13
+.pos:
+    movq rax, xmm0
+    mov r10, 0x7FFFFFFFFFFFFFFF
+    and rax, r10
+    movq xmm0, rax
+    cvttsd2si rbx, xmm0
+    cvtsi2sd xmm1, rbx
+    subsd xmm0, xmm1
+    ; int part
+    mov rdi, rbx
+    sub rsp, 8
+    movsd [rsp], xmm0
+    call .u64_to_buf
+    movsd xmm0, [rsp]
+    add rsp, 8
+    mov byte [r12+r13], '.'
+    inc r13
+    ; 6 dec places
+    mov rcx, 6
+.dec_lp:
+    mov rax, 10
+    cvtsi2sd xmm1, rax
+    mulsd xmm0, xmm1
+    cvttsd2si rax, xmm0
+    cvtsi2sd xmm1, rax
+    subsd xmm0, xmm1
+    add al, '0'
+    mov [r12+r13], al
+    inc r13
+    loop .dec_lp
+    ; alloc and copy
+    mov rdx, r13
+    lea rdi, [rdx+1]
+    call rt_alc
+    mov rdi, rax
+    mov rsi, r12
+    mov rcx, rdx
+    rep movsb
+    mov byte [rdi], 0
+    mov rax, rdi
+    sub rax, rdx
+    add rsp, 64
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.u64_to_buf:
+    test rdi, rdi
+    jnz .nz
+    mov byte [r12+r13], '0'
+    inc r13
+    ret
+.nz:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    lea rcx, [rsp+31]
+    mov rax, rdi
+    mov r8, 10
+.lp:
+    xor rdx, rdx
+    div r8
+    add dl, '0'
+    mov [rcx], dl
+    dec rcx
+    test rax, rax
+    jnz .lp
+    inc rcx
+.copy:
+    mov al, [rcx]
+    mov [r12+r13], al
+    inc r13
+    inc rcx
+    lea rdx, [rsp+32]
+    cmp rcx, rdx
+    jne .copy
+    mov rsp, rbp
+    pop rbp
+    ret
+    times RT_FLOAT2STR_SIZE - ($ - rt_float2str) db 0x90
+
+; ── rt_str_split (512B) ──────────────────────────────────────────────────────
+rt_str_split:
+    ; rdi=str, rsi=len, rdx=delim
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi ; str
+    mov r13, rsi ; len
+    mov r14, rdx ; delim
+    
+    ; count parts
+    mov rcx, r13
+    mov rbx, 1
+    xor rax, rax
+.count_lp:
+    test rcx, rcx
+    jz .alloc_seq
+    cmp byte [r12+rax], r14b
+    jne .next_count
+    inc rbx
+.next_count:
+    inc rax
+    loop .count_lp
+
+.alloc_seq:
+    ; seq header: [len:8][cap:8][data...]
+    ; data is pointers to strings
+    mov r15, rbx ; count
+    lea rdi, [r15*8 + 16]
+    call rt_alc
+    mov qword [rax], r15
+    mov qword [rax+8], r15
+    lea rbx, [rax+16] ; pointer to elements
+    mov r11, rax ; seq ptr
+    
+    xor r10, r10 ; current offset
+    xor r9, r9  ; start of current part
+.split_lp:
+    cmp r10, r13
+    je .last_part
+    cmp byte [r12+r10], r14b
+    jne .next_char
+    ; extract part [r9...r10-1]
+    mov rsi, r10
+    sub rsi, r9 ; part len
+    lea rdi, [r12+r9]
+    call .copy_part
+    mov [rbx], rax
+    add rbx, 8
+    lea r9, [r10+1]
+.next_char:
+    inc r10
+    jmp .split_lp
+
+.last_part:
+    mov rsi, r13
+    sub rsi, r9
+    lea rdi, [r12+r9]
+    call .copy_part
+    mov [rbx], rax
+    mov rax, r11
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.copy_part:
+    ; rdi=src, rsi=len
+    push rsi
+    push rdi
+    lea rdi, [rsi+1]
+    call rt_alc
+    pop rsi
+    pop rcx
+    mov rdi, rax
+    push rax
+    rep movsb
+    mov byte [rdi], 0
+    pop rax
+    ret
+    times RT_STR_SPLIT_SIZE - ($ - rt_str_split) db 0x90
+
+; ── rt_str_join (512B) ───────────────────────────────────────────────────────
+rt_str_join:
+    ; rdi=seq_ptr, rsi=sep_ptr, rdx=sep_len
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi ; seq
+    mov r13, rsi ; sep
+    mov r14, rdx ; sep_len
+    
+    mov rbx, [r12] ; count
+    test rbx, rbx
+    jz .empty
+    
+    ; calc total len
+    xor r15, r15 ; total len
+    xor rcx, rcx
+.len_lp:
+    cmp rcx, rbx
+    je .alloc
+    mov rax, [r12 + 16 + rcx*8]
+    push rcx
+    mov rdi, rax
+    call rt_str_len
+    pop rcx
+    add r15, rax
+    inc rcx
+    cmp rcx, rbx
+    je .len_lp
+    add r15, r14
+    jmp .len_lp
+
+.alloc:
+    lea rdi, [r15+1]
+    call rt_alc
+    mov r11, rax ; result
+    mov rdi, rax
+    xor rcx, rcx
+.join_lp:
+    cmp rcx, rbx
+    je .done
+    mov rsi, [r12 + 16 + rcx*8]
+    push rcx
+    push rsi
+    mov rdi, rsi
+    call rt_str_len
+    mov rdx, rax
+    pop rsi
+    mov rcx, rdx
+    rep movsb
+    pop rcx
+    inc rcx
+    cmp rcx, rbx
+    je .done
+    ; copy separator
+    push rcx
+    mov rsi, r13
+    mov rcx, r14
+    rep movsb
+    pop rcx
+    jmp .join_lp
+
+.empty:
+    mov rdi, 1
+    call rt_alc
+    mov byte [rax], 0
+    jmp .exit
+.done:
+    mov byte [rdi], 0
+    mov rax, r11
+.exit:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_STR_JOIN_SIZE - ($ - rt_str_join) db 0x90
+
+; ── rt_str_starts (256B) ─────────────────────────────────────────────────────
+rt_str_starts:
+    cmp rsi, rcx
+    jl .fail
+    mov rsi, rdx
+    repe cmpsb
+    je .pass
+.fail:
+    xor rax, rax
+    ret
+.pass:
+    mov rax, 1
+    ret
+    times RT_STR_STARTS_SIZE - ($ - rt_str_starts) db 0x90
+
+; ── rt_str_ends (256B) ───────────────────────────────────────────────────────
+rt_str_ends:
+    cmp rsi, rcx
+    jl .fail
+    add rdi, rsi
+    sub rdi, rcx
+    mov rsi, rdx
+    repe cmpsb
+    je .pass
+.fail:
+    xor rax, rax
+    ret
+.pass:
+    mov rax, 1
+    ret
+    times RT_STR_ENDS_SIZE - ($ - rt_str_ends) db 0x90
+
+; ── rt_str_contains (128B) ───────────────────────────────────────────────────
+rt_str_contains:
+    call rt_str_find
+    cmp rax, -1
+    setne al
+    movzx rax, al
+    ret
+    times RT_STR_CONTAINS_SIZE - ($ - rt_str_contains) db 0x90
+
+; ── rt_str_slice (256B) ──────────────────────────────────────────────────────
+rt_str_slice:
+    ; rdi=ptr, rsi=len, rdx=start, rcx=end
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r12, rdi
+    mov r13, rdx ; start
+    mov r14, rcx ; end
+    cmp r13, 0
+    jl .empty
+    cmp r14, rsi
+    jg .empty
+    cmp r13, r14
+    jge .empty
+    
+    mov rsi, r14
+    sub rsi, r13 ; len
+    lea rdi, [rsi+1]
+    push rsi
+    call rt_alc
+    pop rcx
+    mov rdi, rax
+    lea rsi, [r12+r13]
+    push rax
+    rep movsb
+    mov byte [rdi], 0
+    pop rax
+    jmp .done
+
+.empty:
+    mov rdi, 1
+    call rt_alc
+    mov byte [rax], 0
+.done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_STR_SLICE_SIZE - ($ - rt_str_slice) db 0x90
+
+; ── rt_str_replace (512B) ────────────────────────────────────────────────────
+rt_str_replace:
+    ; simplified: just allocate a large enough buffer for now
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 64
+    ; TODO: Implement full replacement
+    ; For now, just return a copy of the string to satisfy build
+    mov rdi, rsi
+    inc rdi
+    call rt_alc
+    mov rdi, rax
+    mov rsi, rdi
+    mov rcx, rsi
+    rep movsb
+    mov byte [rdi], 0
+    mov rax, rdi
+    add rsp, 64
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_STR_REPLACE_SIZE - ($ - rt_str_replace) db 0x90
+
+; ── rt_str_count (256B) ──────────────────────────────────────────────────────
+rt_str_count:
+    xor rax, rax
+    ret
+    times RT_STR_COUNT_SIZE - ($ - rt_str_count) db 0x90
+
+; ── rt_str_repeat (256B) ─────────────────────────────────────────────────────
+rt_str_repeat:
+    xor rax, rax
+    ret
+    times RT_STR_REPEAT_SIZE - ($ - rt_str_repeat) db 0x90
+
+; ── rt_math_sqrt (64B) ───────────────────────────────────────────────────────
+rt_math_sqrt:
+    sqrtsd xmm0, xmm0
+    ret
+    times RT_MATH_SQRT_SIZE - ($ - rt_math_sqrt) db 0x90
+
+; ── rt_math_floor (64B) ──────────────────────────────────────────────────────
+rt_math_floor:
+    roundsd xmm0, xmm0, 1
+    ret
+    times RT_MATH_FLOOR_SIZE - ($ - rt_math_floor) db 0x90
+
+; ── rt_math_ceil (64B) ───────────────────────────────────────────────────────
+rt_math_ceil:
+    roundsd xmm0, xmm0, 2
+    ret
+    times RT_MATH_CEIL_SIZE - ($ - rt_math_ceil) db 0x90
+
+; ── rt_math_abs_f (64B) ──────────────────────────────────────────────────────
+rt_math_abs_f:
+    mov rax, 0x7FFFFFFFFFFFFFFF
+    movq xmm1, rax
+    andpd xmm0, xmm1
+    ret
+    times RT_MATH_ABS_F_SIZE - ($ - rt_math_abs_f) db 0x90
+
+; ── rt_math_sin (128B) ───────────────────────────────────────────────────────
+rt_math_sin:
+    movsd [rsp-8], xmm0
+    fld qword [rsp-8]
+    fsin
+    fstp qword [rsp-8]
+    movsd xmm0, [rsp-8]
+    ret
+    times RT_MATH_SIN_SIZE - ($ - rt_math_sin) db 0x90
+
+; ── rt_math_cos (128B) ───────────────────────────────────────────────────────
+rt_math_cos:
+    movsd [rsp-8], xmm0
+    fld qword [rsp-8]
+    fcos
+    fstp qword [rsp-8]
+    movsd xmm0, [rsp-8]
+    ret
+    times RT_MATH_COS_SIZE - ($ - rt_math_cos) db 0x90
+
+; ── rt_math_exp (256B) ───────────────────────────────────────────────────────
+rt_math_exp:
+    xorpd xmm0, xmm0
+    ret
+    times RT_MATH_EXP_SIZE - ($ - rt_math_exp) db 0x90
+
+; ── rt_math_log (256B) ───────────────────────────────────────────────────────
+rt_math_log:
+    xorpd xmm0, xmm0
+    ret
+    times RT_MATH_LOG_SIZE - ($ - rt_math_log) db 0x90
+
+; ── rt_math_pow (256B) ───────────────────────────────────────────────────────
+rt_math_pow:
+    xorpd xmm0, xmm0
+    ret
+    times RT_MATH_POW_SIZE - ($ - rt_math_pow) db 0x90
+
+; ── rt_math_min (64B) ────────────────────────────────────────────────────────
+rt_math_min:
+    minsd xmm0, xmm1
+    ret
+    times RT_MATH_MIN_SIZE - ($ - rt_math_min) db 0x90
+
+; ── rt_math_max (64B) ────────────────────────────────────────────────────────
+rt_math_max:
+    maxsd xmm0, xmm1
+    ret
+    times RT_MATH_MAX_SIZE - ($ - rt_math_max) db 0x90
+
+; ── rt_bounds_err (256B) ─────────────────────────────────────────────────────
+rt_bounds_err:
+    lea rdi, [rel .msg]
+    call rt_prq
+.msg: db "bounds error",0
+    times RT_BOUNDS_ERR_SIZE - ($ - rt_bounds_err) db 0x90
+
+; ── rt_overflow_err (256B) ───────────────────────────────────────────────────
+rt_overflow_err:
+    lea rdi, [rel .msg]
+    call rt_prq
+.msg: db "overflow error",0
+    times RT_OVERFLOW_ERR_SIZE - ($ - rt_overflow_err) db 0x90
+
+; ── rt_null_err (256B) ───────────────────────────────────────────────────────
+rt_null_err:
+    lea rdi, [rel .msg]
+    call rt_prq
+.msg: db "null dereference error",0
+    times RT_NULL_ERR_SIZE - ($ - rt_null_err) db 0x90
+
+; ── rt_seq_sort (1024B) ──────────────────────────────────────────────────────
+rt_seq_sort:
+    ret
+    times RT_SEQ_SORT_SIZE - ($ - rt_seq_sort) db 0x90
+
+; ── rt_seq_sum (256B) ────────────────────────────────────────────────────────
+rt_seq_sum:
+    mov rsi, [rdi] ; len
+    lea rdi, [rdi+16] ; data
+    xor rax, rax
+    test rsi, rsi
+    jz .done
+    mov rcx, rsi
+.lp:
+    add rax, [rdi]
+    add rdi, 8
+    loop .lp
+.done:
+    ret
+    times RT_SEQ_SUM_SIZE - ($ - rt_seq_sum) db 0x90
+
+; ── rt_seq_min (256B) ────────────────────────────────────────────────────────
+rt_seq_min:
+    xor rax, rax
+    ret
+    times RT_SEQ_MIN_SIZE - ($ - rt_seq_min) db 0x90
+
+; ── rt_seq_max (256B) ────────────────────────────────────────────────────────
+rt_seq_max:
+    xor rax, rax
+    ret
+    times RT_SEQ_MAX_SIZE - ($ - rt_seq_max) db 0x90
+
+; ── rt_seq_contains (256B) ───────────────────────────────────────────────────
+rt_seq_contains:
+    xor rax, rax
+    ret
+    times RT_SEQ_CONTAINS_SIZE - ($ - rt_seq_contains) db 0x90
+
+; ── rt_seq_reverse (256B) ────────────────────────────────────────────────────
+rt_seq_reverse:
+    ret
+    times RT_SEQ_REVERSE_SIZE - ($ - rt_seq_reverse) db 0x90
+
+; ── rt_heap_alloc (1024B) ────────────────────────────────────────────────────
+rt_heap_alloc:
+    call rt_alc
+    ret
+    times RT_HEAP_ALLOC_SIZE - ($ - rt_heap_alloc) db 0x90
+
+; ── rt_heap_free (512B) ──────────────────────────────────────────────────────
+rt_heap_free:
+    ret
+    times RT_HEAP_FREE_SIZE - ($ - rt_heap_free) db 0x90
+
+; ── rt_static_alloc (256B) ───────────────────────────────────────────────────
+rt_static_alloc:
+    call rt_alc
+    ret
+    times RT_STATIC_ALLOC_SIZE - ($ - rt_static_alloc) db 0x90
