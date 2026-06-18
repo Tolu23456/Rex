@@ -33,6 +33,8 @@ extern codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax
 extern codegen_emit_bitwise_and_rax_rbx, codegen_emit_bitwise_or_rax_rbx
 extern codegen_emit_bitwise_xor_rax_rbx
 extern codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
+extern codegen_emit_lnot_int_rax
+extern out_buffer
 extern codegen_emit_shl_rax_by_rbx, codegen_emit_shr_rax_by_rbx
 extern codegen_set_frame, codegen_clear_frame
 extern codegen_emit_frame_prologue, codegen_emit_leave
@@ -41,6 +43,7 @@ extern regalloc_cnt
 extern codegen_emit_jmp_prot
 extern codegen_add_frame_local
 extern codegen_emit_str_rax
+extern codegen_emit_str_method
 extern codegen_emit_seq_alloc, codegen_emit_seq_push, codegen_emit_seq_pop_rax
 extern codegen_emit_seq_len_rax
 extern codegen_emit_mov_rdi_rax, codegen_emit_call_rt_err, codegen_emit_exit1
@@ -79,6 +82,11 @@ when_case_count: resq 1
 when_var_stack:  resq 8
 when_cnt_stack:  resq 8
 when_stk_depth:  resq 1
+when_cond_mode:  resb 1
+when_mode_stack: resb 8
+fwd_ref_names:   resb 512
+fwd_ref_patches: resq 16
+fwd_ref_count:   resq 1
 decl_mutable:          resb 1
 decl_const:            resb 1
 cur_proto_param_count: resb 1       ; B-1: param count of the protocol being compiled
@@ -548,6 +556,65 @@ parse_factor:
     mov byte [cur_type], TYPE_INT
     jmp .done
 .prt_skip:
+    ; Forward reference: proto not defined yet — emit placeholder call and register for patching
+    mov r13, [fwd_ref_count]
+    cmp r13, 16
+    jge .prt_fwd_overflow
+    ; Reserve this slot immediately so nested forward refs use later slots
+    inc qword [fwd_ref_count]
+    ; Save proto name at fwd_ref_names[r13*32]
+    imul r14, r13, 32
+    lea rdi, [fwd_ref_names]
+    add rdi, r14
+    lea rsi, [tok_ident]
+    call strcpy
+    call lexer_next             ; consume proto name
+    ; Parse arguments (same logic as .prt_al/.prt_ad)
+    xor r12, r12                ; arg count
+    cmp byte [tok_type], TOK_LPAREN
+    jne .prt_fwd_emit
+    call lexer_next             ; skip '('
+.prt_fwd_al:
+    cmp byte [tok_type], TOK_RPAREN
+    je .prt_fwd_ad
+    cmp byte [tok_type], TOK_EOF
+    je .prt_fwd_ad
+    cmp byte [tok_type], TOK_NEWLINE
+    je .prt_fwd_ad
+    push r12
+    push r13
+    call parse_expr
+    call codegen_emit_push_rax
+    pop r13
+    pop r12
+    inc r12
+    cmp byte [tok_type], TOK_COMMA
+    jne .prt_fwd_ad
+    call lexer_next
+    jmp .prt_fwd_al
+.prt_fwd_ad:
+    cmp byte [tok_type], TOK_RPAREN
+    jne .prt_fwd_emit
+    call lexer_next             ; skip ')'
+.prt_fwd_emit:
+    ; Emit arg pops to set up registers rdi/rsi/...
+    push r13
+    mov rdi, r12
+    call codegen_emit_arg_pops
+    pop r13
+    ; Emit E8 (call opcode)
+    mov al, 0xE8
+    call emit_b_indirect
+    ; Record patch position (current out_idx is where rel32 goes)
+    mov rax, [out_idx]
+    mov [fwd_ref_patches + r13*8], rax
+    ; Emit 4 zero bytes (rel32 placeholder)
+    xor eax, eax
+    call emit_d_indirect
+    mov byte [cur_type], TYPE_INT
+    jmp .done
+.prt_fwd_overflow:
+    ; Too many forward refs — emit 0 and skip name
     mov rdi, 0
     call codegen_emit_mov_eax_imm32
     mov byte [cur_type], TYPE_INT
@@ -563,16 +630,10 @@ parse_factor:
     call parse_factor
     cmp byte [cur_type], TYPE_BOOL
     jne .lnot_int
-    ; flip bool: rax = (rax == 0 ? 1 : (rax == 1 ? 0 : 2))
-    cmp rax, 2
-    je .done                    ; unknown (2) stays unknown
-    xor rax, 1                  ; 0 <-> 1
+    call codegen_emit_not_rax
     jmp .done
 .lnot_int:
-    ; not int: rax = (rax == 0 ? 1 : 0)
-    test rax, rax
-    setz al
-    movzx rax, al
+    call codegen_emit_lnot_int_rax
     mov byte [cur_type], TYPE_BOOL
     jmp .done
 .bnot:
@@ -668,8 +729,24 @@ parse_factor:
     add rsp, 64
     cmp rax, -1
     je .done
+    ; check var type: TYPE_STR (5) uses str method 0; else use seq len
+    push rax
+    imul rbx, rax, VAR_ENTRY_SIZE
+    lea rcx, [var_table]
+    movzx edx, byte [rcx + rbx + 48]   ; type field at offset 48
+    pop rax
+    cmp dl, TYPE_STR
+    jne .lenx_seq
+    ; string length: load var → rax, call str_len method
+    mov rdi, rax
+    call codegen_emit_mov_rax_var
+    mov rdi, 0
+    call codegen_emit_str_method
+    jmp .lenx_done
+.lenx_seq:
     mov rdi, rax
     call codegen_emit_seq_len_rax
+.lenx_done:
     mov byte [cur_type], TYPE_INT
     call lexer_next
     jmp .done
@@ -764,16 +841,10 @@ parse_unary:
     call parse_factor
     cmp byte [cur_type], TYPE_BOOL
     jne .lnot_int
-    ; flip bool: rax = (rax == 0 ? 1 : (rax == 1 ? 0 : 2))
-    cmp rax, 2
-    je .done                    ; unknown (2) stays unknown
-    xor rax, 1                  ; 0 <-> 1
+    call codegen_emit_not_rax
     jmp .done
 .lnot_int:
-    ; not int: rax = (rax == 0 ? 1 : 0)
-    test rax, rax
-    setz al
-    movzx rax, al
+    call codegen_emit_lnot_int_rax
     mov byte [cur_type], TYPE_BOOL
     jmp .done
 .bnot:
@@ -1097,35 +1168,23 @@ parse_expr:
     mov byte [cur_type], TYPE_BOOL
     jmp .loop
 .land:
-    ; short-circuit and (#33): if LHS false → skip RHS, result = false
+    ; Kleene AND: push LHS, eval RHS, pop LHS→rbx, call Kleene AND
     mov byte [tco_return_active], 0
-    call codegen_emit_test_rax_jz   ; emit test+jz; push J1 on jump_patch_stack
+    call codegen_emit_push_rax
     call lexer_next
     call parse_comparison           ; RHS → rax
-    call codegen_emit_normalize_bool_rax
-    call codegen_emit_jmp_get_slot  ; emit jmp .end_and; rax = J2 patch slot
-    mov r12, rax                    ; save J2 slot
-    call codegen_patch_jump         ; patch J1 (jz) → here (.false_path)
-    mov rdi, 0
-    call codegen_emit_mov_eax_imm32 ; false path: xor eax,eax
-    mov rdi, r12
-    call codegen_patch_slot_to_here ; patch J2 → here (.end_and)
+    call codegen_emit_pop_rbx       ; LHS → rbx
+    call codegen_emit_and_bool_rax_rbx
     mov byte [cur_type], TYPE_BOOL
     jmp .loop
 .lor:
-    ; short-circuit or (#33): if LHS true → skip RHS, result = true
+    ; Kleene OR: push LHS, eval RHS, pop LHS→rbx, call Kleene OR
     mov byte [tco_return_active], 0
-    call codegen_emit_test_rax_jnz  ; emit test+jnz; push J1 on jump_patch_stack
+    call codegen_emit_push_rax
     call lexer_next
     call parse_comparison           ; RHS → rax
-    call codegen_emit_normalize_bool_rax
-    call codegen_emit_jmp_get_slot  ; emit jmp .end_or; rax = J2 patch slot
-    mov r12, rax                    ; save J2 slot
-    call codegen_patch_jump         ; patch J1 (jnz) → here (.true_path)
-    mov rdi, 1
-    call codegen_emit_mov_eax_imm32 ; true path: mov eax,1
-    mov rdi, r12
-    call codegen_patch_slot_to_here ; patch J2 → here (.end_or)
+    call codegen_emit_pop_rbx       ; LHS → rbx
+    call codegen_emit_or_bool_rax_rbx
     mov byte [cur_type], TYPE_BOOL
     jmp .loop
 .done:
@@ -1852,6 +1911,11 @@ parse_stmt:
     call strcpy
     mov rbx, [out_idx]
     mov [r13+32], rbx
+    ; Patch any pending forward references to this protocol
+    push r13
+    mov rdi, r13
+    call patch_forward_refs
+    pop r13
     mov byte [r13+40], 0
     mov byte [r13+46], 0    ; clear has_loop flag for new proto
     mov byte [r13+47], 0
@@ -1916,7 +1980,7 @@ parse_stmt:
     jge .prot_pok
     jmp .prot_pd
 .prot_pok:
-    cmp r12, 5
+    cmp r12, 6
     jge .prot_pskip
     mov [r13+41+r12], al
 .prot_pskip:
@@ -2013,10 +2077,12 @@ parse_stmt:
     mov rdi, [cur_proto_idx]
     call codegen_emit_memo_check
 .prot_no_memo_check:
-    ; save var_count for protocol-level scoping
+    ; save var_count for protocol-level scoping (subtract param count so restore gives pre-param value)
     mov rax, [scope_depth]
     lea rcx, [scope_stack]
     mov rbx, [var_count]
+    movzx rdx, byte [cur_proto_param_count]
+    sub rbx, rdx
     mov [rcx+rax*8], rbx
     inc qword [scope_depth]
     cmp byte [tok_type], TOK_COLON
@@ -2702,6 +2768,7 @@ parse_stmt:
     je .ident_assign
     cmp byte [tok_type], TOK_DOT
     jne .done
+    call lexer_next
     movzx eax, byte [tok_type]
     cmp al, TOK_PUSH
     je .ident_push
@@ -2872,8 +2939,16 @@ parse_stmt:
     lea rcx, [when_cnt_stack]
     mov rbx, [when_case_count]
     mov [rcx+rax*8], rbx
+    ; push when_cond_mode onto mode stack
+    lea rcx, [when_mode_stack]
+    movzx rbx, byte [when_cond_mode]
+    mov [rcx+rax], bl
     inc qword [when_stk_depth]
     call lexer_next
+    ; detect cond mode: when: (colon immediately after 'when')
+    cmp byte [tok_type], TOK_COLON
+    je .when_cond_entry
+    mov byte [when_cond_mode], 0
     call parse_expr
     ; store when value in __when__ temp var
     lea rdi, [when_tmp]
@@ -2903,6 +2978,21 @@ parse_stmt:
     call lexer_next
     mov r13, 1
     jmp .when_loop
+.when_cond_entry:
+    ; Cond mode: no subject expr, cases are: <expr>: <body>
+    mov byte [when_cond_mode], 1
+    call codegen_save_chain_base
+    mov qword [when_case_count], 0
+    call lexer_next             ; skip ':'
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .when_cond_in
+    call lexer_next
+.when_cond_in:
+    cmp byte [tok_type], TOK_INDENT
+    jne .when_loop
+    call lexer_next
+    mov r13, 1
+    jmp .when_loop
 .when_loop:
     movzx eax, byte [tok_type]
     cmp al, TOK_EOF
@@ -2913,6 +3003,46 @@ parse_stmt:
     je .when_is
     cmp al, TOK_ELSE
     je .when_else
+    cmp byte [when_cond_mode], 1
+    je .when_cond_case
+    call parse_stmt
+    jmp .when_loop
+.when_cond_case:
+    ; Cond mode case: <expr>: <body>
+    cmp qword [when_case_count], 0
+    je .when_cc_first
+    call codegen_emit_jmp_end
+    call codegen_patch_jump
+.when_cc_first:
+    inc qword [when_case_count]
+    call parse_expr             ; condition expr → rax
+    call codegen_emit_test_rax_jz
+    movzx eax, byte [tok_type]
+    cmp al, TOK_COLON
+    jne .when_cc_nl
+    call lexer_next
+.when_cc_nl:
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .when_cc_in
+    call lexer_next
+.when_cc_in:
+    cmp byte [tok_type], TOK_INDENT
+    jne .when_cc_inline
+    call lexer_next
+.when_cc_multi:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .when_loop
+    cmp al, TOK_DEDENT
+    je .when_cc_md
+    cmp al, TOK_ELSE
+    je .when_loop
+    call parse_stmt
+    jmp .when_cc_multi
+.when_cc_md:
+    call lexer_next             ; consume DEDENT
+    jmp .when_loop
+.when_cc_inline:
     call parse_stmt
     jmp .when_loop
 .when_is:
@@ -3005,8 +3135,11 @@ parse_stmt:
     call codegen_patch_jump
 .when_done:
     call codegen_patch_chain_end
-    ; clean up __when__ temp var
+    ; clean up __when__ temp var (skip in cond mode — no subject var was added)
+    cmp byte [when_cond_mode], 1
+    je .when_pop_state
     dec qword [var_count]
+.when_pop_state:
     ; pop outer when state (#32)
     dec qword [when_stk_depth]
     mov rax, [when_stk_depth]
@@ -3016,6 +3149,10 @@ parse_stmt:
     lea rcx, [when_cnt_stack]
     mov rbx, [rcx+rax*8]
     mov [when_case_count], rbx
+    ; restore when_cond_mode from mode stack
+    lea rcx, [when_mode_stack]
+    movzx rbx, byte [rcx+rax]
+    mov [when_cond_mode], bl
     jmp .done
 
 .done:
@@ -3025,6 +3162,59 @@ parse_stmt:
     pop r12
     pop rbx
     leave
+    ret
+
+; ── patch_forward_refs ──────────────────────────────────────────────────────
+; rdi = proto_entry ptr (name at +0, out_idx at +32)
+; Scans fwd_ref_names for name matches and patches each out_buffer rel32
+patch_forward_refs:
+    push rbx
+    push rcx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi                        ; r12 = proto_entry
+    mov r13, [fwd_ref_count]            ; r13 = num forward refs
+    test r13, r13
+    jz .pfr_done
+    xor r14, r14                        ; r14 = loop index
+.pfr_loop:
+    cmp r14, r13
+    jge .pfr_done
+    imul r15, r14, 32
+    lea rcx, [fwd_ref_names]
+    add rcx, r15                        ; rcx = &fwd_ref_names[r14*32]
+    ; Compare 32-byte name (4 quadwords)
+    mov rax, [rcx]
+    cmp rax, [r12]
+    jne .pfr_next
+    mov rax, [rcx+8]
+    cmp rax, [r12+8]
+    jne .pfr_next
+    mov rax, [rcx+16]
+    cmp rax, [r12+16]
+    jne .pfr_next
+    mov rax, [rcx+24]
+    cmp rax, [r12+24]
+    jne .pfr_next
+    ; Names match — patch rel32 at fwd_ref_patches[r14*8] in out_buffer
+    mov rbx, [fwd_ref_patches + r14*8] ; rbx = patch position (where rel32 goes)
+    mov rax, [r12+32]                   ; rax = proto start out_idx
+    sub rax, rbx                        ; rax = proto_out_idx - patch_pos
+    sub rax, 4                          ; rax = rel32 value (rel to end of call instr)
+    lea rcx, [out_buffer]
+    mov [rcx + rbx], eax                ; write rel32 at patch_pos
+.pfr_next:
+    inc r14
+    jmp .pfr_loop
+.pfr_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rcx
+    pop rbx
     ret
 
 ; ── indirect emit helpers (wired to codegen raw exports) ─────────────────────

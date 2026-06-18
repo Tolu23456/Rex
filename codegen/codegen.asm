@@ -35,6 +35,7 @@ global codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax
 global codegen_emit_bitwise_and_rax_rbx, codegen_emit_bitwise_or_rax_rbx
 global codegen_emit_bitwise_xor_rax_rbx
 global codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
+global codegen_emit_lnot_int_rax
 global codegen_emit_shl_rax_by_rbx, codegen_emit_shr_rax_by_rbx
 global codegen_set_frame, codegen_clear_frame, codegen_find_frame_slot
 global codegen_emit_frame_prologue, codegen_emit_leave, codegen_emit_jmp_prot
@@ -3714,7 +3715,20 @@ codegen_emit_neg_rax:
     ret
 
 codegen_emit_not_rax:
-    ; xor rax,1
+    ; Kleene NOT: cmp rax,2; je .skip; xor rax,1; .skip:
+    ; bytes: 48 83 F8 02  74 04  48 83 F0 01
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    mov al, 0x02
+    call emit_b
+    mov al, 0x74
+    call emit_b
+    mov al, 0x04
+    call emit_b
     mov al, 0x48
     call emit_b
     mov al, 0x83
@@ -3722,6 +3736,31 @@ codegen_emit_not_rax:
     mov al, 0xF0
     call emit_b
     mov al, 0x01
+    call emit_b
+    ret
+
+codegen_emit_lnot_int_rax:
+    ; Integer logical-NOT: test rax,rax; setz al; movzx rax,al
+    ; bytes: 48 85 C0  0F 94 C0  48 0F B6 C0
+    mov al, 0x48
+    call emit_b
+    mov al, 0x85
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x94
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xB6
+    call emit_b
+    mov al, 0xC0
     call emit_b
     ret
 
@@ -4919,18 +4958,19 @@ codegen_emit_bitwise_xor_rax_rbx:
     ret
 
 codegen_emit_and_bool_rax_rbx:
-    ; test rbx,rbx; setnz cl; test rax,rax; setnz al; and al,cl; movzx rax,al
+    ; Kleene AND: false(0) dominates, unknown(2) propagates
+    ; if rbx==0 or rax==0 → 0; if both==1 → 1; else → 2
+    ; bytes: 48 85 DB 74 18  48 85 C0 74 13  48 83 FB 01 75 11
+    ;        48 83 F8 01 75 0B  B8 01000000 EB 09  31 C0 EB 05  B8 02000000
     mov al, 0x48
     call emit_b
     mov al, 0x85
     call emit_b
     mov al, 0xDB
     call emit_b
-    mov al, 0x0F
+    mov al, 0x74
     call emit_b
-    mov al, 0x95
-    call emit_b
-    mov al, 0xC1
+    mov al, 0x18
     call emit_b
     mov al, 0x48
     call emit_b
@@ -4938,47 +4978,148 @@ codegen_emit_and_bool_rax_rbx:
     call emit_b
     mov al, 0xC0
     call emit_b
-    mov al, 0x0F
+    mov al, 0x74
     call emit_b
-    mov al, 0x95
-    call emit_b
-    mov al, 0xC0
-    call emit_b
-    mov al, 0x20
-    call emit_b
-    mov al, 0xC8
+    mov al, 0x13
     call emit_b
     mov al, 0x48
     call emit_b
-    mov al, 0x0F
+    mov al, 0x83
     call emit_b
-    mov al, 0xB6
+    mov al, 0xFB
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x75
+    call emit_b
+    mov al, 0x11
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x75
+    call emit_b
+    mov al, 0x0B
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0xEB
+    call emit_b
+    mov al, 0x09
+    call emit_b
+    mov al, 0x31
     call emit_b
     mov al, 0xC0
+    call emit_b
+    mov al, 0xEB
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov al, 0x02
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
     call emit_b
     ret
 
 codegen_emit_or_bool_rax_rbx:
-    ; or rax,rbx; setnz al; movzx rax,al
+    ; Kleene OR: true(1) dominates, unknown(2) propagates
+    ; if rbx==1 or rax==1 → 1; if both==0 → 0; else → 2
+    ; bytes: 48 83 FB 01 74 14  48 83 F8 01 74 0E  48 85 DB 75 10
+    ;        48 85 C0 75 0B  31 C0 EB 0C  B8 01000000 EB 05  B8 02000000
     mov al, 0x48
     call emit_b
-    mov al, 0x09
+    mov al, 0x83
     call emit_b
-    mov al, 0xD8
+    mov al, 0xFB
     call emit_b
-    mov al, 0x0F
+    mov al, 0x01
     call emit_b
-    mov al, 0x95
+    mov al, 0x74
+    call emit_b
+    mov al, 0x14
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xF8
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x74
+    call emit_b
+    mov al, 0x0E
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x85
+    call emit_b
+    mov al, 0xDB
+    call emit_b
+    mov al, 0x75
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x85
     call emit_b
     mov al, 0xC0
     call emit_b
-    mov al, 0x48
+    mov al, 0x75
     call emit_b
-    mov al, 0x0F
+    mov al, 0x0B
     call emit_b
-    mov al, 0xB6
+    mov al, 0x31
     call emit_b
     mov al, 0xC0
+    call emit_b
+    mov al, 0xEB
+    call emit_b
+    mov al, 0x0C
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0xEB
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov al, 0x02
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    mov al, 0x00
     call emit_b
     ret
 
