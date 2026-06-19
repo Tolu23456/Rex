@@ -326,23 +326,28 @@ inc_dec_stmt    ::= "++" <IDENT> <NEWLINE>
 
 ---
 
-## 23. Memory Context ✅ / 📋
+## 23. Memory Context ✅
 
 ```ebnf
 use_stmt        ::= "use" "mm" mm_mode [ "gc" gc_mode ] ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
-                  | "use" "gc" gc_mode ":" <NEWLINE>        (📋)
+                  | "use" "gc" gc_mode ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
-                  | "use" "keyword" <IDENT> "as" "mm" <IDENT> (📋)
-                  | "use" "keyword" <IDENT> "as" "gc" <IDENT> (📋)
 
-mm_mode         ::= "arena" | "pool"                         (✅)
-                  | "stack" | "heap" | "static"              (📋)
-                  | <IDENT>                                   (📋 user-defined)
+mm_mode         ::= "arena"                    (✅ bump-pointer, O(1) free)
+                  | "pool"                     (✅ fixed-size freelist)
+                  | "stack"                    (✅ LIFO)
+                  | "heap"                     (✅ general malloc)
+                  | "static"                   (✅ compile-time static region)
 
-gc_mode         ::= "sweep" | "ref" | "gen" | "inc" | "region" (📋)
-                  | <IDENT>                                      (📋 user-defined)
+gc_mode         ::= "sweep"                    (✅ mark-and-sweep)
+                  | "ref"                      (✅ reference counting)
+                  | "gen"                      (✅ generational)
+                  | "inc"                      (✅ incremental / no pauses)
+                  | "region"                   (✅ region-based)
 ```
+
+See `docs/mm.md` for full specification, behaviour, and comparison table.
 
 ---
 
