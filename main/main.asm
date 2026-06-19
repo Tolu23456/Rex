@@ -5,7 +5,7 @@ extern lexer_init, lexer_next, parse_stmt, codegen_write_headers, codegen_init, 
 extern codegen_finalize
 extern out_buffer, out_idx, out_name, tok_type
 section .bss
-src_buffer: resb 65536
+src_buffer: resb 1048576    ; BUG-15/SEC-06 fix: 1MB (was 64KB = 65536)
 src_len:    resq 1
 src_fd:     resq 1
 out_fd:     resq 1
@@ -25,9 +25,21 @@ _start:
     mov rdi, rax
     mov rax, 0
     lea rsi, [src_buffer]
-    mov rdx, 65536
+    mov rdx, 1048576        ; BUG-15/SEC-06 fix: read up to 1MB (was 65536)
     syscall
     mov [src_len], rax
+    ; BUG-15: check for truncation — if we read exactly the buffer size the file may be larger
+    cmp rax, 1048576
+    jne .src_ok
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [src_too_large_msg]
+    mov rdx, src_too_large_len
+    syscall
+    mov rax, 60
+    mov rdi, 1
+    syscall
+.src_ok:
     mov rax, 3
     mov rdi, [src_fd]
     syscall
@@ -82,6 +94,10 @@ _start:
     mov rdi, 1
     syscall
 
+section .data
+src_too_large_msg: db "error: source file exceeds 1MB limit",10
+src_too_large_len  equ $ - src_too_large_msg
+section .text
 ; ── Pre-scan: determine which runtime blobs are actually needed ────────────────
 ; rdi=source_ptr  rsi=source_len
 ; Returns rax = blob inclusion bitmask:

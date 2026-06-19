@@ -427,6 +427,7 @@ lexer_next:
     jmp .done
 .enl:
     inc qword [lex_pos]
+    inc qword [tok_line]        ; BUG-08 fix: increment line counter on each newline
     mov byte [at_line_start], 1
     mov byte [tok_type], TOK_NEWLINE
     jmp .done

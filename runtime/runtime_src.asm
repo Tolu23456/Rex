@@ -64,6 +64,21 @@ rt_pri:
     push r13
     sub rsp, 24
     mov r12, rdi
+    ; BUG-12 fix: special-case INT64_MIN = -9223372036854775808 (neg overflows)
+    mov rax, 0x8000000000000000
+    cmp r12, rax
+    jne .not_min
+    add rsp, 24
+    pop r13
+    pop r12
+    pop rbx
+    lea rsi, [rel .min_str]
+    mov rdx, 21                 ; length of "-9223372036854775808\n"
+    mov rax, 1
+    mov rdi, 1
+    syscall
+    ret
+.not_min:
     lea r13, [rsp+23]
     mov byte [r13], 10          ; newline at end of buffer
     xor rbx, rbx               ; rbx = 0 (not negative)
@@ -103,6 +118,7 @@ rt_pri:
     pop r12
     pop rbx
     ret
+.min_str: db "-9223372036854775808",10
     times RT_PRI_SIZE - ($ - rt_pri) db 0x90
 
 ; ── rt_prs: print null-terminated string in rdi to stdout + newline ──────────
@@ -333,6 +349,9 @@ rt_sip:
 rt_alc:
     push rbx
     mov rbx, rdi            ; rbx = requested size
+    ; guard against integer overflow in alignment arithmetic (huge size)
+    cmp rbx, 0x7FFFFFFFFFFFFFF8  ; if size > sane max, treat as OOM
+    ja .oom
     add rbx, 7              ; align to 8 bytes
     and rbx, -8
     cmp qword [0x401D75], 0 ; mode == 0 (arena)?
@@ -372,6 +391,11 @@ rt_alc:
     add qword [0x401D6D], rbx   ; advance bump by aligned size
     pop rbx
     ret
+.oom:
+    pop rbx                     ; restore rbx before calling rt_prq
+    lea rdi, [rel .oom_msg]
+    call rt_prq                 ; prints to stderr and exits 1
+.oom_msg: db "error: allocation size overflow",10
     times 4072 - ($ - rt_alc) db 0x90
 .pool_base: dq 0
 .pool_bump: dq 0
@@ -1252,21 +1276,64 @@ rt_math_cos:
     ret
     times RT_MATH_COS_SIZE - ($ - rt_math_cos) db 0x90
 
-; ── rt_math_exp (256B) ───────────────────────────────────────────────────────
+; ── rt_math_exp (256B) — e^x via x87 (xmm0 in/out) ─────────────────────────
 rt_math_exp:
-    xorpd xmm0, xmm0
+    ; exp(x) = 2^(x * log2(e)), using x87 f2xm1 + fscale
+    movsd [rsp-8], xmm0       ; store x
+    fld qword [rsp-8]          ; st0 = x
+    fldl2e                     ; st0 = log2(e), st1 = x
+    fmulp                      ; st0 = x * log2(e)   (pops both, pushes result)
+    ; compute 2^st0
+    fld st0                    ; st0 = y (copy), st1 = y
+    frndint                    ; st0 = floor(y)
+    fxch st1                   ; st0 = y, st1 = floor(y)
+    fsub st0, st1              ; st0 = frac = y - floor(y)
+    f2xm1                      ; st0 = 2^frac - 1
+    fld1                       ; st0 = 1.0
+    faddp                      ; st0 = 2^frac
+    fscale                     ; st0 = 2^frac * 2^floor(y) = 2^y = e^x
+    fstp qword [rsp-8]         ; store result, pop st0
+    fstp st0                   ; discard floor(y) (st1 left from fscale)
+    movsd xmm0, [rsp-8]       ; return value in xmm0
     ret
     times RT_MATH_EXP_SIZE - ($ - rt_math_exp) db 0x90
 
-; ── rt_math_log (256B) ───────────────────────────────────────────────────────
+; ── rt_math_log (256B) — ln(x) via x87 fyl2x (xmm0 in/out) ─────────────────
 rt_math_log:
-    xorpd xmm0, xmm0
+    ; ln(x) = log2(x) * ln(2) — fyl2x computes y*log2(x): st1=y, st0=x → result
+    movsd [rsp-8], xmm0       ; store x
+    fld qword [rsp-8]          ; st0 = x
+    fldln2                     ; st0 = ln(2), st1 = x
+    fxch st1                   ; st0 = x, st1 = ln(2)
+    fyl2x                      ; st0 = ln(2) * log2(x) = ln(x)
+    fstp qword [rsp-8]         ; store result
+    movsd xmm0, [rsp-8]       ; return value in xmm0
     ret
     times RT_MATH_LOG_SIZE - ($ - rt_math_log) db 0x90
 
-; ── rt_math_pow (256B) ───────────────────────────────────────────────────────
+; ── rt_math_pow (256B) — x^y via x87 fyl2x + f2xm1+fscale (xmm0=x, xmm1=y) ─
 rt_math_pow:
-    xorpd xmm0, xmm0
+    ; pow(x,y) = 2^(y*log2(x)) — uses 16 bytes on red zone
+    sub rsp, 16
+    movsd [rsp], xmm0         ; [rsp]   = x (base)
+    movsd [rsp+8], xmm1       ; [rsp+8] = y (exponent)
+    fld qword [rsp]            ; st0 = x
+    fld qword [rsp+8]          ; st0 = y, st1 = x
+    fxch st1                   ; st0 = x, st1 = y
+    fyl2x                      ; st0 = y * log2(x)
+    ; compute 2^st0
+    fld st0                    ; st0 = t (copy), st1 = t
+    frndint                    ; st0 = floor(t)
+    fxch st1                   ; st0 = t, st1 = floor(t)
+    fsub st0, st1              ; st0 = frac = t - floor(t)
+    f2xm1                      ; st0 = 2^frac - 1
+    fld1                       ; st0 = 1.0
+    faddp                      ; st0 = 2^frac
+    fscale                     ; st0 = 2^frac * 2^floor(t) = x^y
+    fstp qword [rsp]           ; store result, pop st0
+    fstp st0                   ; discard floor(t)
+    movsd xmm0, [rsp]         ; return value in xmm0
+    add rsp, 16
     ret
     times RT_MATH_POW_SIZE - ($ - rt_math_pow) db 0x90
 
@@ -1304,7 +1371,50 @@ rt_null_err:
     times RT_NULL_ERR_SIZE - ($ - rt_null_err) db 0x90
 
 ; ── rt_seq_sort (1024B) ──────────────────────────────────────────────────────
+; BUG-07 fix: implement in-place insertion sort (int64 elements).
+; rdi = seq pointer (layout: [len:q][cap:q][data:N*q])
 rt_seq_sort:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r15, [r12]              ; n = len
+    test r15, r15
+    jle .done
+    cmp r15, 1
+    jle .done
+    lea r14, [r12+16]           ; r14 = data base pointer
+    mov r13, 1                  ; i = 1 (outer loop index)
+.outer:
+    cmp r13, r15
+    jge .done
+    mov rbx, [r14+r13*8]       ; key = data[i]
+    mov rcx, r13
+    dec rcx                     ; j = i - 1
+.inner:
+    test rcx, rcx
+    js .insert                  ; j < 0 (j wrapped to -1): insert at position 0
+    mov rax, [r14+rcx*8]       ; rax = data[j]
+    cmp rax, rbx
+    jle .insert                 ; data[j] <= key: insert here (at j+1)
+    mov rdx, rcx
+    inc rdx
+    mov [r14+rdx*8], rax       ; data[j+1] = data[j]  (shift right)
+    dec rcx
+    jmp .inner
+.insert:
+    inc rcx                     ; slot = j + 1
+    mov [r14+rcx*8], rbx       ; data[j+1] = key
+    inc r13
+    jmp .outer
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
     times RT_SEQ_SORT_SIZE - ($ - rt_seq_sort) db 0x90
 
@@ -1325,20 +1435,95 @@ rt_seq_sum:
     times RT_SEQ_SUM_SIZE - ($ - rt_seq_sum) db 0x90
 
 ; ── rt_seq_min (256B) ────────────────────────────────────────────────────────
+; rdi = seq ptr → rax = minimum int64 element (0 if empty)
 rt_seq_min:
+    push rbx
+    push r12
+    mov r12, rdi
+    mov rcx, [r12]              ; len
+    test rcx, rcx
+    jz .empty
+    lea rdi, [r12+16]           ; data
+    mov rbx, [rdi]              ; min = first element
+    dec rcx
+    jz .done
+.loop:
+    add rdi, 8
+    mov rax, [rdi]
+    cmp rax, rbx
+    jge .no_update
+    mov rbx, rax
+.no_update:
+    dec rcx
+    jnz .loop
+.done:
+    mov rax, rbx
+    pop r12
+    pop rbx
+    ret
+.empty:
     xor rax, rax
+    pop r12
+    pop rbx
     ret
     times RT_SEQ_MIN_SIZE - ($ - rt_seq_min) db 0x90
 
 ; ── rt_seq_max (256B) ────────────────────────────────────────────────────────
+; rdi = seq ptr → rax = maximum int64 element (0 if empty)
 rt_seq_max:
+    push rbx
+    push r12
+    mov r12, rdi
+    mov rcx, [r12]              ; len
+    test rcx, rcx
+    jz .empty
+    lea rdi, [r12+16]           ; data
+    mov rbx, [rdi]              ; max = first element
+    dec rcx
+    jz .done
+.loop:
+    add rdi, 8
+    mov rax, [rdi]
+    cmp rax, rbx
+    jle .no_update
+    mov rbx, rax
+.no_update:
+    dec rcx
+    jnz .loop
+.done:
+    mov rax, rbx
+    pop r12
+    pop rbx
+    ret
+.empty:
     xor rax, rax
+    pop r12
+    pop rbx
     ret
     times RT_SEQ_MAX_SIZE - ($ - rt_seq_max) db 0x90
 
 ; ── rt_seq_contains (256B) ───────────────────────────────────────────────────
+; rdi = seq ptr, rsi = int64 value to find → rax = 1 (found) or 0 (not found)
 rt_seq_contains:
+    push rbx
+    mov rbx, rsi                ; value to find
+    mov rcx, [rdi]              ; len
+    test rcx, rcx
+    jz .not_found
+    lea rdi, [rdi+16]           ; data
+.loop:
+    cmp [rdi], rbx
+    je .found
+    add rdi, 8
+    dec rcx
+    jnz .loop
+.not_found:
     xor rax, rax
+    pop rbx
+    ret
+.found:
+    mov rax, 1
+    pop rbx
     ret
     times RT_SEQ_CONTAINS_SIZE - ($ - rt_seq_contains) db 0x90
 

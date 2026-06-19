@@ -29,7 +29,7 @@ extern codegen_emit_cmp_rbx_rax_setcc, codegen_emit_test_rax_jz
 extern codegen_output_rax
 extern codegen_emit_addsd_rax_rbx, codegen_emit_subsd_rax_rbx
 extern codegen_emit_mulsd_rax_rbx, codegen_emit_divsd_rax_rbx
-extern codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax
+extern codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax, codegen_emit_cvtsi2sd_rbx
 extern codegen_emit_bitwise_and_rax_rbx, codegen_emit_bitwise_or_rax_rbx
 extern codegen_emit_bitwise_xor_rax_rbx
 extern codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
@@ -66,7 +66,7 @@ extern codegen_cur_proto_seq_idx, proto_needs_r12_save, codegen_mark_r12_needed
 section .bss
 var_table:       resb VAR_ENTRY_SIZE * VAR_MAX
 var_count:       resq 1
-proto_table:     resb PROTO_ENTRY_SIZE * 32
+proto_table:     resb PROTO_ENTRY_SIZE * PROTO_MAX    ; BUG-01 fix: was * 32, must match PROTO_MAX=128
 global proto_count
 proto_count:     resq 1
 prot_body_depth: resq 1
@@ -84,8 +84,8 @@ when_cnt_stack:  resq 8
 when_stk_depth:  resq 1
 when_cond_mode:  resb 1
 when_mode_stack: resb 8
-fwd_ref_names:   resb 512
-fwd_ref_patches: resq 16
+fwd_ref_names:   resb 4096       ; BUG-14 fix: 128 entries * 32 bytes (was 512 = 16 entries)
+fwd_ref_patches: resq 128        ; BUG-14 fix: match PROTO_MAX=128 (was 16)
 fwd_ref_count:   resq 1
 decl_mutable:          resb 1
 decl_const:            resb 1
@@ -107,6 +107,8 @@ cur_call_proto_seq_idx: resq 1     ; O26: seq idx of called proto (saved before 
 section .data
 err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
+err_undef:   db "error: undefined variable",10   ; BUG-04
+err_undef_l  equ $ - err_undef
 fe_suffix: db "_fe",0
 when_tmp:  db "__when__",0
 le_name:   db "__le",0
@@ -180,22 +182,24 @@ fatal:
     syscall
 
 ; ── variable table ────────────────────────────────────────────────────────────
-; var_find: linear scan with byte-by-byte strcmp.
+; var_find: reverse linear scan (newest/innermost scope wins).
+; BUG-09 fix: scan from var_count-1 down to 0 so inner-scope vars shadow outer ones.
 ; VAR_ENTRY_SIZE=64=2^6, so index*64 = shl 6 (replaces imul).
 var_find:
     push rbx
     push rcx
     push rsi
     push rdi
-    xor rcx, rcx
+    mov rcx, [var_count]    ; start at var_count
+    test rcx, rcx
+    jz .nf                  ; no variables at all
+    dec rcx                 ; start at var_count - 1 (most-recent)
 .l:
-    cmp rcx, [var_count]
-    jge .nf
     mov rax, rcx
-    shl rax, 6          ; rax = rcx * 64 (VAR_ENTRY_SIZE = 64 = 2^6)
+    shl rax, 6              ; rax = rcx * 64 (VAR_ENTRY_SIZE = 64 = 2^6)
     lea rsi, [var_table]
     add rsi, rax
-    mov rdi, [rsp]      ; restore query name pointer
+    mov rdi, [rsp]          ; restore query name pointer (bottom of pushed regs)
 .c:
     movzx eax, byte [rdi]
     movzx edx, byte [rsi]
@@ -210,7 +214,9 @@ var_find:
     mov rax, rcx
     jmp .done
 .nx:
-    inc rcx
+    test rcx, rcx           ; was this the last (index 0) entry?
+    jz .nf
+    dec rcx
     jmp .l
 .nf:
     mov rax, -1
@@ -418,11 +424,10 @@ parse_factor:
     call lexer_next
     jmp .done
 .idn_skip:
-    mov rdi, 0
-    call codegen_emit_mov_eax_imm32
-    mov byte [cur_type], TYPE_INT
-    call lexer_next
-    jmp .done
+    ; BUG-04 fix: undefined variable must be a fatal error, not silent 0
+    lea rsi, [err_undef]
+    mov rdx, err_undef_l
+    call fatal
 .par:
     call lexer_next
     call parse_expr
@@ -900,10 +905,23 @@ parse_term:
     call codegen_emit_expr_restore_rbx
     cmp r12b, TYPE_FLOAT
     je .mulf
+    ; BUG-10 fix: right is float but left was int — promote left (rbx)
+    cmp byte [cur_type], TYPE_FLOAT
+    jne .mul_int
+    call codegen_emit_cvtsi2sd_rbx
+    call codegen_emit_mulsd_rax_rbx
+    mov byte [cur_type], TYPE_FLOAT
+    jmp .loop
+.mul_int:
     call codegen_emit_imul_rax_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .mulf:
+    ; BUG-10 fix: left is float, right may be int — promote right (rax)
+    cmp byte [cur_type], TYPE_INT
+    jne .mulf_do
+    call codegen_emit_cvtsi2sd_rax
+.mulf_do:
     call codegen_emit_mulsd_rax_rbx
     mov byte [cur_type], TYPE_FLOAT
     jmp .loop
@@ -916,10 +934,23 @@ parse_term:
     call codegen_emit_expr_restore_rbx
     cmp r12b, TYPE_FLOAT
     je .divf
+    ; BUG-10 fix: right is float but left was int — promote left (rbx)
+    cmp byte [cur_type], TYPE_FLOAT
+    jne .div_int
+    call codegen_emit_cvtsi2sd_rbx
+    call codegen_emit_divsd_rax_rbx
+    mov byte [cur_type], TYPE_FLOAT
+    jmp .loop
+.div_int:
     call codegen_emit_idiv_rbx_by_rax
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .divf:
+    ; BUG-10 fix: left is float, right may be int — promote right (rax)
+    cmp byte [cur_type], TYPE_INT
+    jne .divf_do
+    call codegen_emit_cvtsi2sd_rax
+.divf_do:
     call codegen_emit_divsd_rax_rbx
     mov byte [cur_type], TYPE_FLOAT
     jmp .loop
@@ -986,10 +1017,23 @@ parse_additive:
     je .addf
     cmp r12b, TYPE_STR
     je .adds
+    ; BUG-10 fix: if right operand is float but left was int, promote left (rbx) to float
+    cmp byte [cur_type], TYPE_FLOAT
+    jne .add_int
+    call codegen_emit_cvtsi2sd_rbx  ; convert left (rbx) int → float
+    call codegen_emit_addsd_rax_rbx
+    mov byte [cur_type], TYPE_FLOAT
+    jmp .loop
+.add_int:
     call codegen_emit_add_rax_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .addf:
+    ; BUG-10 fix: left is float, right may be int — promote right (rax)
+    cmp byte [cur_type], TYPE_INT
+    jne .addf_do
+    call codegen_emit_cvtsi2sd_rax
+.addf_do:
     call codegen_emit_addsd_rax_rbx
     mov byte [cur_type], TYPE_FLOAT
     jmp .loop
@@ -1018,10 +1062,23 @@ parse_additive:
     call codegen_emit_expr_restore_rbx
     cmp r12b, TYPE_FLOAT
     je .subf
+    ; BUG-10 fix: if right is float but left was int, promote left (rbx) to float
+    cmp byte [cur_type], TYPE_FLOAT
+    jne .sub_int
+    call codegen_emit_cvtsi2sd_rbx  ; convert left (rbx) int → float
+    call codegen_emit_subsd_rax_rbx
+    mov byte [cur_type], TYPE_FLOAT
+    jmp .loop
+.sub_int:
     call codegen_emit_sub_rax_rbx
     mov byte [cur_type], TYPE_INT
     jmp .loop
 .subf:
+    ; BUG-10 fix: left is float, right may be int — promote right (rax)
+    cmp byte [cur_type], TYPE_INT
+    jne .subf_do
+    call codegen_emit_cvtsi2sd_rax
+.subf_do:
     call codegen_emit_subsd_rax_rbx
     mov byte [cur_type], TYPE_FLOAT
     jmp .loop

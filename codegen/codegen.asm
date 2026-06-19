@@ -31,7 +31,7 @@ global cur_proto_is_unsafe, overflow_err_cnt, compiler_error_count
 global codegen_output_rax
 global codegen_emit_addsd_rax_rbx, codegen_emit_subsd_rax_rbx
 global codegen_emit_mulsd_rax_rbx, codegen_emit_divsd_rax_rbx
-global codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax
+global codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax, codegen_emit_cvtsi2sd_rbx
 global codegen_emit_bitwise_and_rax_rbx, codegen_emit_bitwise_or_rax_rbx
 global codegen_emit_bitwise_xor_rax_rbx
 global codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
@@ -256,30 +256,59 @@ actual_static_alloc_va: resq 1
 section .text
 
 ; ── internal emit helpers ─────────────────────────────────────────────────────
-; O32a: emit_b — no bounds check (buffer is 512 KB), no push rcx (caller-saved)
+; ── BUG-05/BUG-06 fatal error helpers ─────────────────────────────────────────
+; Called when output buffer overflows or jump/break/cont patch stack overflows.
+; Does not return.
+codegen_buf_overflow_fatal:
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [emit_buf_overflow_msg]
+    mov rdx, emit_buf_overflow_len
+    syscall
+    mov rax, 60
+    mov rdi, 1
+    syscall
+
+codegen_jmp_stack_overflow_fatal:
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [jmp_stack_overflow_msg]
+    mov rdx, jmp_stack_overflow_len
+    syscall
+    mov rax, 60
+    mov rdi, 1
+    syscall
+
+; O32a: emit_b — bounds-checked write of 1 byte to out_buffer (BUG-05)
 emit_b:
     push rbx
     mov rbx, [out_idx]
+    cmp rbx, 524287             ; BUG-05: guard: 512KB-1 (last valid byte index)
+    jg codegen_buf_overflow_fatal
     lea rcx, [out_buffer]
     mov [rcx+rbx], al
     inc rbx
     mov [out_idx], rbx
     pop rbx
     ret
-; O32b: emit_d — same treatment
+; O32b: emit_d — bounds-checked write of 4 bytes (BUG-05)
 emit_d:
     push rbx
     mov rbx, [out_idx]
+    cmp rbx, 524284             ; BUG-05: guard: 512KB-4
+    jg codegen_buf_overflow_fatal
     lea rcx, [out_buffer]
     mov [rcx+rbx], eax
     add rbx, 4
     mov [out_idx], rbx
     pop rbx
     ret
-; O32c: emit_q — same treatment
+; O32c: emit_q — bounds-checked write of 8 bytes (BUG-05)
 emit_q:
     push rbx
     mov rbx, [out_idx]
+    cmp rbx, 524280             ; BUG-05: guard: 512KB-8
+    jg codegen_buf_overflow_fatal
     lea rcx, [out_buffer]
     mov [rcx+rbx], rax
     add rbx, 8
@@ -317,9 +346,9 @@ codegen_write_headers:
     cld
     rep movsb
     lea rsi, [program_header]
-    mov rcx, 56
+    mov rcx, 112           ; SEC-04/05 fix: 2 program headers * 56 bytes each (was 56)
     rep movsb
-    mov qword [out_idx], 120
+    mov qword [out_idx], 176   ; SEC-04/05 fix: 64 + 112 = 176 (was 120)
     ret
 
 codegen_init:
@@ -701,6 +730,8 @@ codegen_emit_cmp_var_jne:
     call emit_b
     mov rax, [out_idx]
     mov rbx, [jump_patch_depth]
+    cmp rbx, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [jump_patch_stack]
     mov [rcx+rbx*8], rax
     inc qword [jump_patch_depth]
@@ -724,6 +755,8 @@ codegen_patch_jump:
 codegen_save_chain_base:
     mov rax, [end_jump_depth]
     mov rbx, [chain_base_depth]
+    cmp rbx, 32                        ; BUG-06 guard: chain_base_stack capacity
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [chain_base_stack]
     mov [rcx+rbx*8], rax
     inc qword [chain_base_depth]
@@ -734,6 +767,8 @@ codegen_emit_jmp_end:
     call emit_b
     mov rax, [out_idx]
     mov rbx, [end_jump_depth]
+    cmp rbx, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [end_jump_stack]
     mov [rcx+rbx*8], rax
     inc qword [end_jump_depth]
@@ -815,6 +850,8 @@ codegen_emit_for_start:
     mov r13, rdx
     mov rax, [break_jump_depth]
     mov rbx, [break_base_depth]
+    cmp rbx, 32                        ; BUG-06 guard: break_base_stack capacity
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [break_base_stack]
     mov [rcx+rbx*8], rax
     inc qword [break_base_depth]
@@ -1015,6 +1052,8 @@ codegen_emit_for_start:
     call emit_b
     mov rax, [out_idx]
     mov r13, [jump_patch_depth]
+    cmp r13, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [jump_patch_stack]
     mov [rcx+r13*8], rax
     inc qword [jump_patch_depth]
@@ -2506,6 +2545,8 @@ codegen_emit_for_start_dyn:
     ; for_step_val already set by parser via codegen_set_for_step; do not reset here
     mov rax, [break_jump_depth]
     mov r14, [break_base_depth]
+    cmp r14, 32                        ; BUG-06 guard: break_base_stack capacity
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [break_base_stack]
     mov [rcx+r14*8], rax
     inc qword [break_base_depth]
@@ -2540,6 +2581,8 @@ codegen_emit_for_start_dyn:
     call emit_b
     mov rax, [out_idx]
     mov r14, [jump_patch_depth]
+    cmp r14, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [jump_patch_stack]
     mov [rcx+r14*8], rax
     inc qword [jump_patch_depth]
@@ -2814,6 +2857,8 @@ codegen_o31_scan_and_flush:
 codegen_emit_loop_base:
     mov rax, [break_jump_depth]
     mov rbx, [break_base_depth]
+    cmp rbx, 32                        ; BUG-06 guard: break_base_stack capacity
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [break_base_stack]
     mov [rcx+rbx*8], rax
     inc qword [break_base_depth]
@@ -2856,6 +2901,8 @@ codegen_emit_break:
     call emit_b
     mov rax, [out_idx]
     mov rbx, [break_jump_depth]
+    cmp rbx, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [break_jump_stack]
     mov [rcx+rbx*8], rax
     inc qword [break_jump_depth]
@@ -2888,6 +2935,8 @@ codegen_patch_breaks:
 codegen_push_cont:
     ; push cont_pc with type=0 (while/repeat — skip uses backward jmp)
     mov rax, [cont_base_depth]
+    cmp rax, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [cont_base_stack]
     mov [rcx+rax*8], rdi
     lea rcx, [cont_type_stack]
@@ -2898,6 +2947,8 @@ codegen_push_cont:
 codegen_push_cont_for:
     ; push cont_pc with type=1 (for loop — skip uses forward jmp placeholder)
     mov rax, [cont_base_depth]
+    cmp rax, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [cont_base_stack]
     mov [rcx+rax*8], rdi
     lea rcx, [cont_type_stack]
@@ -2987,6 +3038,8 @@ codegen_emit_skip:
     call emit_b                        ; emit_b preserves rbx (target cont level)
     mov rax, [out_idx]
     mov rdx, [skip_jump_depth]
+    cmp rdx, 64                        ; BUG-06 guard: skip_jump_stack capacity
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [skip_jump_stack]
     mov [rcx+rdx*8], rax               ; save operand position
     lea rcx, [skip_target_stack]
@@ -4616,6 +4669,8 @@ codegen_emit_test_rax_jz:
     call emit_b
     mov rax, [out_idx]
     mov rbx, [jump_patch_depth]
+    cmp rbx, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [jump_patch_stack]
     mov [rcx+rbx*8], rax
     inc qword [jump_patch_depth]
@@ -4637,6 +4692,8 @@ codegen_emit_test_rax_jnz:
     call emit_b
     mov rax, [out_idx]
     mov rbx, [jump_patch_depth]
+    cmp rbx, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [jump_patch_stack]
     mov [rcx+rbx*8], rax
     inc qword [jump_patch_depth]
@@ -4923,6 +4980,31 @@ codegen_emit_cvtsi2sd_rax:
     mov al, 0x7E
     call emit_b
     mov al, 0xC0
+    call emit_b
+    ret
+
+; BUG-10 fix: same as cvtsi2sd_rax but for rbx (ModRM C3 = xmm0/rbx)
+codegen_emit_cvtsi2sd_rbx:
+    ; cvtsi2sd xmm0,rbx; movq rbx,xmm0
+    mov al, 0xF2
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x2A
+    call emit_b
+    mov al, 0xC3        ; ModRM: 11 000 011 = xmm0, rbx
+    call emit_b
+    mov al, 0x66
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x7E
+    call emit_b
+    mov al, 0xC3        ; ModRM: 11 000 011 = xmm0, rbx (store xmm0→rbx)
     call emit_b
     ret
 
@@ -5883,6 +5965,8 @@ codegen_emit_exit1:
 codegen_push_loop_else_flag:
     ; rdi = flag_var_idx  (-1 = sentinel / no flag for this loop)
     mov rax, [loop_else_flag_depth]
+    cmp rax, 32                        ; BUG-06 guard: loop_else_flag_stack capacity
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [loop_else_flag_stack]
     mov [rcx+rax*8], rdi
     inc qword [loop_else_flag_depth]
@@ -5941,6 +6025,8 @@ codegen_emit_each_start:
     ; push break base (same as codegen_emit_loop_base)
     mov rax, [break_jump_depth]
     mov rbx, [break_base_depth]
+    cmp rbx, 32                        ; BUG-06 guard: break_base_stack capacity
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [break_base_stack]
     mov [rcx+rbx*8], rax
     inc qword [break_base_depth]
@@ -6003,6 +6089,8 @@ codegen_emit_each_start:
     call emit_b
     mov rax, [out_idx]
     mov rbx, [jump_patch_depth]
+    cmp rbx, 32                        ; BUG-06: guard (stack resq 32)
+    jge codegen_jmp_stack_overflow_fatal
     lea rcx, [jump_patch_stack]
     mov [rcx+rbx*8], rax
     inc qword [jump_patch_depth]
@@ -7340,6 +7428,11 @@ codegen_emit_clock_ms:
     ret
 
 section .data
+; BUG-05/06 error messages for fatal overflow handlers
+emit_buf_overflow_msg: db "error: compiler output buffer overflow",10
+emit_buf_overflow_len  equ $ - emit_buf_overflow_msg
+jmp_stack_overflow_msg: db "error: if/loop nesting depth exceeded",10
+jmp_stack_overflow_len  equ $ - jmp_stack_overflow_msg
 ; O32d: 55-byte clock_gettime sequence as a blob for single emit_blob call
 ; (replaces 40 sequential call emit_b)
 clock_ms_blob:

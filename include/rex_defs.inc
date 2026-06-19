@@ -185,7 +185,7 @@ PROTO_MAX        equ 128  ; expanded from 32
 ; ── Memory layout ─────────────────────────────────────────────────────────────
 VAR_STORAGE_BASE equ 4456448
 LOAD_BASE equ 4194304
-HEADERS_SIZE equ 120
+HEADERS_SIZE equ 176   ; SEC-04/05 fix: 64 (ELF hdr) + 2*56 (PT_LOAD + PT_GNU_STACK)
 
 ; ── Runtime blob sizes (existing — do NOT change) ─────────────────────────────
 RT_PRI_SIZE equ 512
@@ -245,20 +245,23 @@ RT_STATIC_ALLOC_SIZE equ 256
 RT_TOTAL_SIZE equ 8448   ; original value — new blobs appended after existing
 
 ; ── Existing blob offsets (from LOAD_BASE + HEADERS_SIZE) ────────────────────
-RT_PRI_OFFSET equ 125
-RT_PRS_OFFSET equ 637
-RT_PRB_OFFSET equ 1149
-RT_PRF_OFFSET equ 1405
-RT_PRC_OFFSET equ 1917
-RT_SIP_OFFSET equ 2429
-RT_ALC_OFFSET equ 3453
-RT_PRQ_OFFSET equ 7549
-CODE_START equ 8573
+; SEC-04/05 fix: all offsets increased by +56 because HEADERS_SIZE grew from 120 to 176
+; (added one PT_GNU_STACK program header = 56 bytes before the runtime blobs)
+RT_PRI_OFFSET equ 181
+RT_PRS_OFFSET equ 693
+RT_PRB_OFFSET equ 1205
+RT_PRF_OFFSET equ 1461
+RT_PRC_OFFSET equ 1973
+RT_SIP_OFFSET equ 2485
+RT_ALC_OFFSET equ 3509
+RT_PRQ_OFFSET equ 7605
+CODE_START equ 8629
 
-; ── V5.0 new blob offsets (after existing 8448 bytes = CODE_START - 125 + 8448)
+; ── V5.0 new blob offsets (after existing 8448 bytes)
 ; These are calculated as: EXISTING_OFFSET + RT_TOTAL_SIZE
-; Base for new blobs = RT_PRQ_OFFSET + RT_PRQ_SIZE = 7549 + 1024 = 8573
-; But CODE_START was 8573, which means the code starts right after PRQ.
+; Base for new blobs = RT_PRQ_OFFSET + RT_PRQ_SIZE = 7605 + 1024 = 8629
+; SEC-04/05: all offsets shifted +56 from original values due to HEADERS_SIZE change.
+; CODE_START = 8629 means the user-code JMP is emitted right after the last blob (PRQ).
 ; New blobs are appended BEFORE the code start by including them in the binary.
 ; The actual offsets will be recalculated by runtime.asm include order.
 ; For now, define symbolic offsets for use in codegen dispatch.

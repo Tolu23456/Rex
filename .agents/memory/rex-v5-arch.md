@@ -30,12 +30,13 @@ description: Key decisions, bugs, offsets, and conventions for the Rex V5.0 NASM
 - `VAR_STORAGE_BASE=0x440000`. `get_var_va(idx)` returns `0x440000 + idx*64`.
 - `cur_type` (resb 1 in parser.bss) holds type of last expression atom for output dispatch.
 
-## Expression Parser — Type Propagation (IMPLEMENTED)
-- `parse_additive` and `parse_term` now push r14 at entry (callee-saved; popped at all exits).
-- After each binary op (`+`, `-`, `*`, `/`), if LHS type (saved in r14d via `movzx r14d, [cur_type]`)
-  was TYPE_FLOAT, set `[cur_type] = TYPE_FLOAT` (float dominates). Mod (`%`) always yields int.
-- **Why:** previously cur_type only reflected the last atom; mixed-type sums gave wrong output routing.
-- **How to apply:** every `pop r14; leave; ret` must appear at ALL exits of parse_additive/parse_term.
+## Expression Parser — Type Propagation (FULLY IMPLEMENTED — BUG-10)
+- All four combinations of int/float now promote correctly in `parse_additive` and `parse_term`.
+- float+int (addf/subf/mulf/divf): after right parse, if `[cur_type]==TYPE_INT`, emits `codegen_emit_cvtsi2sd_rax` before the float op.
+- int+float (.add/.sub/.mul/.div): after right parse, if `[cur_type]==TYPE_FLOAT`, emits `codegen_emit_cvtsi2sd_rbx` (new helper) before the float op.
+- `codegen_emit_cvtsi2sd_rbx`: added to codegen.asm (same as cvtsi2sd_rax but ModRM byte = 0xC3 for rbx). Exported as global; extern'd in parser.asm.
+- **Why:** previously only LHS type (r12b) was checked; int+float used int codegen, losing precision.
+- **Rule:** always check BOTH [r12b] (left) and [cur_type] (right after parse) at binary op sites.
 
 ## Proto Table Entry Layout (48 bytes) — FINALIZED
 - [0..31]=name (null-padded), [32..39]=out_idx offset (qword), [40]=param_count (byte),
@@ -59,6 +60,23 @@ description: Key decisions, bugs, offsets, and conventions for the Rex V5.0 NASM
 ## overflow guard in emit_b (FIXED)
 - If `out_idx >= 131071`, emit_b now calls `rt_err_blob` and halts instead of silently overwriting.
 - Buffer is 128KB (`out_buffer resb 131072` in codegen BSS).
+
+## Agent-Report Bug Fixes (June 2026 batch — reports/agent01..30)
+All 21 agent reports swept; the following bugs fixed:
+- **BUG-01:** `proto_table: resb PROTO_ENTRY_SIZE * PROTO_MAX` (was *32, now *128).
+- **BUG-04:** `idn_skip` in parse_factor now calls `fatal` on undefined identifier (was silent zero).
+- **BUG-05:** `emit_b/d/q` have bounds checks; overflow calls `codegen_buf_overflow_fatal`.
+- **BUG-06:** ALL jump/loop stack push sites now have `cmp depth, cap; jge codegen_jmp_stack_overflow_fatal`. Stacks covered: jump_patch, end_jump, chain_base, break_jump, break_base (×4 push sites), cont_base (×2), skip_jump, loop_else_flag.
+- **BUG-07:** `rt_seq_sort` implements insertion sort (was `ret` stub).
+- **BUG-08:** `.enl` in lexer now does `inc dword [tok_line]`.
+- **BUG-09:** `var_find` reverse-scans var_table (index N-1 → 0), so inner-scope shadows win.
+- **BUG-10:** Full int↔float promotion in parse_additive and parse_term (see separate entry above).
+- **BUG-12:** `rt_pri` special-cases `INT64_MIN` before `neg` to avoid 2's-complement overflow.
+- **BUG-14:** `fwd_ref_names/patches` increased from 16 to 128 entries.
+- **BUG-15/SEC-06:** `src_buffer` 64KB→1MB; truncation check adds fatal error if read==1MB.
+- **SEC-04/05:** `PT_GNU_STACK` program header added; `HEADERS_SIZE` 120→176; all `RT_*_OFFSET` values updated (+56); `codegen_write_headers` copies 112 bytes.
+- **rt_math_exp/log/pow:** implemented via x87 (were `xorpd xmm0,xmm0; ret` stubs). exp uses `fldl2e+fmulp+f2xm1+fscale`; log uses `fldln2+fyl2x`; pow uses `fyl2x+f2xm1+fscale`. All fit within 256B size slots.
+- **rt_alc overflow:** guard added: `cmp rbx, 0x7FFFFFFFFFFFFFF8; ja .oom` before the alignment arithmetic, with `.oom` calling `rt_prq` with an OOM message.
 
 ## Float Return Type Through Protocol (FIXED)
 - `proto_ret_type` BSS in parser.asm mirrors [entry+47] from proto_table.

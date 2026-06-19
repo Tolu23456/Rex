@@ -13,7 +13,7 @@ elf_header:
     dd 0
     dw 64
     dw 56
-    dw 1
+    dw 2           ; SEC-04/05 fix: e_phnum = 2 (PT_LOAD + PT_GNU_STACK)
     dw 0
     dw 0
     dw 0
@@ -26,4 +26,14 @@ program_header:
     dq 0x80000
     dq 0x80000
     dq 0x1000
+; SEC-04/05 fix: PT_GNU_STACK with no-execute flag (PF_R|PF_W only)
+gnu_stack_header:
+    dd 0x6474e551   ; p_type = PT_GNU_STACK
+    dd 6            ; p_flags = PF_R|PF_W (no PF_X — disables exec stack)
+    dq 0            ; p_offset
+    dq 0            ; p_vaddr
+    dq 0            ; p_paddr
+    dq 0            ; p_filesz
+    dq 0            ; p_memsz
+    dq 0x10         ; p_align
 out_name: db "output",0
