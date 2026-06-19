@@ -42,7 +42,7 @@ global codegen_emit_frame_prologue, codegen_emit_leave, codegen_emit_jmp_prot
 global codegen_peephole
 global codegen_emit_str_rax
 global codegen_emit_seq_alloc, codegen_emit_seq_push, codegen_emit_seq_pop_rax
-global codegen_emit_seq_len_rax
+global codegen_emit_seq_len_rax, codegen_emit_seq_elem_load
 global codegen_emit_mov_rdi_rax, codegen_emit_call_rt_err
 global codegen_emit_for_start_dyn, codegen_emit_arg_pops
 global codegen_push_cont, codegen_pop_cont, codegen_emit_skip
@@ -640,7 +640,36 @@ codegen_output_rax:
 
 ; ── assign / bool ─────────────────────────────────────────────────────────────
 codegen_emit_assign_var:
-    ; rdi=var_idx rsi=value: emit mov rax,imm64; mov [var_addr],rax
+    ; rdi=var_idx rsi=value: emit mov rax,imm; mov [var_addr],rax
+    ; PERF-07: Use immediate store if value fits in 32 bits.
+    mov rax, rsi
+    cmp rax, 0x7FFFFFFF
+    ja .long_val
+    cmp rax, -0x80000000
+    jl .long_val
+
+    ; fits in 32-bit signed: mov qword [var_addr], imm32
+    ; Encoding: 48 C7 04 25 <addr32> <imm32>
+    push rdi
+    push rax
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rax
+    pop rdi
+    push rax
+    call get_var_va
+    call emit_d
+    pop rax
+    call emit_d
+    ret
+
+.long_val:
     push rdi
     mov al, 0x48
     call emit_b
@@ -3076,8 +3105,54 @@ codegen_emit_mov_eax_imm32:
     ret
 
 codegen_emit_mov_rax_imm64:
-    ; rdi=imm64: emit movabs rax, imm64 (48 B8 + 8 bytes)
-    ; Used for float literals which carry 64-bit IEEE 754 bit patterns.
+    ; rdi=imm64: emit mov rax, imm (PERF-02/03 optimized)
+    ; Used for literals (ints and floats).
+    mov rax, rdi
+    test rax, rax
+    jnz .non_zero
+
+    ; PERF-02: mov rax, 0 -> xor eax, eax (2 bytes)
+    mov al, 0x31
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    ret
+
+.non_zero:
+    ; PERF-03: If fits in 32-bit unsigned, use 5-byte mov eax, imm32
+    ; x86-64 zero-extends 32-bit loads to 64-bit rax automatically.
+    mov rdx, rax
+    shr rdx, 32
+    test rdx, rdx
+    jnz .try_signed_32
+
+    mov al, 0xB8
+    call emit_b
+    mov eax, edi
+    call emit_d
+    ret
+
+.try_signed_32:
+    ; If fits in 32-bit signed, use 7-byte mov rax, imm32 (48 C7 C0 ...)
+    ; This is shorter than 10-byte movabs (48 B8 ...).
+    mov rax, rdi
+    cmp rax, 0x7FFFFFFF
+    ja .long_64
+    cmp rax, -0x80000000
+    jl .long_64
+
+    mov al, 0x48
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov eax, edi
+    call emit_d
+    ret
+
+.long_64:
+    ; 10-byte movabs rax, imm64 (48 B8 + 8 bytes)
     push rdi
     mov al, 0x48
     call emit_b
@@ -3793,8 +3868,8 @@ codegen_emit_not_rax:
     ret
 
 codegen_emit_lnot_int_rax:
-    ; Integer logical-NOT: test rax,rax; setz al; movzx rax,al
-    ; bytes: 48 85 C0  0F 94 C0  48 0F B6 C0
+    ; Integer logical-NOT: test rax,rax; setz al; movzx eax,al
+    ; PERF-11: use 32-bit movzx (0F B6 C0) instead of 64-bit (48 0F B6 C0)
     mov al, 0x48
     call emit_b
     mov al, 0x85
@@ -3806,8 +3881,6 @@ codegen_emit_lnot_int_rax:
     mov al, 0x94
     call emit_b
     mov al, 0xC0
-    call emit_b
-    mov al, 0x48
     call emit_b
     mov al, 0x0F
     call emit_b
@@ -4606,7 +4679,7 @@ codegen_emit_cmp_rbx_rax_setcc:
     jne .cmp_normal
     cmp byte [rcx+13], 0xD3
     jne .cmp_normal
-    ; Match: rewind 14 bytes, emit cmp r12,K (49 83 FC K) + setCC al + movzx rax,al
+    ; Match: rewind 14 bytes, emit cmp r12,K (49 83 FC K) + setCC al + movzx eax,al
     sub rax, 14
     mov [out_idx], rax
     mov al, 0x49
@@ -4623,8 +4696,7 @@ codegen_emit_cmp_rbx_rax_setcc:
     call emit_b
     mov al, 0xC0
     call emit_b
-    mov al, 0x48
-    call emit_b
+    ; PERF-11: use 32-bit movzx
     mov al, 0x0F
     call emit_b
     mov al, 0xB6
@@ -4645,8 +4717,7 @@ codegen_emit_cmp_rbx_rax_setcc:
     call emit_b
     mov al, 0xC0
     call emit_b
-    mov al, 0x48
-    call emit_b
+    ; PERF-11: use 32-bit movzx
     mov al, 0x0F
     call emit_b
     mov al, 0xB6
@@ -4702,7 +4773,8 @@ codegen_emit_test_rax_jnz:
     ret
 
 codegen_emit_normalize_bool_rax:
-    ; emit: test rax,rax; setnz al; movzx rax,al
+    ; emit: test rax,rax; setnz al; movzx eax,al
+    ; PERF-11: use 32-bit movzx (REX.W not needed as it zero-extends)
     mov al, 0x48
     call emit_b
     mov al, 0x85
@@ -4715,8 +4787,7 @@ codegen_emit_normalize_bool_rax:
     call emit_b
     mov al, 0xC0
     call emit_b
-    mov al, 0x48
-    call emit_b
+    ; movzx eax, al = 0F B6 C0
     mov al, 0x0F
     call emit_b
     mov al, 0xB6
@@ -5627,6 +5698,22 @@ codegen_emit_seq_len_rax:
     pop rdi
     ret
 
+codegen_emit_seq_elem_load:
+    ; Emits: mov rax, [rbx+rax*8+16]   (5 bytes: 48 8B 44 C3 10)
+    ; Call after codegen_emit_pop_rbx (rbx=seq_ptr) with rax=index
+    ; Loads the element at index from the seq header [ptr+16 + index*8]
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x44
+    call emit_b
+    mov al, 0xC3
+    call emit_b
+    mov al, 0x10
+    call emit_b
+    ret
+
 codegen_emit_mov_rdi_rax:
     ; emit: mov rdi,rax
     mov al, 0x48
@@ -5865,29 +5952,25 @@ codegen_emit_swap_vars:
 
 ; ── abs(rax) ─────────────────────────────────────────────────────────────────
 codegen_emit_abs_rax:
-    ; emit: mov rbx,rax; neg rax; cmovns rax,rbx
-    ; mov rbx,rax  : 48 89 C3
+    ; PERF: use cqo; xor; sub for abs(rax) (8 bytes vs 11 bytes)
+    ; cqo            : 48 99
     mov al, 0x48
     call emit_b
-    mov al, 0x89
+    mov al, 0x99
     call emit_b
-    mov al, 0xC3
-    call emit_b
-    ; neg rax      : 48 F7 D8
+    ; xor rax,rdx    : 48 31 D0
     mov al, 0x48
     call emit_b
-    mov al, 0xF7
+    mov al, 0x31
     call emit_b
-    mov al, 0xD8
+    mov al, 0xD0
     call emit_b
-    ; cmovs rax,rbx : 48 0F 48 C3  (if SF=1 after neg, original was positive — keep rbx)
+    ; sub rax,rdx    : 48 29 D0
     mov al, 0x48
     call emit_b
-    mov al, 0x0F
+    mov al, 0x29
     call emit_b
-    mov al, 0x48
-    call emit_b
-    mov al, 0xC3
+    mov al, 0xD0
     call emit_b
     ret
 

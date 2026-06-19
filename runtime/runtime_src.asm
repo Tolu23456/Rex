@@ -68,15 +68,15 @@ rt_pri:
     mov rax, 0x8000000000000000
     cmp r12, rax
     jne .not_min
-    add rsp, 24
-    pop r13
-    pop r12
-    pop rbx
     lea rsi, [rel .min_str]
     mov rdx, 21                 ; length of "-9223372036854775808\n"
     mov rax, 1
     mov rdi, 1
     syscall
+    add rsp, 24
+    pop r13
+    pop r12
+    pop rbx
     ret
 .not_min:
     lea r13, [rsp+23]
@@ -127,18 +127,23 @@ rt_prs:
     push rbx
     push r12
     mov r12, rdi            ; preserve string pointer (r12 callee-saved)
+    test r12, r12
+    jz .done                ; skip if null
     ; strlen: scan for NUL using repne scasb
     xor eax, eax            ; al = 0 (NUL byte)
     mov rcx, -1
     repne scasb             ; rdi advances; ecx = -(len+2)
     not rcx                 ; rcx = len+1
     lea rbx, [rcx-1]        ; rbx = len (without NUL)
+    test rbx, rbx
+    jz .newline             ; just newline for empty string
     ; sys_write(1, r12, rbx)
     mov rax, 1
     mov rdi, 1
     mov rsi, r12
     mov rdx, rbx
     syscall
+.newline:
     ; print newline (red-zone trick)
     mov byte [rsp-8], 10
     lea rsi, [rsp-8]
@@ -146,6 +151,7 @@ rt_prs:
     mov rdi, 1
     mov rdx, 1
     syscall
+.done:
     pop r12
     pop rbx
     ret
@@ -190,6 +196,30 @@ rt_prf:
     mov r12, rsp            ; output buffer
     xor r13, r13            ; output index
     mov rax, rdi            ; float bits
+    
+    ; check for infinity (exponent all 1s, mantissa 0)
+    mov rdx, rax
+    mov rcx, 0x7FFFFFFFFFFFFFFF
+    and rdx, rcx ; clear sign
+    mov rcx, 0x7FF0000000000000 ; infinity pattern
+    cmp rdx, rcx
+    jne .not_inf
+    
+    ; it is infinity or NaN (if mantissa != 0)
+    ; for now just "inf"
+    test rax, rax
+    jns .inf_pos
+    mov byte [r12+r13], '-'
+    inc r13
+.inf_pos:
+    mov byte [r12+r13], 'i'
+    mov byte [r12+r13+1], 'n'
+    mov byte [r12+r13+2], 'f'
+    add r13, 3
+    jmp .wr_final
+
+.not_inf:
+    mov rax, rdi
     test rax, rax
     jns .abv
     mov byte [r12+r13], '-'
@@ -245,6 +275,7 @@ rt_prf:
     inc r13
     dec r14
     jnz .frl
+.wr_final:
     mov byte [r12+r13], 10
     inc r13
     mov rax, 1
@@ -350,12 +381,50 @@ rt_alc:
     push rbx
     mov rbx, rdi            ; rbx = requested size
     ; guard against integer overflow in alignment arithmetic (huge size)
-    cmp rbx, 0x7FFFFFFFFFFFFFF8  ; if size > sane max, treat as OOM
+    mov rax, 0x7FFFFFFFFFFFFFF8
+    cmp rbx, rax  ; if size > sane max, treat as OOM
     ja .oom
     add rbx, 7              ; align to 8 bytes
     and rbx, -8
-    cmp qword [0x401D75], 0 ; mode == 0 (arena)?
-    jne .pool               ; non-zero → pool mode
+    
+    ; check mode at offset 402 from rt_alc
+    ; wait, the file shows:
+    ; 399: times 4072 - ($ - rt_alc) db 0x90
+    ; 400: .pool_base: dq 0
+    ; 401: .pool_bump: dq 0
+    ; 402: .mode: dq 0
+    ; These are NOT at offsets 400, 401, 402. They are AFTER 4072 bytes of padding.
+    ; So .mode is at offset 4072 + 8 + 8 = 4088.
+    ; But the current code uses [0x401D75] which is an absolute address.
+    ; This is BAD because the runtime is loaded at a dynamic address (LOAD_BASE + offset).
+    ; We must use RIP-relative or relative to rt_alc.
+    
+    mov rax, [rel .mode]
+    test rax, rax           ; mode == 0 (arena/mmap)?
+    jz .mmap                ; zero → mmap mode
+.pool:
+    ; mode != 0 → pool mode
+    mov rax, [rel .pool_base]
+    test rax, rax           ; pool_base == 0 (first use)?
+    jnz .pool_alloc
+    
+    push rbx                ; save aligned size across mmap
+    mov rax, 9
+    xor rdi, rdi
+    mov esi, 67108864       ; 64 MB
+    mov rdx, 3
+    mov r10d, 0x22          ; MAP_PRIVATE | MAP_ANONYMOUS
+    mov r8, -1
+    xor r9d, r9d
+    syscall                 ; rax = pool base ptr
+    pop rbx
+    mov qword [rel .pool_base], rax   ; pool_base = ptr
+    mov qword [rel .pool_bump], rax   ; pool_bump = ptr
+.pool_alloc:
+    mov rax, qword [rel .pool_bump]   ; rax = current bump (= allocation address)
+    add qword [rel .pool_bump], rbx   ; advance bump by aligned size
+    pop rbx
+    ret
 .mmap:
     test rbx, rbx
     jnz .mmap_sz
@@ -369,26 +438,6 @@ rt_alc:
     mov r8, -1              ; fd = -1
     xor r9d, r9d            ; offset = 0
     syscall
-    pop rbx
-    ret
-.pool:
-    cmp qword [0x401D65], 0 ; pool_base == 0 (first use)?
-    jne .pool_alloc
-    push rbx                ; save aligned size across mmap
-    mov rax, 9
-    xor rdi, rdi
-    mov esi, 67108864       ; 64 MB
-    mov rdx, 3
-    mov r10d, 0x22          ; MAP_PRIVATE | MAP_ANONYMOUS
-    mov r8, -1
-    xor r9d, r9d
-    syscall                 ; rax = pool base ptr
-    pop rbx
-    mov qword [0x401D65], rax   ; pool_base = ptr
-    mov qword [0x401D6D], rax   ; pool_bump = ptr
-.pool_alloc:
-    mov rax, qword [0x401D6D]   ; rax = current bump (= allocation address)
-    add qword [0x401D6D], rbx   ; advance bump by aligned size
     pop rbx
     ret
 .oom:
@@ -433,6 +482,14 @@ rt_str_cat:
     push r14
     push r15
     ; rdi=ptr1, rsi=len1, rdx=ptr2, rcx=len2
+    
+    ; BUG-11 fix: check if either exceeds 1GB
+    mov rax, 0x40000000 ; 1GB
+    cmp rsi, rax
+    jae .overflow
+    cmp rcx, rax
+    jae .overflow
+    
     ; check for integer overflow in sum
     mov rax, rsi
     add rax, rcx
@@ -567,7 +624,7 @@ rt_str_find:
     mov rsi, r14
     mov rcx, rbx
     repe cmpsb
-    pop rcx
+    pop rcx ; BUG-13 fix: restore rcx after repe cmpsb
     pop rdi
     pop rsi
     je .found
@@ -588,7 +645,7 @@ rt_str_find:
     mov rsi, r14
     mov rcx, rbx
     repe cmpsb
-    pop rcx
+    pop rcx ; BUG-13 fix: restore rcx after repe cmpsb
     pop rdi
     pop rsi
     je .found
@@ -613,12 +670,14 @@ rt_str_find:
 
 ; ── rt_str_len (128B) ────────────────────────────────────────────────────────
 rt_str_len:
+    push rdi
     xor eax, eax
     mov rcx, -1
     repne scasb
     not rcx
     dec rcx
     mov rax, rcx
+    pop rdi
     ret
     times RT_STR_LEN_SIZE - ($ - rt_str_len) db 0x90
 
@@ -1529,8 +1588,63 @@ rt_seq_contains:
 
 ; ── rt_seq_reverse (256B) ────────────────────────────────────────────────────
 rt_seq_reverse:
+    mov rcx, [rdi] ; len
+    test rcx, rcx
+    jz .done
+    cmp rcx, 1
+    jle .done
+    lea rsi, [rdi+16] ; start
+    lea rdx, [rdi+16+rcx*8-8] ; end
+.lp:
+    cmp rsi, rdx
+    jge .done
+    mov rax, [rsi]
+    mov rbx, [rdx]
+    mov [rsi], rbx
+    mov [rdx], rax
+    add rsi, 8
+    sub rdx, 8
+    jmp .lp
+.done:
     ret
     times RT_SEQ_REVERSE_SIZE - ($ - rt_seq_reverse) db 0x90
+
+; ── rt_seq_pop (256B) ────────────────────────────────────────────────────────
+; rdi = seq ptr → rax = popped value (0 if empty)
+rt_seq_pop:
+    mov rcx, [rdi] ; len
+    test rcx, rcx
+    jz .empty
+    dec rcx
+    mov [rdi], rcx ; update len
+    mov rax, [rdi+rcx*8+16] ; load value
+    ret
+.empty:
+    xor rax, rax
+    ret
+    times 256 - ($ - rt_seq_pop) db 0x90
+
+; ── rt_str_idx (256B) ────────────────────────────────────────────────────────
+; rdi = str ptr, rsi = index → rax = new single-char string ptr
+rt_str_idx:
+    push rbx
+    push r12
+    push r13
+    mov r12, rdi
+    mov r13, rsi
+    ; allocate 2 bytes (1 char + NUL)
+    mov rdi, 2
+    call rt_alc
+    mov rbx, rax
+    mov al, [r12+r13]
+    mov [rbx], al
+    mov byte [rbx+1], 0
+    mov rax, rbx
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times 256 - ($ - rt_str_idx) db 0x90
 
 ; ── rt_heap_alloc (1024B) ────────────────────────────────────────────────────
 rt_heap_alloc:

@@ -89,6 +89,7 @@ TOK_MEMO        equ 86
 TOK_MEMO_RESET  equ 87
 TOK_DOT         equ 88
 TOK_CLOCK       equ 89
+TOK_TYPE_DICT   equ 123
 
 ; ── V5.0 new tokens ───────────────────────────────────────────────────────────
 TOK_CONST       equ 90   ; 'const' keyword

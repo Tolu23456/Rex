@@ -59,6 +59,7 @@ extern codegen_set_for_step
 extern codegen_push_loop_else_flag, codegen_pop_loop_else_flag
 extern codegen_emit_each_start, codegen_emit_each_end
 extern codegen_emit_zero_var
+extern codegen_emit_seq_elem_load
 extern codegen_emit_memo_reset
 extern codegen_skip_pin_save
 extern o13_inhibit
@@ -167,19 +168,104 @@ strcat_local:
     pop rbx
     ret
 
+    extern out_idx, tok_line, tok_col
+    section .data
+    err_at_line: db "error at line "
+    err_at_line_l equ $ - err_at_line
+    err_col: db ", col "
+    err_col_l equ $ - err_col
+    err_sep: db ": "
+    err_sep_l equ $ - err_sep
+    section .bss
+    err_buf_local: resb 32
+    section .text
+
 fatal:
     push rbp
     mov rbp, rsp
-    mov r9, rdx
-    mov r8, rsi
+    sub rsp, 32                 ; local storage for itoa
+    mov r12, rsi                ; save msg
+    mov r13, rdx                ; save msg_len
+
+    ; Print "error at line "
     mov rax, 1
     mov rdi, 2
-    mov rsi, r8
-    mov rdx, r9
+    lea rsi, [err_at_line]
+    mov rdx, err_at_line_l
     syscall
+
+    ; Print tok_line
+    mov rdi, [tok_line]
+    lea rsi, [rbp-32]
+    call itoa_local
+    mov rdx, rax                ; len
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [rbp-32]
+    syscall
+
+    ; Print ", col "
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [err_col]
+    mov rdx, err_col_l
+    syscall
+
+    ; Print tok_col
+    mov rdi, [tok_col]
+    lea rsi, [rbp-32]
+    call itoa_local
+    mov rdx, rax                ; len
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [rbp-32]
+    syscall
+
+    ; Print ": "
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [err_sep]
+    mov rdx, err_sep_l
+    syscall
+
+    ; Print original msg
+    mov rax, 1
+    mov rdi, 2
+    mov rsi, r12
+    mov rdx, r13
+    syscall
+
     mov rax, 60
     mov rdi, 1
     syscall
+    leave
+    ret
+
+itoa_local:
+    ; rdi = val, rsi = buf -> rax = len
+    mov rax, rdi
+    mov rcx, 10
+    mov r8, rsi
+    add r8, 31          ; end of buffer
+    mov byte [r8], 0
+    mov r9, r8          ; save end
+.itoa_l:
+    xor rdx, rdx
+    div rcx             ; rax = val/10, rdx = val%10
+    add dl, '0'
+    dec r8
+    mov [r8], dl
+    test rax, rax
+    jnz .itoa_l
+    ; Move result to front of buffer (rsi)
+    mov rdi, rsi
+    mov rsi, r8
+    mov r10, r9
+    sub r10, r8         ; r10 = length
+    mov rax, r10        ; return length
+    mov rcx, r10
+    rep movsb
+    ret
 
 ; ── variable table ────────────────────────────────────────────────────────────
 ; var_find: reverse linear scan (newest/innermost scope wins).
@@ -421,7 +507,39 @@ parse_factor:
     pop rdi
     call codegen_emit_mov_rax_var
     mov byte [cur_type], r12b
-    call lexer_next
+    call lexer_next                    ; advance past identifier token
+    cmp byte [tok_type], TOK_LBRACK
+    jne .idn_done
+    call codegen_emit_push_rax         ; save container ptr before index eval
+    call lexer_next                    ; skip '['
+    call parse_expr                    ; index → rax
+    cmp byte [tok_type], TOK_RBRACK
+    jne .idn_subscript_bail
+    call lexer_next                    ; skip ']'
+    ; dispatch on container type
+    cmp byte [cur_type], TYPE_STR
+    je .idn_str_idx
+    cmp byte [cur_type], TYPE_SEQ
+    je .idn_seq_idx
+    cmp byte [cur_type], TYPE_DICT
+    je .idn_dict_get
+    call codegen_emit_pop_rbx          ; unsupported type: cleanup
+    jmp .done
+.idn_subscript_bail:
+    call codegen_emit_pop_rbx          ; no ']': cleanup
+    jmp .done
+.idn_str_idx:
+    ; TODO: full rt_str_idx call — for now just pop/discard (str[i] stub)
+    call codegen_emit_pop_rbx
+    jmp .done
+.idn_seq_idx:
+    call codegen_emit_pop_rbx          ; rbx = seq_ptr
+    call codegen_emit_seq_elem_load    ; emit: mov rax,[rbx+rax*8+16]
+    jmp .done
+.idn_dict_get:
+    call codegen_emit_pop_rbx          ; stub: cleanup
+    jmp .done
+.idn_done:
     jmp .done
 .idn_skip:
     ; BUG-04 fix: undefined variable must be a fatal error, not silent 0
@@ -1398,9 +1516,41 @@ parse_stmt:
     je .unreachable
     cmp al, TOK_ASSERT
     je .assert
+    cmp al, TOK_TYPE_STR
+    je .ps
+    cmp al, TOK_TYPE_SEQ
+    je .pq
+    cmp al, TOK_TYPE_INT
+    je .pi
+    cmp al, TOK_TYPE_FLOAT
+    je .pf
+    cmp al, TOK_TYPE_BOOL
+    je .pb
+    cmp al, TOK_TYPE_DICT
+    je .pd
     cmp al, TOK_IDENT
     je .ident_stmt
     call lexer_next
+    jmp .done
+
+; ── dict declaration: allocates and registers dict variable ────────────────────
+.pd:
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .done
+    lea rsi, [tok_ident]
+    lea rdi, [saved_name]
+    call strcpy
+    call lexer_next
+    lea rdi, [saved_name]
+    xor rsi, rsi
+    mov dl, 0
+    mov cl, TYPE_DICT
+    call var_add
+    cmp rax, -1
+    je .done
+    ; Emit call to rt_dict_new (not yet implemented in runtime, so it should be a stub)
+    ; For now, we will just register it in var_table.
     jmp .done
 
 ; ── @memo — memoize next protocol definition ───────────────────────────────────
@@ -1663,6 +1813,20 @@ parse_stmt:
     call strcpy
     call lexer_next             ; skip varname → 'in'
     call lexer_next             ; skip 'in' → start expr
+    ; detect for-each over seq variable
+    cmp byte [tok_type], TOK_IDENT
+    jne .for_range_check
+    lea rdi, [tok_ident]
+    call var_find
+    cmp rax, -1
+    je .for_range_check
+    movzx edx, byte [rcx + 48]    ; type field at offset 48 in var entry
+    cmp dl, TYPE_SEQ
+    jne .for_range_check
+    mov r12, rax               ; r12 = seq_var_idx
+    call lexer_next            ; advance past seq variable name
+    jmp .for_each_seq
+.for_range_check:
     ; static-bounds O2: save start token state and out_idx before any emit
     movzx rax, byte [tok_type]
     mov [for_start_tok], al
@@ -1856,6 +2020,156 @@ parse_stmt:
     call codegen_patch_jump           ; patch the jnz past the else body
     jmp .done
 .for_no_else:
+    jmp .done
+
+; ── for-each over seq ─────────────────────────────────────────────────────────
+; r12 = seq_var_idx, saved_name = element variable name, tok = ':' or inline
+.for_each_seq:
+    ; save scope
+    mov rbx, [scope_depth]
+    lea rcx, [scope_stack]
+    mov rax, [var_count]
+    mov [rcx+rbx*8], rax
+    inc qword [scope_depth]
+    ; add element variable (TYPE_INT, value = loaded element)
+    lea rdi, [saved_name]
+    xor rsi, rsi
+    mov dl, 0
+    mov cl, TYPE_INT
+    call var_add
+    cmp rax, -1
+    je .fes_scope_pop
+    mov r13, rax               ; r13 = elem_var_idx
+    ; add hidden counter var "__ec"
+    sub rsp, 8
+    mov byte [rsp+0], '_'
+    mov byte [rsp+1], '_'
+    mov byte [rsp+2], 'e'
+    mov byte [rsp+3], 'c'
+    mov byte [rsp+4], 0
+    mov rdi, rsp
+    xor rsi, rsi
+    mov dl, 0
+    mov cl, TYPE_INT
+    call var_add
+    add rsp, 8
+    cmp rax, -1
+    je .fes_scope_pop
+    mov r14, rax               ; r14 = ctr_var_idx
+    ; add __le flag var (loop-else)
+    push r12
+    push r13
+    push r14
+    lea rdi, [le_name]
+    xor rsi, rsi
+    mov dl, 0
+    mov cl, TYPE_BOOL
+    call var_add
+    pop r14
+    pop r13
+    pop r12
+    cmp rax, -1
+    jne .fes_le_ok
+    mov rdi, -1
+    call codegen_push_loop_else_flag
+    jmp .fes_le_cont
+.fes_le_ok:
+    push rax
+    mov rdi, rax
+    call codegen_push_loop_else_flag
+    pop rdi
+    xor rsi, rsi
+    push r12
+    push r13
+    push r14
+    call codegen_emit_assign_var   ; __le = 0
+    pop r14
+    pop r13
+    pop r12
+.fes_le_cont:
+    ; emit loop preamble (loads seq, checks len, sets up counter)
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, r14
+    call codegen_emit_each_start
+    mov r15, rax               ; r15 = loop_top_pc
+    ; skip ':' + optional newline + indent
+    movzx eax, byte [tok_type]
+    cmp al, TOK_COLON
+    jne .fes_nl
+    call lexer_next
+.fes_nl:
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .fes_indent
+    call lexer_next
+.fes_indent:
+    cmp byte [tok_type], TOK_INDENT
+    jne .fesl
+    call lexer_next
+.fesl:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .fesd
+    cmp al, TOK_DEDENT
+    je .fesd
+    call parse_stmt
+    jmp .fesl
+.fesd:
+    cmp byte [tok_type], TOK_DEDENT
+    jne .fesnd
+    call lexer_next
+.fesnd:
+    mov rdi, r15
+    mov rsi, r14
+    call codegen_emit_each_end
+    ; restore scope
+    dec qword [scope_depth]
+    mov rax, [scope_depth]
+    lea rcx, [scope_stack]
+    mov rbx, [rcx+rax*8]
+    mov [var_count], rbx
+    ; pop loop-else flag + handle optional else:
+    call codegen_pop_loop_else_flag   ; rax = le_var_idx or -1
+    cmp byte [tok_type], TOK_ELSE
+    jne .fes_no_else
+    cmp rax, -1
+    je .fes_no_else
+    mov r14, rax
+    mov rdi, r14
+    call codegen_emit_mov_rax_var
+    call codegen_emit_test_rax_jnz
+    call lexer_next                   ; skip 'else'
+    call lexer_next                   ; skip ':'
+    cmp byte [tok_type], TOK_NEWLINE
+    jne .fes_el_in
+    call lexer_next
+.fes_el_in:
+    cmp byte [tok_type], TOK_INDENT
+    jne .fes_ell
+    call lexer_next
+.fes_ell:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .fes_el_end
+    cmp al, TOK_DEDENT
+    je .fes_el_end
+    call parse_stmt
+    jmp .fes_ell
+.fes_el_end:
+    cmp byte [tok_type], TOK_DEDENT
+    jne .fes_el_done
+    call lexer_next
+.fes_el_done:
+    call codegen_patch_jump
+    jmp .done
+.fes_no_else:
+    jmp .done
+.fes_scope_pop:
+    dec qword [scope_depth]
+    mov rax, [scope_depth]
+    lea rcx, [scope_stack]
+    mov rbx, [rcx+rax*8]
+    mov [var_count], rbx
     jmp .done
 
 ; ── while loop ────────────────────────────────────────────────────────────────
@@ -2839,7 +3153,11 @@ parse_stmt:
     cmp byte [tok_type], TOK_ASSIGN   ; bare assignment: name = expr (no leading colon)
     je .ident_assign
     cmp byte [tok_type], TOK_DOT
-    jne .done
+    je .ident_dot
+    cmp byte [tok_type], TOK_LBRACK
+    je .ident_subscript
+    jmp .done
+.ident_dot:
     call lexer_next
     movzx eax, byte [tok_type]
     cmp al, TOK_PUSH
@@ -2848,6 +3166,36 @@ parse_stmt:
     je .ident_pop
     cmp al, TOK_LEN
     je .ident_len
+    jmp .done
+.ident_subscript:
+    ; name[idx] = val
+    lea rdi, [saved_name]
+    call var_find
+    cmp rax, -1
+    je .done
+    mov r12, rax
+    call lexer_next         ; skip '['
+    call parse_expr         ; index expr
+    cmp byte [tok_type], TOK_RBRACK
+    jne .done
+    call lexer_next         ; skip ']'
+    cmp byte [tok_type], TOK_ASSIGN
+    jne .done
+    ; check if it's a dict or seq
+    shl r12, 6
+    lea rcx, [var_table]
+    add rcx, r12
+    movzx edx, byte [rcx+48] ; type
+    cmp dl, TYPE_DICT
+    je .dict_set
+    jmp .done
+.dict_set:
+    call codegen_emit_push_rax ; push index
+    call lexer_next          ; skip '='
+    call parse_expr          ; parse value
+    call codegen_emit_pop_rbx  ; pop index into rbx
+    ; call rt_dict_set(var_addr, key, value)
+    ; For now, stub
     jmp .done
 .ident_push:
     call lexer_next
@@ -3071,6 +3419,8 @@ parse_stmt:
     je .when_end
     cmp al, TOK_DEDENT
     je .when_end
+    cmp al, TOK_NEWLINE
+    je .when_nl_skip
     cmp al, TOK_IS
     je .when_is
     cmp al, TOK_ELSE
@@ -3113,9 +3463,13 @@ parse_stmt:
     jmp .when_cc_multi
 .when_cc_md:
     call lexer_next             ; consume DEDENT
-    jmp .when_loop
+    jmp .when_cc_done
 .when_cc_inline:
     call parse_stmt
+.when_cc_done:
+    jmp .when_loop
+.when_nl_skip:
+    call lexer_next
     jmp .when_loop
 .when_is:
     ; if not first case: emit jmp_end + patch previous jz
@@ -3163,11 +3517,11 @@ parse_stmt:
     jmp .when_ibl
 .when_ib_end:
     test r13, r13
-    jz .when_loop
+    jz .when_ib_done
     cmp byte [tok_type], TOK_DEDENT
-    jne .when_loop
+    jne .when_ib_done
     call lexer_next
-    xor r13, r13
+.when_ib_done:
     jmp .when_loop
 .when_else:
     ; patch the last jz if any case was open
@@ -3196,10 +3550,12 @@ parse_stmt:
     jmp .when_ell
 .when_el_end:
     test r13, r13
-    jz .when_end
+    jz .when_el_done
     cmp byte [tok_type], TOK_DEDENT
-    jne .when_end
+    jne .when_el_done
     call lexer_next
+.when_el_done:
+    mov qword [when_case_count], 0
 .when_end:
     ; patch final open jz if no else was present
     cmp qword [when_case_count], 0

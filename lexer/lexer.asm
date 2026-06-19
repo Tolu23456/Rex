@@ -659,6 +659,70 @@ lexer_next:
     mov [lex_pos], rcx
     movq [tok_int], xmm0
     mov byte [tok_type], TOK_FLOAT_LIT
+    ; --- scientific notation (exponent) parsing ---
+    cmp rcx, [lex_len]
+    jge .done
+    movzx eax, byte [rdi+rcx]
+    cmp al, 'e'
+    je .p_exp
+    cmp al, 'E'
+    jne .done
+.p_exp:
+    inc rcx
+    cmp rcx, [lex_len]
+    jge .done
+    mov r8, 0               ; sign: 0 = pos, 1 = neg
+    movzx eax, byte [rdi+rcx]
+    cmp al, '+'
+    je .p_exp_plus
+    cmp al, '-'
+    jne .p_exp_val
+    mov r8, 1
+.p_exp_plus:
+    inc rcx
+.p_exp_val:
+    xor rbx, rbx            ; exponent accumulator
+    mov r9, 0               ; count digits
+.p_exp_loop:
+    cmp rcx, [lex_len]
+    jge .p_exp_apply
+    movzx eax, byte [rdi+rcx]
+    cmp al, '0'
+    jl .p_exp_apply
+    cmp al, '9'
+    jg .p_exp_apply
+    sub al, '0'
+    imul rbx, rbx, 10
+    movzx rax, al
+    add rbx, rax
+    inc rcx
+    inc r9
+    jmp .p_exp_loop
+.p_exp_apply:
+    test r9, r9
+    jz .done                ; no digits after 'e'
+    mov [lex_pos], rcx
+    movq xmm0, [tok_int]
+    test rbx, rbx
+    jz .done                ; e0 = 1.0, no change
+    ; multiplier in xmm1
+    mov rax, 10
+    cvtsi2sd xmm1, rax
+    cvtsi2sd xmm2, rax      ; base 10.0
+.p_exp_pow_loop:
+    dec rbx
+    jz .p_exp_pow_done
+    mulsd xmm1, xmm2
+    jmp .p_exp_pow_loop
+.p_exp_pow_done:
+    test r8, r8
+    jnz .p_exp_div
+    mulsd xmm0, xmm1
+    jmp .p_exp_store
+.p_exp_div:
+    divsd xmm0, xmm1
+.p_exp_store:
+    movq [tok_int], xmm0
     jmp .done
 .in_c:
     cmp al, 'j'
