@@ -958,15 +958,46 @@ static int cmd_doc(int argc, char *argv[]) {
 
 static int cmd_asm(int argc, char *argv[]) {
     const char *input = "main.rex";
+    int no_cleanup = 0;
     for (int i = 0; i < argc; i++) {
-        if (argv[i][0] != '-') input = argv[i];
+        if (strcmp(argv[i], "--keep") == 0) no_cleanup = 1;
+        else if (argv[i][0] != '-') input = argv[i];
     }
 
-    /* rexc currently directly produces ELF, not NASM.
-     * For now, disassemble the ELF with objdump if available. */
-    fprintf(stderr, "rex asm: the rexc backend emits ELF directly (no NASM intermediate).\n");
-    fprintf(stderr, "         To inspect code: rex build %s && objdump -d output\n", input);
-    return 1;
+    if (access(input, R_OK) != 0)
+        die("cannot open '%s': %s", input, strerror(errno));
+
+    /* Step 1: compile to ELF via rexc */
+    char rexc_path[512];
+    tool_path("rexc", rexc_path, sizeof(rexc_path));
+    if (access(rexc_path, X_OK) != 0)
+        die("rexc not found at '%s'. Run: make rexc", rexc_path);
+
+    char *build_args[] = { rexc_path, (char *)input, NULL };
+    int rc = run_cmd(build_args);
+    if (rc != 0) {
+        fprintf(stderr, "rex asm: compilation failed\n");
+        return 1;
+    }
+
+    /* Step 2: disassemble with objdump in Intel syntax */
+    /* objdump -d -M intel --no-show-raw-insn strips the hex bytes so
+       you see only the clean mnemonic + operands — 1:1 with the silicon */
+    char *od_args[] = {
+        "objdump",
+        "-d",
+        "-M", "intel",
+        "--no-show-raw-insn",
+        "--no-addresses",
+        "output",
+        NULL
+    };
+    rc = run_cmd(od_args);
+
+    /* Step 3: clean up temp binary unless --keep */
+    if (!no_cleanup) unlink("output");
+
+    return rc;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -1040,7 +1071,7 @@ static void print_help(void) {
     printf("  test   [file.rex | --all]               Run test suite in tests/\n");
     printf("  bench  [file.rex | --all]               Run benchmarks in bench/\n");
     printf("  doc    [file.rex | --all]               Generate HTML documentation\n");
-    printf("  asm    [file.rex]                        Show generated assembly\n");
+    printf("  asm    [file.rex] [--keep]               Show x86-64 instructions (1:1 with silicon)\n");
     printf("\n");
     printf("OPTIONS\n");
     printf("  --version   Print version and exit\n");
