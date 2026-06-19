@@ -2,3 +2,5 @@
 - [Rex V5.0 markdown doc conventions](doc-conventions.md) — status markers, cross-doc consistency rules, and 5-feature doc spec implemented in this session.
 - [Rex language design decisions](lang-design.md) — mutability sigil rules, type system decisions, bool Kleene logic — agreed in design session, written to syn.md.
 - [Rex LSP & CLI toolchain](rex-lsp-cli.md) — LSP server in C (lsp/rex_lsp.c), rex CLI dispatcher (rex_main.c), install targets, cross-device rename fix.
+- [Rex self-hosting plan](rex-selfhosting-plan.md) — bootstrap sequence, layer architecture (Rex→RexC→RIC→native), and portability model agreed in design session.
+- [RexC & RIC instruction set spec](rex-rexc-spec.md) — full bytecode format, core/memory/IO opcodes (0x00–0x7F), and RIC SIMD layer (0x80–0xFF) with vector types and platform mappings.
