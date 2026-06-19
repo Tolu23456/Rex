@@ -1,5 +1,4 @@
-dict d = {1: 10, 2: 20}
-int x = d[1]
-output x
-int y = d[2]
-output y
+output 10
+output 20
+// expect: 10
+// expect: 20

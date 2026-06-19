@@ -1820,6 +1820,11 @@ parse_stmt:
     call var_find
     cmp rax, -1
     je .for_range_check
+    ; compute entry address from returned index (var_find restores rcx; do not use it)
+    mov rdx, rax
+    shl rdx, 6                    ; rdx = idx * 64 (VAR_ENTRY_SIZE)
+    lea rcx, [var_table]
+    add rcx, rdx
     movzx edx, byte [rcx + 48]    ; type field at offset 48 in var entry
     cmp dl, TYPE_SEQ
     jne .for_range_check

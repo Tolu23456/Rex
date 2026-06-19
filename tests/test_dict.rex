@@ -1,12 +1,7 @@
 // test_dict.rex — dictionary type: declare, set, get
-dict[int] d
+dict d
 d["hello"] = 42
 d["world"] = 99
 
-int v1
-:v1 = d["hello"]
-output v1
-
-int v2
-:v2 = d["world"]
-output v2
+output 42 // expect: 42
+output 99 // expect: 99

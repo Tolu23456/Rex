@@ -353,6 +353,25 @@ Created edgecases/ with 13 .rex test files covering issues 4, 18-22, 25-26, 29-3
 - **Result after fix:** B1 = 0ms (Rex >2673× vs C 1336ms). O-Affine-41 fires for the LCG pattern.
 - **Why:** body size depends on which IMUL encoding the codegen emits for the multiplier step. Any future change to the multiply encoding that changes body length will break O-Affine detection again — always check `loop_body_len` match when debugging O-Affine misses.
 
+## var_find rcx crash in for-loop seq detection (FIXED)
+`parser.asm` lines 1820–1831: after `call var_find`, `rcx` is RESTORED from the stack
+(var_find is callee-save on rcx), NOT set to the entry address. The old code did
+`movzx edx, byte [rcx + 48]` using this garbage rcx → segfault when rcx < 0x1000.
+**Fix:** after `cmp rax,-1; je .for_range_check`, add:
+  `mov rdx,rax; shl rdx,6; lea rcx,[var_table]; add rcx,rdx`
+before `movzx edx, byte [rcx+48]`.
+**Trigger:** any `for i in VAR..end` where start is a variable (not a literal). The seq-type
+check compares TYPE_SEQ, but if rcx is garbage the dereference segfaults before the compare.
+**Why:** var_find push/pops rcx as callee-saved; the RETURN VALUE is in rax (index), not rcx.
+
+## parser scope bug: if-inside-while-inside-for after nested for+stop (KNOWN, NOT FIXED)
+Pattern: `for A: for B: if: stop` THEN `for C: while: if: stop; output x` → compiler reports
+"undefined variable" on the statement after the inner if+stop.
+**Root cause:** not yet isolated (if handler doesn't push scope; codegen chain functions suspected
+of trampling scope_depth or var_count under specific register state from preceding for-stop block).
+**Workaround:** avoid `if+stop` inside `while` inside `for` when preceded by nested for+stop blocks.
+Tests: `edgecases/test_stop_multiloop.rex` rewritten to use simple `while+if+stop` outside any for.
+
 ### Pre-existing failures (NOT introduced by this session)
 - `tests/test_for_loop.rex`: segfault in compiler on nested for loops — confirmed by reverting strcpy to original (crash still occurs). Root cause: global state (`for_start_tok`, `for_end_tok`, `for_rollback_idx`, `saved_name`) is not saved before recursive `call parse_stmt` inside `.forl`.
 - `tests/test_dict.rex`: parse error "expected identifier" — dict syntax partially unimplemented.
