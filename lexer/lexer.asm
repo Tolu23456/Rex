@@ -14,6 +14,7 @@ tok_int:       resq 1
 tok_ident:     resb 64
 tok_line:      resq 1   ; current source line (1-indexed)
 tok_col:       resq 1   ; current source column (0-indexed byte offset)
+lex_line_start: resq 1  ; byte offset of the first byte of the current line
 section .text
 lexer_init:
     push rbp
@@ -27,6 +28,7 @@ lexer_init:
     mov qword [indent_stack], 0
     mov qword [tok_line], 1
     mov qword [tok_col], 0
+    mov qword [lex_line_start], 0
     leave
     ret
 
@@ -99,6 +101,7 @@ lexer_next:
 .bl:
     inc rcx
     mov [lex_pos], rcx
+    mov [lex_line_start], rcx
     jmp .r
 .ie:
     mov byte [at_line_start], 0
@@ -121,6 +124,10 @@ lexer_next:
     jmp .sl
 .sd:
     mov [lex_pos], rcx
+    mov rax, [lex_line_start]
+    sub rcx, rax
+    mov [tok_col], rcx
+    mov rcx, [lex_pos]
     cmp rcx, [lex_len]
     jge .ee
     movzx eax, byte [rdi+rcx]
@@ -428,6 +435,8 @@ lexer_next:
 .enl:
     inc qword [lex_pos]
     inc qword [tok_line]        ; BUG-08 fix: increment line counter on each newline
+    mov rax, [lex_pos]
+    mov [lex_line_start], rax
     mov byte [at_line_start], 1
     mov byte [tok_type], TOK_NEWLINE
     jmp .done
