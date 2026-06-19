@@ -22,7 +22,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 
-#define REX_VERSION "Rex V5.0 (NASM ELF64)"
+#define REX_VERSION "Rex V5.0 (NASM ELF64 + RexC)"
 #define BUILD_DATE  __DATE__
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -970,6 +970,54 @@ static int cmd_asm(int argc, char *argv[]) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
+/* rex emit                                                                     */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+static int cmd_emit(int argc, char *argv[]) {
+    const char *input = "main.rex";
+
+    for (int i = 0; i < argc; i++) {
+        if (argv[i][0] != '-') input = argv[i];
+    }
+
+    if (access(input, R_OK) != 0)
+        die("cannot open '%s': %s", input, strerror(errno));
+
+    /* Output name: foo.rex → foo.rxc */
+    const char *base = basename_of(input);
+    char stem[256];
+    strip_ext(base, stem, sizeof(stem));
+    char out_name[264];
+    snprintf(out_name, sizeof(out_name), "%s.rxc", stem);
+
+    char rexc_rxc[512];
+    tool_path("rexc_rxc", rexc_rxc, sizeof(rexc_rxc));
+
+    if (access(rexc_rxc, X_OK) != 0)
+        die("rexc_rxc not found at '%s'. Build it with: make rexc_rxc", rexc_rxc);
+
+    long long t0 = now_ms();
+
+    char *args[] = { rexc_rxc, (char *)input, NULL };
+    int rc = run_cmd(args);
+    if (rc != 0) {
+        fprintf(stderr, "rex: emit failed\n");
+        return 1;
+    }
+
+    /* rexc_rxc writes to "output"; rename to <stem>.rxc */
+    if (move_file("output", out_name) != 0)
+        die("cannot rename output to %s: %s", out_name, strerror(errno));
+
+    long long elapsed = now_ms() - t0;
+    struct stat st;
+    long sz = (stat(out_name, &st) == 0) ? (long)st.st_size : 0;
+    printf("Emitted ./%s (%ld bytes) in %lld.%03lldms\n",
+           out_name, sz, elapsed / 1000, elapsed % 1000);
+    return 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
 /* --version / --help                                                           */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
@@ -983,6 +1031,7 @@ static void print_help(void) {
     printf("  rex <command> [options] [file.rex]\n\n");
     printf("COMMANDS\n");
     printf("  build  [file.rex] [--release|--debug]   Compile to a native ELF64 binary\n");
+    printf("  emit   [file.rex]                        Compile to portable RexC bytecode (.rxc)\n");
     printf("  run    [file.rex] [-- args...]           Compile and run immediately\n");
     printf("  check  [file.rex] [--json]              Lint only; no binary produced\n");
     printf("  lsp                                      Start LSP server (stdin/stdout)\n");
@@ -1018,6 +1067,7 @@ int main(int argc, char *argv[]) {
     if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0) {
         print_help(); return 0;
     }
+    if (strcmp(cmd, "emit")  == 0) return cmd_emit(sub_argc, sub_argv);
     if (strcmp(cmd, "build") == 0) return cmd_build(sub_argc, sub_argv);
     if (strcmp(cmd, "wpo")   == 0) {
         char **wpo_argv = malloc((sub_argc + 2) * sizeof(char *));

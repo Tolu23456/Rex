@@ -4,3 +4,4 @@
 - [Rex LSP & CLI toolchain](rex-lsp-cli.md) — LSP server in C (lsp/rex_lsp.c), rex CLI dispatcher (rex_main.c), install targets, cross-device rename fix.
 - [Rex self-hosting plan](rex-selfhosting-plan.md) — bootstrap sequence, layer architecture (Rex→RexC→RIC→native), and portability model agreed in design session.
 - [RexC & RIC instruction set spec](rex-rexc-spec.md) — full bytecode format, core/memory/IO opcodes (0x00–0x7F), and RIC SIMD layer (0x80–0xFF) with vector types and platform mappings.
+- [RexC backend build layout](rexc-backend-build.md) — rxc/ directory, Makefile tab fix, include path conventions, duplicate label pitfall.

@@ -3,14 +3,25 @@ LD=ld
 CC=gcc
 CFLAGS=-O2 -std=c11 -Wall -Wextra -Wno-unused-parameter
 OBJS=main/main.o lexer/lexer.o parser/parser.o codegen/codegen.o headers/headers.o runtime/runtime.o
+RXC_OBJS=main/main.o lexer/lexer.o parser/parser.o rxc/rxc_codegen.o rxc/rxc_emit.o headers/headers.o
 PREFIX=/usr/local
 
-# ── Compiler targets ────────────────────────────────────────────────────────────
+# Compiler targets
 
-all: rexc rex rex_lsp
+all: rexc rexc_rxc rex rex_lsp
 
 rexc: $(OBJS)
 	$(LD) $(OBJS) -o rexc
+
+# RexC bytecode backend: Rex -> .rxc portable bytecode
+rexc_rxc: $(RXC_OBJS)
+	$(LD) $(RXC_OBJS) -o rexc_rxc
+
+rxc/rxc_emit.o: rxc/rxc_emit.asm rxc/rxc_defs.inc include/rex_defs.inc
+	$(NASM) -f elf64 -I include/ -I rxc/ rxc/rxc_emit.asm -o rxc/rxc_emit.o
+
+rxc/rxc_codegen.o: rxc/rxc_codegen.asm rxc/rxc_defs.inc include/rex_defs.inc
+	$(NASM) -f elf64 -I include/ -I rxc/ rxc/rxc_codegen.asm -o rxc/rxc_codegen.o
 
 runtime/runtime.bin: runtime/runtime_src.asm
 	$(NASM) -f bin runtime/runtime_src.asm -o runtime/runtime.bin
@@ -21,54 +32,44 @@ runtime/runtime.o: runtime/runtime.asm runtime/runtime.bin
 %.o: %.asm
 	$(NASM) -f elf64 -I include/ $< -o $@
 
-# ── LSP server ──────────────────────────────────────────────────────────────────
+# LSP server
 
 rex_lsp: lsp/rex_lsp.c
 	$(CC) $(CFLAGS) -o rex_lsp lsp/rex_lsp.c
 
 lsp: rex_lsp
 
-# ── rex CLI dispatcher ──────────────────────────────────────────────────────────
+# rex CLI dispatcher
 
 rex: rex_main.c
 	$(CC) $(CFLAGS) -o rex rex_main.c
 
-# ── Install ─────────────────────────────────────────────────────────────────────
-# Usage: sudo make install
-# Installs rex, rexc, and rex_lsp to $(PREFIX)/bin
+# Install
 
 install: all
 	install -d $(PREFIX)/bin
-	install -m 0755 rexc    $(PREFIX)/bin/rexc
-	install -m 0755 rex_lsp $(PREFIX)/bin/rex_lsp
-	install -m 0755 rex     $(PREFIX)/bin/rex
-	@echo ""
+	install -m 0755 rexc     $(PREFIX)/bin/rexc
+	install -m 0755 rexc_rxc $(PREFIX)/bin/rexc_rxc
+	install -m 0755 rex_lsp  $(PREFIX)/bin/rex_lsp
+	install -m 0755 rex      $(PREFIX)/bin/rex
 	@echo "Rex V5.0 installed to $(PREFIX)/bin"
-	@echo "  rex     — CLI dispatcher  (rex build / run / check / lsp / fmt / ...)"
-	@echo "  rexc    — compiler backend"
-	@echo "  rex_lsp — LSP server"
-	@echo ""
-	@echo "Run 'rex --version' to verify the installation."
-	@echo "Run 'rex new myapp' to start a new Rex project."
 
 uninstall:
-	rm -f $(PREFIX)/bin/rex $(PREFIX)/bin/rexc $(PREFIX)/bin/rex_lsp
+	rm -f $(PREFIX)/bin/rex $(PREFIX)/bin/rexc $(PREFIX)/bin/rex_lsp $(PREFIX)/bin/rexc_rxc
 	@echo "Rex uninstalled from $(PREFIX)/bin"
-
-# ── Install to user home (no sudo required) ─────────────────────────────────────
 
 install-user: all
 	install -d $(HOME)/.local/bin
-	install -m 0755 rexc    $(HOME)/.local/bin/rexc
-	install -m 0755 rex_lsp $(HOME)/.local/bin/rex_lsp
-	install -m 0755 rex     $(HOME)/.local/bin/rex
-	@echo ""
+	install -m 0755 rexc     $(HOME)/.local/bin/rexc
+	install -m 0755 rexc_rxc $(HOME)/.local/bin/rexc_rxc
+	install -m 0755 rex_lsp  $(HOME)/.local/bin/rex_lsp
+	install -m 0755 rex      $(HOME)/.local/bin/rex
 	@echo "Rex V5.0 installed to $(HOME)/.local/bin"
-	@echo "Make sure $(HOME)/.local/bin is on your PATH."
 
-# ── Clean ────────────────────────────────────────────────────────────────────────
+# Clean
 
 clean:
 	rm -f $(OBJS) rexc rex rex_lsp output runtime/runtime.bin
+	rm -f rxc/rxc_emit.o rxc/rxc_codegen.o rexc_rxc
 
 .PHONY: all lsp install uninstall install-user clean
