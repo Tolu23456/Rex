@@ -408,6 +408,14 @@ rt_str_cat:
     push r13
     push r14
     push r15
+    ; rdi=ptr1, rsi=len1, rdx=ptr2, rcx=len2
+    ; check for integer overflow in sum
+    mov rax, rsi
+    add rax, rcx
+    jc .overflow
+    inc rax ; for NUL
+    jc .overflow
+    
     mov r12, rdi ; ptr1
     mov r13, rsi ; len1
     mov r14, rdx ; ptr2
@@ -432,6 +440,8 @@ rt_str_cat:
     pop r12
     pop rbx
     ret
+.overflow:
+    call rt_overflow_err
     times RT_STR_CAT_SIZE - ($ - rt_str_cat) db 0x90
 
 ; ── rt_str_eq (256B) ─────────────────────────────────────────────────────────
@@ -528,10 +538,12 @@ rt_str_find:
     
     push rsi
     push rdi
+    push rcx
     lea rdi, [r12+r8]
     mov rsi, r14
     mov rcx, rbx
     repe cmpsb
+    pop rcx
     pop rdi
     pop rsi
     je .found
@@ -547,10 +559,12 @@ rt_str_find:
 .verify_scalar:
     push rsi
     push rdi
+    push rcx
     lea rdi, [r12+r8]
     mov rsi, r14
     mov rcx, rbx
     repe cmpsb
+    pop rcx
     pop rdi
     pop rsi
     je .found
@@ -916,7 +930,14 @@ rt_str_split:
     ; seq header: [len:8][cap:8][data...]
     ; data is pointers to strings
     mov r15, rbx ; count
-    lea rdi, [r15*8 + 16]
+    ; check overflow: count*8 + 16
+    mov rax, r15
+    mov rcx, 8
+    mul rcx
+    jc .overflow
+    add rax, 16
+    jc .overflow
+    mov rdi, rax
     call rt_alc
     mov qword [rax], r15
     mov qword [rax+8], r15
@@ -955,6 +976,9 @@ rt_str_split:
     pop r12
     pop rbx
     ret
+
+.overflow:
+    call rt_overflow_err
 
 .copy_part:
     ; rdi=src, rsi=len
@@ -1008,6 +1032,7 @@ rt_str_join:
 
 .alloc:
     lea rdi, [r15+1]
+    jc .overflow
     call rt_alc
     mov r11, rax ; result
     mov rdi, rax
@@ -1035,6 +1060,9 @@ rt_str_join:
     rep movsb
     pop rcx
     jmp .join_lp
+
+.overflow:
+    call rt_overflow_err
 
 .empty:
     mov rdi, 1

@@ -442,8 +442,11 @@ parse_factor:
     mov [cur_call_proto_seq_idx], rax
     call lexer_next
     mov rbx, [var_count]        ; snapshot var_count for caller-save (Gap-1)
+    ; O4: save tco_return_active because argument parsing may clobber it
+    push qword [tco_return_active]
+    mov byte [tco_return_active], 0
     cmp byte [tok_type], TOK_LPAREN
-    jne .prt_call
+    jne .prt_call_pre
     call lexer_next
     xor r13, r13
 .prt_al:
@@ -467,15 +470,11 @@ parse_factor:
 .prt_np:
     mov rdi, r13
     call codegen_emit_arg_pops
+.prt_call_pre:
+    pop rax
+    mov [tco_return_active], al
     jmp .prt_call
 .prt_call:
-    cmp byte [tok_type], TOK_LPAREN
-    jne .prt_do
-    call lexer_next
-    cmp byte [tok_type], TOK_RPAREN
-    jne .prt_do
-    call lexer_next
-.prt_do:
     ; O4: tail-call optimisation — if this call is the tail of a .ret expression
     ; and is a self-recursive call to the current protocol, emit leave+jmp
     cmp byte [tco_return_active], 1
@@ -490,12 +489,28 @@ parse_factor:
     je .prt_tco_check
     jmp .prt_do_normal
 .prt_tco_check:
-    ; check it's the same protocol (r12 = proto_idx of this call)
+    ; TCO: emit leave + jmp to protocol body start
+    ; Check if it's self-recursion for optimized entry (skip prologue)
     cmp r12, [cur_proto_idx]
-    jne .prt_do_normal
-    ; TCO: emit leave + jmp to protocol body start (past prologue+param-stores)
+    jne .prt_sco
     call codegen_emit_leave
-    mov rdi, [tco_body_entry]  ; out_idx saved at .prot_nobody entry
+    mov rdi, [tco_body_entry]
+    test rdi, rdi
+    jz .prt_do_normal           ; fallback if entry point not captured
+    call codegen_emit_jmp_prot
+    mov byte [tco_was_emitted], 1
+    jmp .done
+.prt_sco:
+    ; Sibling-Call Optimization (SCO): call to another protocol in tail position
+    ; Emit leave to clean up current frame, then jump to callee's start
+    call codegen_emit_leave
+    mov rdi, r12                ; r12 is the proto_idx from proto_find
+    ; We need the actual out_idx of the callee.
+    ; r12 is the index in proto_table.
+    mov rax, r12
+    imul rax, PROTO_ENTRY_SIZE
+    lea rdx, [proto_table]
+    mov rdi, [rdx + rax + 32]   ; out_idx is at offset 32 (after 32-byte name)
     call codegen_emit_jmp_prot
     mov byte [tco_was_emitted], 1
     jmp .done
@@ -2029,6 +2044,9 @@ parse_stmt:
     ; emit frame-relative param stores: REX 89 ModRM disp8
     ; O18: skip params K < regalloc_cnt (already in r12/r13 via frame_prologue)
     ; O18: displacement offset by regalloc_cnt (callee-save slots at top of frame)
+    ; O4: capture TCO entry point (start of param stores)
+    mov rax, [out_idx]
+    mov [tco_body_entry], rax
     xor r14, r14
 .prot_fs:
     cmp r14, r12
@@ -2068,9 +2086,6 @@ parse_stmt:
 .prot_fs_mrm: db 0x7C, 0x74, 0x54, 0x4C, 0x44, 0x4C
 
 .prot_nobody:
-    ; O4: capture body-start out_idx (after any prologue+param-stores) for TCO jmp
-    mov rax, [out_idx]
-    mov [tco_body_entry], rax
     ; @memo: emit cache lookup check at body entry (before any user code)
     cmp byte [proto_memo_active], 0
     je .prot_no_memo_check
