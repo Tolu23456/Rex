@@ -110,6 +110,13 @@ err_id:    db "error: expected identifier",10
 err_id_l   equ $ - err_id
 err_undef:   db "error: undefined variable",10   ; BUG-04
 err_undef_l  equ $ - err_undef
+dbg_nf_msg:  db "DBG nf vc=",0
+dbg_sd_msg:  db "DBG sd=",0
+dbg_wp_msg:  db "DBG wp=",0
+dbg_ford_msg: db "DBG ford",10
+dbg_fl_msg:  db "DBG fl t=",0
+dbg_fl2_msg: db " v=",0
+dbg_nl:      db 10,0
 fe_suffix: db "_fe",0
 when_tmp:  db "__when__",0
 le_name:   db "__le",0
@@ -305,6 +312,36 @@ var_find:
     dec rcx
     jmp .l
 .nf:
+    ; DEBUG: print "DBG nf vc=N\n" to stderr
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_nf_msg]
+    mov rdx, 10
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    mov rcx, [var_count]
+    add rcx, '0'
+    push rcx
+    lea rsi, [rsp]
+    mov rdx, 1
+    syscall
+    pop rcx
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_nl]
+    mov rdx, 1
+    syscall
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
     mov rax, -1
 .done:
     pop rdi
@@ -1969,6 +2006,48 @@ parse_stmt:
     jne .forl
     call lexer_next
 .forl:
+    ; DEBUG: print tok_type and var_count
+    push rax
+    push rdx
+    push rsi
+    push rdi
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_fl_msg]
+    mov rdx, 10
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    movzx rcx, byte [tok_type]
+    add rcx, '0'
+    push rcx
+    lea rsi, [rsp]
+    mov rdx, 1
+    syscall
+    pop rcx
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_fl2_msg]
+    mov rdx, 4
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    mov rcx, [var_count]
+    add rcx, '0'
+    push rcx
+    lea rsi, [rsp]
+    mov rdx, 1
+    syscall
+    pop rcx
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_nl]
+    mov rdx, 1
+    syscall
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rax
     movzx eax, byte [tok_type]
     cmp al, TOK_EOF
     je .ford
@@ -1981,6 +2060,36 @@ parse_stmt:
     jne .fornd
     call lexer_next
 .fornd:
+    ; DEBUG: print "DBG ford t=N\n"
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_ford_msg]
+    mov rdx, 9
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    movzx rcx, byte [tok_type]
+    add rcx, '0'
+    push rcx
+    lea rsi, [rsp]
+    mov rdx, 1
+    syscall
+    pop rcx
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_nl]
+    mov rdx, 1
+    syscall
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
     mov rdi, r15
     mov rsi, r14
     call codegen_emit_for_end
@@ -2184,6 +2293,38 @@ parse_stmt:
     mov rbx, [scope_depth]
     lea rcx, [scope_stack]
     mov rax, [var_count]
+    ; DEBUG: print var_count at while push
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_wp_msg]
+    mov rdx, 9
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    mov rcx, [var_count]
+    add rcx, '0'
+    push rcx
+    lea rsi, [rsp]
+    mov rdx, 1
+    syscall
+    pop rcx
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_nl]
+    mov rdx, 1
+    syscall
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     mov [rcx+rbx*8], rax
     inc qword [scope_depth]
     ; allocate + init __le flag BEFORE loop_top so init runs only once
@@ -2247,6 +2388,36 @@ parse_stmt:
     call codegen_emit_while_end
     call codegen_pop_loop_else_flag  ; rax = le_var_idx or -1
     mov r14, rax                     ; save le_var_idx (r15 no longer needed)
+    ; DEBUG: print scope_depth before dec
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_sd_msg]
+    mov rdx, 9
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    mov rcx, [scope_depth]
+    add rcx, '0'
+    push rcx
+    lea rsi, [rsp]
+    mov rdx, 1
+    syscall
+    pop rcx
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [dbg_nl]
+    mov rdx, 1
+    syscall
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
     ; restore scope (reclaim __le var)
     dec qword [scope_depth]
     mov rax, [scope_depth]
