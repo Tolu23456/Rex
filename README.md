@@ -109,10 +109,11 @@ built entirely in NASM assembly with **zero external dependencies** in the outpu
 | `stop` | Break the innermost loop |
 | `skip N` | Continue the Nth enclosing loop |
 | `pass` | Zero-byte semantic placeholder for empty blocks |
-| `prot name(a, b):` | Define a protocol (function) with up to 6 parameters |
+| `prot name(a, b):` | Define a protocol (function) with up to 65 parameters |
 | `@name(args)` | Call a protocol |
 | `return expr` | Return a value from a protocol |
-| `err "msg"` | Print to stderr and halt with exit code 1 |
+| `prot f() -> result[T]:` | Fallible protocol — returns `ok(val)` or `fail("msg")` |
+| `expr?` | Propagate `fail` upward; unwrap `ok` value |
 | `push seq val` | Append a value to a sequence (auto-grows) |
 | `pop seq` | Remove and return the last element of a sequence |
 | `swap x y` | Exchange two variables via `xchg` |

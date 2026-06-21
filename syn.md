@@ -444,7 +444,7 @@ prot add(int a, int b) -> int:
 ```
 
 - No return annotation → void protocol.
-- Up to 6 parameters (SysV ABI: `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`).
+- Up to **65 parameters**. First 6 in registers (`rdi`/`rsi`/`rdx`/`rcx`/`r8`/`r9`); parameters 7–65 are stack-passed (pushed right-to-left, caller cleans up).
 
 ### Calling with `@`
 
@@ -510,6 +510,51 @@ prot exit(int code):
 | `#unsafe`   | Allows `$` syscalls and direct memory ops                    |
 
 Decorators stack one per line and compose freely.
+
+### Error handling — `result[T]`
+
+Fallible protocols return `result[T]` instead of raising exceptions.
+
+```rex
+// define a fallible protocol
+prot safe_div(int a, int b) -> result[int]:
+    if b == 0:
+        return fail("division by zero")
+    return ok(a / b)
+
+// call and check
+result[int] r = @safe_div(10, 2)
+when r:
+    is ok(v):   output(v)       // prints 5
+    is fail(m): output(m)
+
+// ? propagates failure upward
+prot compute(int x) -> result[int]:
+    int d = @safe_div(x, 0)?   // returns fail to caller immediately
+    return ok(d + 1)
+
+// unwrap with fallback
+int val = @safe_div(10, 2).or(0)    // 5  (or 0 on fail)
+int val2 = @safe_div(10, 0).or(-1)  // -1
+
+// check variant
+result[int] r2 = @safe_div(4, 2)
+if r2 is ok:
+    output(r2.unwrap())     // 2
+if r2 is fail:
+    output(r2.msg)          // failure message string
+```
+
+| Expression            | Type    | Meaning                                       |
+|-----------------------|---------|-----------------------------------------------|
+| `ok(expr)`            | `result[T]` | Success variant wrapping `expr`           |
+| `fail("msg")`         | `result[T]` | Failure variant with message string       |
+| `r.unwrap()`          | `T`     | Value or program exit if `fail`               |
+| `r.or(default)`       | `T`     | Value or `default` if `fail`                  |
+| `r.is_ok`             | `bool`  | `true` if ok variant                          |
+| `r.is_fail`           | `bool`  | `true` if fail variant                        |
+| `r.msg`               | `str`   | Failure message (only valid on `fail`)        |
+| `expr?`               | `T`     | Propagate fail upward; unwrap if ok           |
 
 ---
 

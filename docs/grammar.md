@@ -327,17 +327,80 @@ param_list      ::= [ param { "," param } ]
 param           ::= type_expr <IDENT>
 
 return_type     ::= type_expr
+                  | result_type
                   | "(" type_expr { "," type_expr } ")"
+
+result_type     ::= "result" "[" type_expr "]"
 
 return_stmt     ::= "return" [ expr ] <NEWLINE>
 
 pass_stmt       ::= "pass" <NEWLINE>
 ```
 
-Up to 6 parameters are supported (SysV ABI: `rdi`, `rsi`, `rdx`, `rcx`,
-`r8`, `r9`). Empty `param_list` declares a zero-parameter protocol.
+Up to **65 parameters** are supported. The first 6 are passed in registers
+(`rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`); parameters 7–65 are pushed
+right-to-left on the stack before the call and cleaned up by the caller.
+Empty `param_list` declares a zero-parameter protocol.
 Multi-value return uses a parenthesised `return_type`; values come back in
 `rax`+`rdx` (2 values) or a caller-allocated stack buffer (3+).
+
+### 10.1 `result[T]` — Error Handling
+
+```ebnf
+result_type     ::= "result" "[" type_expr "]"
+
+result_ok       ::= "ok" "(" expr ")"
+
+result_fail     ::= "fail" "(" expr ")"
+
+propagate_expr  ::= expr "?"
+```
+
+`result[T]` is a built-in tagged type. It has two variants:
+
+| Variant    | Constructor   | Meaning                            |
+|------------|---------------|------------------------------------|
+| `ok`       | `ok(expr)`    | Success — carries a value of type `T` |
+| `fail`     | `fail(expr)`  | Failure — carries a `str` message  |
+
+**Methods on `result[T]`:**
+
+| Method / Field | Type   | Description                                        |
+|----------------|--------|----------------------------------------------------|
+| `.unwrap()`    | `T`    | Return inner value; exits program if `fail`        |
+| `.or(default)` | `T`    | Return inner value or `default` if `fail`          |
+| `.is_ok`       | `bool` | `true` if `ok` variant                             |
+| `.is_fail`     | `bool` | `true` if `fail` variant                           |
+| `.msg`         | `str`  | Failure message; only valid on `fail`              |
+
+**`?` propagation operator:**
+
+Inside a protocol returning `result[T]`, the postfix `?` operator applied to
+a `result`-typed expression:
+- If the result is `ok` — evaluates to the unwrapped value of type `T`.
+- If the result is `fail` — immediately returns the `fail` to the caller.
+
+`?` on a non-`result` expression is a compile-time error. Using `?` inside a
+void or non-`result` protocol is a compile-time error.
+
+**Checking variants:**
+
+```ebnf
+is_ok_expr      ::= expr "is" "ok"
+is_fail_expr    ::= expr "is" "fail"
+when_result     ::= "when" expr ":" <NEWLINE>
+                    <INDENT>
+                    "is" "ok" "(" <IDENT> ")" ":" <NEWLINE>
+                        <INDENT> { statement } <DEDENT>
+                    "is" "fail" "(" <IDENT> ")" ":" <NEWLINE>
+                        <INDENT> { statement } <DEDENT>
+                    <DEDENT>
+```
+
+**Type rules:**
+- `ok(expr)` — `expr` must be type `T` matching the declared `result[T]`.
+- `fail(expr)` — `expr` must be `str`.
+- `result[result[T]]` — **compile-time error** (no nesting).
 
 ---
 
@@ -731,15 +794,14 @@ Keywords are reserved and cannot be used as identifiers.
 
 | Category    | Keywords                                                                                                    |
 |-------------|-------------------------------------------------------------------------------------------------------------|
-| Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup`                                          |
+| Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup` `result` `file`                         |
 | Literals    | `true` `neutral` `false` `null`                                                                             |
 | Statements  | `output` `input` `fmt`                                                                                      |
 |             | `if` `elif` `else` `when` `is` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`                    |
 |             | `return` `swap` `flip` `prot` `use`                                                                         |
 |             | `with` `open` `as`                                                                                          |
 | Operators   | `and` `or` `not`                                                                                            |
-| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn` `file_exists`                                               |
-| Types       | `file` (built-in opaque handle type; only valid inside `with open … as` block)                              |
+| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn` `file_exists` `ok` `fail`                                   |
 | Memory      | `mm` `gc` `arena` `pool` `stack` `heap` `static` `sweep` `ref` `gen` `inc` `region`                        |
 | Decorators  | `memo` `pure` `total` `inline` `noinline` `hot` `cold` `safe` `unsafe`                                     |
 | Future      | `blast` `pipe` `match` `assert` `unreachable` `move` `own` `free` `align` `const` `volatile`               |
@@ -841,19 +903,39 @@ Maximum 256 entries (`VAR_MAX`). Exceeding this limit is a compile-time error.
 
 ## 30. Protocol Table Layout
 
-Each protocol occupies one 64-byte entry in the flat `proto_table` array:
+Each protocol occupies one **128-byte** entry in the flat `proto_table` array:
 
 ```
 offset  size  field
-──────  ────  ──────────────────────────────────────────────────
- 0      32    name (null-padded ASCII, max 31 bytes + NUL)
-32       8    body_offset — byte offset of protocol body in output buffer
-40       1    param_count (0–6)
-41       6    param var_table indices (one byte each; unused = 0)
-47       1    ret_type tag (TYPE_* constant; 0 = void)
-48       1    ret_count (0 = void, 1 = single, 2+ = multi-value)
-49      15    (reserved — decorators bitmask, future use)
+──────  ────  ──────────────────────────────────────────────────────────
+  0     32    name (null-padded ASCII, max 31 bytes + NUL)
+ 32      8    body_offset — byte offset of protocol body in output buffer
+ 40      1    param_count (0–65)
+ 41      1    ret_type tag (TYPE_* constant; 0 = void)
+ 42      1    ret_count (0 = void, 1 = single, 2+ = multi-value)
+ 43      1    ret_is_result (0 = plain type, 1 = result[T] wrapper)
+ 44      1    decorator_mask (bitmask; bit 0=memo, 1=pure, 2=total,
+              3=inline, 4=noinline, 5=hot, 6=cold, 7=unsafe)
+ 45      3    (reserved — padding to align param block)
+ 48     65    param_var_indices — one byte per parameter, index into
+              var_table; unused slots set to 0xFF
+113     15    (reserved — future generic type params)
 ```
+
+**Entry size is 128 bytes.** Lookups use `imul rax, 128` (or `shl rax, 7`).
+Maximum 256 entries (`PROTO_MAX`). Exceeding this limit is a compile-time error.
+
+**Argument passing convention:**
+
+| Parameter position | Register / location         |
+|--------------------|-----------------------------|
+| 1                  | `rdi`                       |
+| 2                  | `rsi`                       |
+| 3                  | `rdx`                       |
+| 4                  | `rcx`                       |
+| 5                  | `r8`                        |
+| 6                  | `r9`                        |
+| 7–65               | Stack, pushed right-to-left; caller cleans up after return |
 
 ---
 
@@ -865,7 +947,8 @@ the EBNF alone:
 1. **Mutability**: `:x = …` is legal only if `x` was declared with `":"`.
 2. **Initialization**: Reading an uninitialized variable is a compile-time error.
 3. **Arity**: Protocol calls must supply exactly as many arguments as declared.
-4. **Type matching**: All operands must be compatible types (see §27 propagation).
+   Maximum 65 parameters per protocol definition.
+4. **Type matching**: All operands must be compatible types (see §28 propagation).
 5. **Loop depth**: `stop N` / `skip N` where N exceeds the current nesting depth
    is a compile-time error.
 6. **`arr` size**: The literal element count in `[…]` must equal `N`.
@@ -876,3 +959,14 @@ the EBNF alone:
    possible values is a compile-time warning; with `_` it is always exhaustive.
 10. **`dict` keys**: All dict operations that write use `str` keys only. Variable
     key expressions are supported; key type must be `str`.
+11. **Forward references**: All protocol names and global variable names are
+    visible throughout the entire source file. Pass 2 (Symbol Collection) builds
+    the full `proto_table` and `var_table` headers before any IR is emitted.
+    Calling a protocol defined later in the file is legal. Mutual recursion
+    requires no pre-declaration stubs.
+12. **`result[T]` propagation (`?`)**: The `?` operator is only legal inside a
+    protocol whose declared return type is `result[T]`. Using `?` in a void or
+    plain-type protocol is a compile-time error.
+13. **`result` nesting**: `result[result[T]]` is a compile-time error.
+14. **`ok` / `fail` type**: `ok(expr)` requires `expr` to match `T` in the
+    surrounding `result[T]` context. `fail(expr)` requires `expr` to be `str`.

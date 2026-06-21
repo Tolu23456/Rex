@@ -822,7 +822,9 @@ prot add(int a, int b) -> int:
 
 - No `return` type annotation → void protocol (no `None`, no `void` keyword).
 - Parameters are typed, type-first.
-- Up to 6 parameters (SysV ABI: `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`).
+- Up to **65 parameters**. The first 6 are passed in registers (`rdi`, `rsi`,
+  `rdx`, `rcx`, `r8`, `r9`). Parameters 7–65 are pushed right-to-left on the
+  stack before the call and cleaned up by the caller after return.
 
 ### 9.2 Calling with `@`
 
@@ -897,7 +899,88 @@ reads clearly as an annotation.
 
 Decorators compose freely. Order does not matter.
 
-### 9.5 Recursion
+### 9.5 Error Handling — `result[T]`
+
+Rex has no exceptions. Fallible protocols return `result[T]` — a built-in
+tagged type that is either `ok(value)` or `fail("message")`.
+
+#### Construction
+
+```rex
+result[int] r = ok(42)
+result[str] s = fail("file not found")
+```
+
+#### Checking
+
+```rex
+when r:
+    is ok(v):   output(v)
+    is fail(m): output(m)
+
+// boolean shorthand
+if r is ok:
+    output(r.unwrap())
+if r is fail:
+    output(r.msg)
+```
+
+#### Methods
+
+| Method / Field   | Returns  | Notes                                              |
+|------------------|----------|----------------------------------------------------|
+| `.unwrap()`      | `T`      | Return inner value; exits program if `fail`        |
+| `.or(default)`   | `T`      | Return inner value or `default` if `fail`          |
+| `.is_ok`         | `bool`   | `true` if `ok` variant                             |
+| `.is_fail`       | `bool`   | `true` if `fail` variant                           |
+| `.msg`           | `str`    | Failure message; only valid on `fail` variant      |
+
+#### Propagation — `?` operator
+
+Inside a `result[T]` protocol, appending `?` to a `result`-typed expression
+unwraps the value if `ok`, or immediately returns the `fail` to the caller:
+
+```rex
+prot safe_div(int a, int b) -> result[int]:
+    if b == 0:
+        return fail("division by zero")
+    return ok(a / b)
+
+prot compute(int x) -> result[int]:
+    int d = @safe_div(x, 2)?     // propagates fail upward
+    int e = @safe_div(d, 3)?
+    return ok(e + 1)
+
+// call site
+result[int] r = @compute(12)
+when r:
+    is ok(v):   output(v)
+    is fail(m): output(m)
+```
+
+`?` is only legal inside a protocol that itself returns `result[T]`. Using
+`?` in a void or plain-type protocol is a **compile-time error**.
+
+#### Chaining
+
+```rex
+prot read_positive(str path) -> result[int]:
+    result[str] raw = @read_file(path)?
+    result[int] n   = @parse_int(raw)?
+    if n <= 0:
+        return fail("expected positive integer")
+    return ok(n)
+```
+
+#### Error type rules
+
+- `ok(expr)` — `expr` must match the declared `T` in `result[T]`.
+- `fail(expr)` — `expr` must be `str`. Only string messages are allowed.
+- `result[T]` is a first-class type: it can be stored in variables, passed
+  as arguments, returned from protocols, and stored in containers.
+- `result[result[T]]` is **not** permitted — no nested results.
+
+### 9.6 Recursion
 
 Protocols may call themselves. Per-call stack frames are required — each
 recursive call must save and restore every in-scope variable slot before and
