@@ -923,65 +923,171 @@ seq[seq[int]] matrix                    // nested sequences
 Sequences are heap-allocated, typed, and auto-grow on overflow. The hidden
 header is `[capacity: 8][length: 8][data: ...]`.
 
-### 10.1 Core Operations
+All mutating methods require the `:` sigil on the receiver (e.g. `:nums.push(6)`),
+except void operations that are explicitly mutating by design (marked **mut**).
+
+---
+
+### 10.1 Core — Size and Capacity
+
+| Method          | Returns | Notes                                                      |
+|-----------------|---------|------------------------------------------------------------|
+| `.len()`        | `int`   | Number of elements currently stored                        |
+| `.cap()`        | `int`   | Allocated capacity (elements before realloc)               |
+| `.is_empty()`   | `bool`  | `true` if `len()` == 0                                     |
+| `.clear()` **mut** | `void` | Set length to 0; capacity unchanged                      |
+| `.reserve(n)` **mut** | `void` | Ensure capacity for at least `n` elements          |
+| `.shrink()` **mut** | `void` | Reduce capacity to exactly `len()`                    |
+
+### 10.2 Insertion and Removal
+
+| Method                  | Returns | Notes                                                   |
+|-------------------------|---------|---------------------------------------------------------|
+| `.push(x)` **mut**      | `void`  | Append element to the end; grows if needed              |
+| `.pop()` **mut**        | `T`     | Remove and return last element; error if empty          |
+| `.pop_front()` **mut**  | `T`     | Remove and return first element; shifts elements left   |
+| `.insert(i, x)` **mut** | `void`  | Insert `x` at index `i`; elements at `i+` shift right  |
+| `.remove(i)` **mut**    | `T`     | Remove and return element at index `i`; shifts left     |
+| `.extend(other)` **mut**| `void`  | Append all elements of another `seq[T]`                 |
+| `.push_front(x)` **mut**| `void`  | Insert element at index 0; shifts all elements right    |
+
+### 10.3 Access and Search
+
+| Method               | Returns | Notes                                                      |
+|----------------------|---------|------------------------------------------------------------|
+| `s[i]`               | `T`     | Read at index `i`; negative indices count from end         |
+| `:s[i] = v`          | `void`  | Write at index `i`                                         |
+| `.first()`           | `T`     | First element; runtime error if empty                      |
+| `.last()`            | `T`     | Last element; runtime error if empty                       |
+| `.get(i)`            | `T`     | Same as `s[i]` — explicit form                             |
+| `.contains(x)`       | `bool`  | `true` if any element equals `x`                           |
+| `.index_of(x)`       | `int`   | Index of first match; −1 if not found                      |
+| `.last_index_of(x)`  | `int`   | Index of last match; −1 if not found                       |
+| `.count_of(x)`       | `int`   | Number of elements equal to `x`                            |
+| `.find(pred)`        | `T`     | First element where predicate is `true`; error if none     |
+| `.find_index(pred)`  | `int`   | Index of first matching element; −1 if none                |
+
+### 10.4 Slicing and Copying
+
+| Method                  | Returns    | Notes                                                |
+|-------------------------|------------|------------------------------------------------------|
+| `.slice(lo, hi)`        | `seq[T]`   | New seq from index `lo` to `hi` (exclusive)          |
+| `.slice_from(lo)`       | `seq[T]`   | From index `lo` to end                               |
+| `.slice_to(hi)`         | `seq[T]`   | From start to index `hi` (exclusive)                 |
+| `.take(n)`              | `seq[T]`   | First `n` elements as a new seq                      |
+| `.drop(n)`              | `seq[T]`   | All elements after skipping the first `n`            |
+| `.copy()`               | `seq[T]`   | Shallow copy of the entire seq                       |
+
+### 10.5 Ordering
+
+| Method                   | Returns | Notes                                                   |
+|--------------------------|---------|---------------------------------------------------------|
+| `.sort()` **mut**        | `void`  | Sort ascending in place (comparison via `<`)            |
+| `.sort_desc()` **mut**   | `void`  | Sort descending in place                                |
+| `.sort_by(cmp)` **mut**  | `void`  | Sort in place using custom comparator `fn(T, T) -> int` |
+| `.reverse()` **mut**     | `void`  | Reverse elements in place                               |
+| `.is_sorted()`           | `bool`  | `true` if elements are in non-decreasing order          |
+| `.min()`                 | `T`     | Smallest element; error if empty                        |
+| `.max()`                 | `T`     | Largest element; error if empty                         |
+| `.min_index()`           | `int`   | Index of the smallest element                           |
+| `.max_index()`           | `int`   | Index of the largest element                            |
+
+### 10.6 Math Aggregates
+
+Only valid for `seq[int]` and `seq[float]`.
+
+| Method       | Returns | Notes                                                         |
+|--------------|---------|---------------------------------------------------------------|
+| `.sum()`     | `T`     | Sum of all elements                                           |
+| `.product()` | `T`     | Product of all elements                                       |
+| `.mean()`    | `float` | Arithmetic mean (always float)                               |
+| `.median()`  | `float` | Median value (always float; sorts a copy internally)          |
+
+### 10.7 Set Operations
+
+Both sequences must have the same element type `T`.
+
+| Method              | Returns  | Notes                                              |
+|---------------------|----------|----------------------------------------------------|
+| `.unique()`         | `seq[T]` | New seq with duplicate elements removed (order kept) |
+| `.union(other)`     | `seq[T]` | All elements from both, duplicates removed         |
+| `.intersect(other)` | `seq[T]` | Elements present in both                           |
+| `.diff(other)`      | `seq[T]` | Elements in self but not in `other`                |
+
+### 10.8 Transformation (Functional)
+
+| Method                   | Returns  | Notes                                              |
+|--------------------------|----------|----------------------------------------------------|
+| `.map(fn(T) -> U)`       | `seq[U]` | Apply function to each element, collect results    |
+| `.filter(fn(T) -> bool)` | `seq[T]` | Keep elements where predicate is `true`            |
+| `.reduce(init, fn(acc T, x T) -> T)` | `T` | Fold left with initial accumulator       |
+| `.flat()`                | `seq[U]` | Flatten one level: `seq[seq[U]]` → `seq[U]`       |
+| `.flat_map(fn(T) -> seq[U])` | `seq[U]` | Map then flatten                              |
+| `.zip(other)`            | `seq[tup[T, U]]` | Pair elements by index; length = shorter  |
+| `.enumerate()`           | `seq[tup[int, T]]` | Pair each element with its index          |
+| `.each(fn(T))`           | `void`   | Call function on each element (side effects)       |
+| `.each_index(fn(int, T))`| `void`   | Call function with index and element               |
+
+### 10.9 Predicates
+
+| Method                    | Returns | Notes                                             |
+|---------------------------|---------|---------------------------------------------------|
+| `.any(fn(T) -> bool)`     | `bool`  | `true` if predicate holds for at least one element |
+| `.all(fn(T) -> bool)`     | `bool`  | `true` if predicate holds for all elements        |
+| `.none(fn(T) -> bool)`    | `bool`  | `true` if predicate holds for no elements         |
+| `.count(fn(T) -> bool)`   | `int`   | Number of elements where predicate is `true`      |
+
+### 10.10 Conversion
+
+| Method           | Returns    | Notes                                                  |
+|------------------|------------|--------------------------------------------------------|
+| `.to_str()`      | `str`      | `"[1, 2, 3]"` style representation                    |
+| `.join(sep)`     | `str`      | Join with separator string; `T` must be `str` or `char` |
+| `.to_arr()`      | `arr[T, N]`| Only valid if size is compile-time known               |
 
 ```rex
-nums.push(6)            // append
-int v = nums.pop()      // remove and return last
-int n = nums.len()      // element count
-int c = nums.cap()      // allocated capacity
-bool e = nums.is_empty()
-nums.clear()
-```
+seq[int] nums = [5, 3, 8, 1, 9, 2]
 
-### 10.2 Access
+// Insertion / removal
+:nums.push(10)
+int last = nums.pop()          // 10
+:nums.insert(2, 99)            // [5, 3, 99, 8, 1, 9, 2]
 
-```rex
-int first = nums[0]
-int last = nums[-1]     // negative indices count from end
-:nums[2] = 99           // write requires : sigil
-```
+// Search
+output(nums.contains(8))       // true
+output(nums.index_of(99))      // 2
+output(nums.find(fn(int x) -> bool: x > 7))  // 99
 
-### 10.3 Transformation
+// Sorting and slicing
+:nums.sort()                   // [1, 2, 3, 5, 8, 9, 99]
+seq[int] top = nums.slice(4, 7) // [8, 9, 99]
+seq[int] head = nums.take(3)   // [1, 2, 3]
 
-```rex
-nums.sort()
-nums.sort_desc()
-nums.reverse()
-seq[int] copy = nums.copy()
-seq[int] sub = nums.slice(1, 4)
-```
-
-### 10.4 Functional
-
-```rex
-nums.each(fn(int x): output(x))
+// Functional
 seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
-seq[int] evens = nums.filter(fn(int x) -> bool: x % 2 == 0)
-bool any = nums.any(fn(int x) -> bool: x > 10)
-bool all = nums.all(fn(int x) -> bool: x > 0)
-int cnt = nums.count(fn(int x) -> bool: x > 5)
+seq[int] small = nums.filter(fn(int x) -> bool: x < 10)
 int total = nums.reduce(0, fn(int acc, int x) -> int: acc + x)
-int s = nums.sum()
-int mn = nums.min()
-int mx = nums.max()
+output(nums.sum())             // 127
+output(nums.mean())            // 18.14...
+
+// Sets
+seq[int] a = [1, 2, 3, 4]
+seq[int] b = [3, 4, 5, 6]
+output(a.intersect(b))         // [3, 4]
+output(a.diff(b))              // [1, 2]
+output(a.unique())             // [1, 2, 3, 4] (no change, already unique)
 ```
 
 ---
 
 ## 11. Fixed Arrays
 
-Stack-allocated, size known at compile time:
+Stack-allocated, size known at compile time. `N` must be a compile-time constant.
 
 ```rex
 arr[int, 8] buf                         // uninitialized
 arr[float, 3] v = [1.0, 0.0, 0.0]      // literal initialisation
-```
-
-Same index and slice API as `seq`. No push/pop. Converting to sequence:
-
-```rex
-seq[int] s = buf.to_seq()
+arr[byte, 16] key = [0] * 16           // zero-fill
 ```
 
 **When to use `arr` vs `seq`:**
@@ -996,9 +1102,106 @@ seq[int] s = buf.to_seq()
 
 ---
 
+### 11.1 Access
+
+| Method / Syntax  | Returns | Notes                                                      |
+|------------------|---------|------------------------------------------------------------|
+| `a[i]`           | `T`     | Read at index `i`; negative indices count from end         |
+| `:a[i] = v`      | `void`  | Write at index `i`; in-place, no realloc                   |
+| `.first()`       | `T`     | First element                                              |
+| `.last()`        | `T`     | Last element                                               |
+| `.len()`         | `int`   | Always returns `N` (compile-time constant)                 |
+| `.is_empty()`    | `bool`  | Always `false` for `N > 0`                                 |
+
+### 11.2 Search
+
+| Method               | Returns | Notes                                                      |
+|----------------------|---------|------------------------------------------------------------|
+| `.contains(x)`       | `bool`  | Linear scan; `true` if any element equals `x`              |
+| `.index_of(x)`       | `int`   | Index of first match; −1 if not found                      |
+| `.count_of(x)`       | `int`   | Number of elements equal to `x`                            |
+| `.find(pred)`        | `T`     | First element where predicate is `true`; error if none     |
+| `.find_index(pred)`  | `int`   | Index of first matching element; −1 if none                |
+| `.min()`             | `T`     | Smallest element                                           |
+| `.max()`             | `T`     | Largest element                                            |
+
+### 11.3 Slicing
+
+| Method               | Returns     | Notes                                                  |
+|----------------------|-------------|--------------------------------------------------------|
+| `.slice(lo, hi)`     | `seq[T]`    | New heap seq from index `lo` to `hi` (exclusive)       |
+| `.slice_from(lo)`    | `seq[T]`    | From index `lo` to end                                 |
+| `.slice_to(hi)`      | `seq[T]`    | From start to index `hi`                               |
+| `.take(n)`           | `seq[T]`    | First `n` elements as a heap seq                       |
+| `.drop(n)`           | `seq[T]`    | Elements after skipping the first `n`                  |
+
+### 11.4 Ordering
+
+| Method                   | Returns | Notes                                                   |
+|--------------------------|---------|---------------------------------------------------------|
+| `.sort()` **mut**        | `void`  | Sort in place ascending                                 |
+| `.sort_desc()` **mut**   | `void`  | Sort in place descending                                |
+| `.sort_by(cmp)` **mut**  | `void`  | Sort in place with custom comparator                    |
+| `.reverse()` **mut**     | `void`  | Reverse elements in place                               |
+| `.is_sorted()`           | `bool`  | `true` if elements are in non-decreasing order          |
+
+### 11.5 Math Aggregates
+
+Only valid for `arr[int, N]` and `arr[float, N]`.
+
+| Method       | Returns | Notes                    |
+|--------------|---------|--------------------------|
+| `.sum()`     | `T`     | Sum of all elements       |
+| `.product()` | `T`     | Product of all elements   |
+| `.mean()`    | `float` | Arithmetic mean           |
+
+### 11.6 Functional
+
+| Method                   | Returns  | Notes                                           |
+|--------------------------|----------|-------------------------------------------------|
+| `.map(fn(T) -> U)`       | `seq[U]` | Apply function to each element; result is a seq |
+| `.filter(fn(T) -> bool)` | `seq[T]` | Collect matching elements into a seq            |
+| `.reduce(init, fn)`      | `T`      | Fold left                                       |
+| `.each(fn(T))`           | `void`   | Call function on each element                   |
+| `.any(fn(T) -> bool)`    | `bool`   | `true` if predicate holds for at least one      |
+| `.all(fn(T) -> bool)`    | `bool`   | `true` if predicate holds for all               |
+| `.none(fn(T) -> bool)`   | `bool`   | `true` if predicate holds for none              |
+
+### 11.7 Conversion
+
+| Method         | Returns    | Notes                                                   |
+|----------------|------------|---------------------------------------------------------|
+| `.to_seq()`    | `seq[T]`   | Copy elements into a new heap-allocated sequence        |
+| `.copy()`      | `arr[T, N]`| Stack copy of the entire array                          |
+
+```rex
+arr[int, 5] a = [4, 2, 7, 1, 9]
+
+output(a.len())          // 5
+output(a.first())        // 4
+output(a.last())         // 9
+output(a.contains(7))    // true
+output(a.index_of(7))    // 2
+output(a.min())          // 1
+output(a.max())          // 9
+output(a.sum())          // 23
+
+:a.sort()
+output(a[0])             // 1
+output(a[4])             // 9
+
+seq[int] big = a.filter(fn(int x) -> bool: x > 4)
+output(big)              // [7, 9]
+
+seq[int] copy = a.to_seq()
+```
+
+---
+
 ## 12. Dictionaries
 
 SipHash-2-4 internally. Keys are always `str`. Value type is declared in `[T]`.
+Heap-allocated, grows automatically. Iteration order is insertion order.
 
 ```rex
 dict[int] scores                                        // empty
@@ -1006,37 +1209,98 @@ dict[int] scores = {"alice": 95, "bob": 87}            // literal init
 dict[str] config = {"host": "localhost", "port": "8080"}
 ```
 
-### 12.1 Access
+---
+
+### 12.1 Access and Lookup
+
+| Method / Syntax            | Returns | Notes                                                       |
+|----------------------------|---------|-------------------------------------------------------------|
+| `d[key]`                   | `T`     | Read; runtime error if key not present                      |
+| `:d[key] = val`            | `void`  | Write; inserts if key absent, overwrites if present         |
+| `.get(key)`                | `T`     | Same as `d[key]` — explicit form                            |
+| `.get_or(key, default)`    | `T`     | Returns `default` if key absent; does not insert            |
+| `.get_or_set(key, default)`| `T`     | Inserts `default` if absent, then returns stored value      |
+| `.has(key)`                | `bool`  | `true` if key exists                                        |
+| `.is_empty()`              | `bool`  | `true` if no entries                                        |
+| `.len()`                   | `int`   | Number of key-value pairs                                   |
+
+Missing-key access via `d[key]` or `.get()` is a **runtime error**. Always
+guard with `.has()` or use `.get_or()`.
+
+### 12.2 Insertion and Removal
+
+| Method                         | Returns | Notes                                                  |
+|--------------------------------|---------|--------------------------------------------------------|
+| `.remove(key)` **mut**         | `T`     | Remove and return the value; error if key absent       |
+| `.remove_if(key)` **mut**      | `bool`  | Remove if present; return `true` if it existed         |
+| `.clear()` **mut**             | `void`  | Remove all entries                                     |
+| `.update(other)` **mut**       | `void`  | Merge `other` into self; `other` wins on conflict      |
+| `.update_if_absent(other)` **mut** | `void` | Merge `other`; self wins on conflict (no overwrites) |
+| `.set_if_absent(key, val)` **mut** | `bool` | Insert only if key is not present; return `true` if inserted |
+
+### 12.3 Keys, Values, and Pairs
+
+| Method        | Returns      | Notes                                                    |
+|---------------|--------------|----------------------------------------------------------|
+| `.keys()`     | `seq[str]`   | All keys in insertion order                              |
+| `.values()`   | `seq[T]`     | All values in insertion order                            |
+| `.pairs()`    | `seq[tup[str, T]]` | All key-value pairs in insertion order           |
+| `.copy()`     | `dict[T]`    | Shallow copy of the entire dict                          |
+
+### 12.4 Functional
+
+| Method                              | Returns   | Notes                                          |
+|-------------------------------------|-----------|------------------------------------------------|
+| `.each(fn(str, T))`                 | `void`    | Call function on every key-value pair          |
+| `.map(fn(str, T) -> U)`             | `dict[U]` | New dict with values transformed               |
+| `.map_keys(fn(str, T) -> str)`      | `dict[T]` | New dict with keys transformed; must stay unique |
+| `.filter(fn(str, T) -> bool)`       | `dict[T]` | New dict with only matching pairs              |
+| `.reduce(init, fn(acc R, str, T) -> R)` | `R`   | Fold over all pairs                            |
+
+### 12.5 Predicates
+
+| Method                        | Returns | Notes                                              |
+|-------------------------------|---------|---------------------------------------------------|
+| `.any(fn(str, T) -> bool)`    | `bool`  | `true` if predicate holds for at least one pair   |
+| `.all(fn(str, T) -> bool)`    | `bool`  | `true` if predicate holds for all pairs           |
+| `.none(fn(str, T) -> bool)`   | `bool`  | `true` if predicate holds for no pairs            |
+| `.count(fn(str, T) -> bool)`  | `int`   | Number of pairs where predicate is `true`         |
+
+### 12.6 Set Operations on Keys
+
+| Method             | Returns   | Notes                                                   |
+|--------------------|-----------|----------------------------------------------------------|
+| `.invert()`        | `dict[str]` | Swap keys and values; `T` must be `str`              |
+| `.key_union(other)` | `seq[str]` | All distinct keys from both dicts                   |
+| `.key_intersect(other)` | `seq[str]` | Keys present in both dicts                    |
+| `.key_diff(other)` | `seq[str]` | Keys in self but not in `other`                      |
 
 ```rex
-int v = scores["alice"]             // read
-:scores["alice"] = 99               // write — : required
-bool found = scores.has("carol")
-int safe = scores.get_or("dave", 0) // 0 if missing, no insert
-int val = scores.get_or_set("dave", 50) // insert default if missing
-scores.remove("alice")
-```
+dict[int] scores = {"alice": 95, "bob": 87, "carol": 72}
 
-Missing-key access via `[]` or `.get()` is a **runtime error**. Always guard
-with `.has()` or `.get_or()`.
+// Access
+output(scores["alice"])                // 95
+output(scores.get_or("dave", 0))       // 0
+output(scores.has("carol"))            // true
 
-### 12.2 Bulk and Functional
+// Mutation
+:scores["dave"] = 88
+scores.remove("bob")
+output(scores.len())                   // 3
 
-```rex
-scores.update(extras)               // merge, other wins on conflict
-dict[int] copy = scores.copy()
-seq[str] ks = scores.keys()
-seq[int] vs = scores.values()
-int n = scores.len()
-scores.clear()
+// Keys / values
+seq[str] ks = scores.keys()           // ["alice", "carol", "dave"] (insertion order)
+seq[int] vs = scores.values()         // [95, 72, 88]
 
-scores.each(fn(str k, int v): output("{k}: {v}"))
-dict[str] labels = scores.map(fn(str k, int v) -> str: str(v) + " pts")
-dict[int] passing = scores.filter(fn(str k, int v) -> bool: v >= 75)
-bool any = scores.any(fn(str k, int v) -> bool: v == 100)
-bool all = scores.all(fn(str k, int v) -> bool: v > 0)
-int cnt = scores.count(fn(str k, int v) -> bool: v >= 80)
-dict[str] rev = abbrevs.invert()    // swap keys/values; T must be str
+// Functional
+dict[int] high = scores.filter(fn(str k, int v) -> bool: v >= 80)
+dict[str] labels = scores.map(fn(str k, int v) -> str: fmt("{v} pts"))
+bool any_perfect = scores.any(fn(str k, int v) -> bool: v == 100)
+
+// Set ops
+dict[int] extras = {"eve": 91, "alice": 60}
+scores.update(extras)                  // alice becomes 60 (extras wins)
+output(scores.key_intersect(extras))   // ["alice"]
 ```
 
 ---
@@ -1044,46 +1308,117 @@ dict[str] rev = abbrevs.invert()    // swap keys/values; T must be str
 ## 13. Strings
 
 Heap-managed UTF-8. Header layout: `[capacity: 8][length: 8][data: N]`.
-Methods return new strings — mutation always goes through `:s = s.method()`.
+All methods return **new strings** — the source string is never mutated.
+Reassignment uses the `:` sigil: `:s = s.upper()`.
 
-### 13.1 Operations
+### 13.1 Operators
 
-```rex
-str result = s + " " + t           // concatenation
-str line = "-" * 40                // repetition
-char c = s[0]                      // index
-char last = s[-1]                  // negative index
-if s == "hello": output("match")   // content equality
-```
+| Operator / Syntax | Returns | Notes                                                   |
+|-------------------|---------|---------------------------------------------------------|
+| `s + t`           | `str`   | Concatenate two strings                                 |
+| `s * n`           | `str`   | Repeat `s` exactly `n` times                            |
+| `s[i]`            | `char`  | Character at index `i`; negative counts from end        |
+| `s == t`          | `bool`  | Byte-for-byte equality                                  |
+| `s < t`           | `bool`  | Lexicographic ordering                                  |
+| `s in t`          | `bool`  | `true` if `s` is a substring of `t`                    |
 
-### 13.2 Core Methods
+### 13.2 Size and Inspection
 
-```rex
-s.len()            // byte count
-s.upper()          // new uppercase copy
-s.lower()          // new lowercase copy
-s.trim()           // strip leading/trailing whitespace
-s.contains("sub")  // bool
-s.starts_with("p") // bool
-s.ends_with("!")   // bool
-s.replace("a","b") // new string
-s.slice(1, 4)      // new substring (end exclusive)
-s.split(", ")      // seq[str]
-s.index_of("x")    // int; -1 if not found
-s.count("ss")      // int (non-overlapping occurrences)
-s.reverse()        // new reversed string
-s.repeat(3)        // new repeated string
-s.pad_left(10, ' ')
-s.pad_right(10, '-')
-s.center(10, '*')
-s.lines()          // seq[str] — split on \n
-s.words()          // seq[str] — split on whitespace runs
-", ".join(names)   // str — join seq[str] with separator
-s.chars()          // seq[char]
-s.bytes()          // seq[byte]
-```
+| Method            | Returns | Notes                                                   |
+|-------------------|---------|---------------------------------------------------------|
+| `.len()`          | `int`   | Byte count (UTF-8; may differ from character count)     |
+| `.is_empty()`     | `bool`  | `true` if `len()` == 0                                  |
+| `.char_count()`   | `int`   | Number of UTF-8 code points (≤ `len()`)                 |
 
-### 13.3 String Interpolation
+### 13.3 Case and Whitespace
+
+| Method            | Returns | Notes                                                   |
+|-------------------|---------|---------------------------------------------------------|
+| `.upper()`        | `str`   | New uppercase copy (ASCII only)                         |
+| `.lower()`        | `str`   | New lowercase copy (ASCII only)                         |
+| `.trim()`         | `str`   | Strip leading and trailing whitespace                   |
+| `.trim_left()`    | `str`   | Strip leading whitespace only                           |
+| `.trim_right()`   | `str`   | Strip trailing whitespace only                          |
+| `.trim_char(c)`   | `str`   | Strip specific char from both ends                      |
+
+### 13.4 Search and Testing
+
+| Method                   | Returns | Notes                                                 |
+|--------------------------|---------|-------------------------------------------------------|
+| `.contains(sub)`         | `bool`  | `true` if `sub` appears anywhere                      |
+| `.starts_with(prefix)`   | `bool`  | `true` if string begins with `prefix`                 |
+| `.ends_with(suffix)`     | `bool`  | `true` if string ends with `suffix`                   |
+| `.index_of(sub)`         | `int`   | First index of `sub`; −1 if not found                 |
+| `.last_index_of(sub)`    | `int`   | Last index of `sub`; −1 if not found                  |
+| `.count(sub)`            | `int`   | Non-overlapping occurrences of `sub`                  |
+| `.find(pred)`            | `char`  | First character where predicate is `true`; error if none |
+
+### 13.5 Slicing and Splitting
+
+| Method                   | Returns    | Notes                                              |
+|--------------------------|------------|----------------------------------------------------|
+| `.slice(lo, hi)`         | `str`      | New substring from byte index `lo` to `hi` (exclusive) |
+| `.slice_from(lo)`        | `str`      | From byte index `lo` to end                        |
+| `.slice_to(hi)`          | `str`      | From start to byte index `hi`                      |
+| `.take(n)`               | `str`      | First `n` bytes as a new string                    |
+| `.drop(n)`               | `str`      | All bytes after skipping the first `n`             |
+| `.split(sep)`            | `seq[str]` | Split on separator string                          |
+| `.split_char(c)`         | `seq[str]` | Split on a single char delimiter                   |
+| `.lines()`               | `seq[str]` | Split on `\n` (strips trailing newline if present) |
+| `.words()`               | `seq[str]` | Split on any run of whitespace                     |
+
+### 13.6 Transformation
+
+| Method                        | Returns | Notes                                              |
+|-------------------------------|---------|----------------------------------------------------|
+| `.replace(old, new)`          | `str`   | Replace first occurrence of `old` with `new`       |
+| `.replace_all(old, new)`      | `str`   | Replace all non-overlapping occurrences            |
+| `.reverse()`                  | `str`   | New reversed string                                |
+| `.repeat(n)`                  | `str`   | Repeat string `n` times                            |
+| `.insert(i, sub)`             | `str`   | New string with `sub` inserted at byte index `i`   |
+| `.remove_at(i, n)`            | `str`   | New string with `n` bytes removed at index `i`     |
+
+### 13.7 Padding and Alignment
+
+| Method                     | Returns | Notes                                                 |
+|----------------------------|---------|-------------------------------------------------------|
+| `.pad_left(width, fill)`   | `str`   | Right-align in `width` chars, filled with `fill` char |
+| `.pad_right(width, fill)`  | `str`   | Left-align in `width` chars, filled with `fill` char  |
+| `.center(width, fill)`     | `str`   | Center in `width` chars, filled with `fill` char      |
+
+### 13.8 Joining and Iterating
+
+| Method               | Returns     | Notes                                                  |
+|----------------------|-------------|--------------------------------------------------------|
+| `.join(parts)`       | `str`       | Self is separator; `parts` is `seq[str]`               |
+| `.chars()`           | `seq[char]` | Sequence of individual characters                      |
+| `.bytes()`           | `seq[byte]` | Sequence of raw byte values                            |
+| `.each(fn(char))`    | `void`      | Call function on each character                        |
+
+### 13.9 Conversion and Parsing
+
+| Method        | Returns | Notes                                                    |
+|---------------|---------|----------------------------------------------------------|
+| `.to_int()`   | `int`   | Parse decimal integer; runtime error if invalid          |
+| `.to_float()` | `float` | Parse float; runtime error if invalid                    |
+| `.to_upper()` | `str`   | Alias for `.upper()`                                     |
+| `.to_lower()` | `str`   | Alias for `.lower()`                                     |
+| `.to_bytes()` | `seq[byte]` | Same as `.bytes()`                                   |
+| `.to_chars()` | `seq[char]` | Same as `.chars()`                                   |
+
+### 13.10 Predicates
+
+| Method               | Returns | Notes                                                   |
+|----------------------|---------|---------------------------------------------------------|
+| `.is_alpha()`        | `bool`  | All characters are letters (a–z, A–Z)                   |
+| `.is_digit()`        | `bool`  | All characters are decimal digits                        |
+| `.is_alnum()`        | `bool`  | All characters are letters or digits                    |
+| `.is_whitespace()`   | `bool`  | All characters are whitespace                           |
+| `.is_ascii()`        | `bool`  | All bytes ≤ 127                                         |
+| `.is_upper()`        | `bool`  | All alphabetic characters are uppercase                 |
+| `.is_lower()`        | `bool`  | All alphabetic characters are lowercase                 |
+
+### 13.11 String Interpolation
 
 All Rex string literals support `{expr}` interpolation — no prefix needed:
 
@@ -1096,22 +1431,150 @@ output("{{not interpolated}}")     // literal {
 
 Any valid Rex expression is allowed inside `{ }`.
 
-### 13.4 Format Specifiers
+### 13.12 Format Specifiers
 
 A `:` inside `{}` activates format mode:
 
 ```rex
 output("pi = {pi:.2f}")            // 3.14
-output("{n:08b}")                  // 11111111
+output("{n:08b}")                  // 00001111
 output("{n:x}")                    // ff (hex lowercase)
 output("{n:X}")                    // FF (hex uppercase)
 output("{n:10d}")                  // right-aligned, space-padded
 output("{name:10s}")               // left-aligned, space-padded
 ```
 
+```rex
+str s = "  Hello, Rex!  "
+output(s.trim())                   // "Hello, Rex!"
+output(s.lower())                  // "  hello, rex!  "
+output(s.contains("Rex"))          // true
+output(s.index_of("Rex"))          // 9
+output(s.replace("Rex", "World"))  // "  Hello, World!  "
+output(s.split(", "))             // ["  Hello", "Rex!  "]
+output(s.words())                  // ["Hello,", "Rex!"]
+output(s.trim().reverse())         // "!xeR ,olleH"
+output(s.trim().chars().len())     // 13
+
+str greeting = "hi"
+output(greeting.pad_left(10, '.'))  // "........hi"
+output(greeting.center(10, '-'))    // "----hi----"
+output(greeting.repeat(3))         // "hihihi"
+
+seq[str] parts = ["one", "two", "three"]
+output(", ".join(parts))           // "one, two, three"
+```
+
 ---
 
-## 14. I/O
+## 14. Tuples
+
+Tuples are fixed-size, heterogeneous, stack-allocated, and immutable by default.
+The types and count of elements are part of the type signature.
+
+```rex
+tup[int, str] pair = (42, "hello")
+tup[float, float, float] vec3 = (1.0, 0.0, 0.0)
+tup[int, bool, str] triple = (7, true, "yes")
+```
+
+Elements are accessed positionally using `.0`, `.1`, `.2`, etc.
+Tuples are value types — assignment copies all elements.
+
+```rex
+int n = pair.0          // 42
+str s = pair.1          // "hello"
+```
+
+---
+
+### 14.1 Access
+
+| Syntax / Method     | Returns | Notes                                                        |
+|---------------------|---------|--------------------------------------------------------------|
+| `t.0`, `t.1`, …    | `T_i`   | Field access by zero-based index; type known at compile time |
+| `.len()`            | `int`   | Always the arity declared in the type (compile-time constant)|
+| `.copy()`           | same    | Stack copy of the tuple                                      |
+
+### 14.2 Conversion
+
+| Method        | Returns     | Notes                                                         |
+|---------------|-------------|---------------------------------------------------------------|
+| `.to_seq()`   | `seq[T]`    | Only valid when **all** elements share the same type `T`      |
+| `.to_str()`   | `str`       | `"(42, "hello")"` style representation                       |
+| `.values()`   | spreads to stack | Unpack all fields (used in destructuring assignment)    |
+
+### 14.3 Destructuring
+
+Tuples can be unpacked into individual variables using a destructuring assignment.
+Each target must be declared before the assignment.
+
+```rex
+tup[int, str] pair = (42, "hello")
+
+int n
+str s
+:n, :s = pair           // n = 42, s = "hello"
+```
+
+Multiple return values from protocols are tuples at the call site:
+
+```rex
+prot minmax(seq[int] vals) -> (int, int):
+    // ...
+    return 1, 99
+
+int lo
+int hi
+:lo, :hi = @minmax(nums)
+```
+
+### 14.4 Comparison and Predicates
+
+| Method / Operator   | Returns | Notes                                                        |
+|---------------------|---------|--------------------------------------------------------------|
+| `t == u`            | `bool`  | Element-wise equality; both must have the same type          |
+| `t != u`            | `bool`  | `not (t == u)`                                               |
+| `.is_empty()`       | `bool`  | Always `false` — tuples always have at least one element     |
+
+### 14.5 Usage Notes
+
+- Tuples are **immutable by default**. Mutable tuple fields are not supported.
+  To mutate, unpack into variables, mutate, then construct a new tuple.
+- The element count `N` and each element type `T_i` must be known at
+  compile time. Tuples of unknown arity cannot be created at runtime.
+- Nesting is allowed: `tup[tup[int, int], str]`.
+- Tuples with one element (`tup[T]`) are allowed but unusual; prefer using
+  the type directly.
+
+```rex
+tup[int, float, str] t = (10, 3.14, "Rex")
+
+output(t.0)                    // 10
+output(t.1)                    // 3.14
+output(t.2)                    // "Rex"
+output(t.len())                // 3
+output(t.to_str())             // "(10, 3.14, "Rex")"
+
+// Destructuring
+int a
+float b
+str c
+:a, :b, :c = t                 // a=10, b=3.14, c="Rex"
+
+// Homogeneous tuple → seq
+tup[int, int, int] rgb = (255, 128, 0)
+seq[int] ch = rgb.to_seq()     // [255, 128, 0]
+
+// Comparison
+tup[int, str] x = (1, "a")
+tup[int, str] y = (1, "a")
+output(x == y)                 // true
+```
+
+---
+
+## 15. I/O
 
 ### 14.1 Output
 
@@ -1163,7 +1626,7 @@ Modes: `"r"`, `"w"`, `"a"`, `"rb"`, `"wb"`.
 
 ---
 
-## 15. Memory Management
+## 16. Memory Management
 
 Rex gives explicit control over allocation strategy and collection strategy per
 scope. Both are orthogonal and may be combined.
@@ -1231,7 +1694,7 @@ Rex `mm pool` is **~12× faster** than glibc for homogeneous allocations.
 
 ---
 
-## 16. Module System
+## 17. Module System
 
 ```rex
 use math:               // import stdlib math module
@@ -1245,7 +1708,7 @@ Modules resolve at compile time. No runtime dynamic loading.
 
 ---
 
-## 17. Compiler Pipeline
+## 18. Compiler Pipeline
 
 The compiler processes source in a single linear pass:
 
@@ -1329,7 +1792,7 @@ offset  size  field     description
 
 ---
 
-## 18. Type Inspection
+## 19. Type Inspection
 
 ```rex
 int x = 5
@@ -1340,7 +1803,7 @@ Type tokens: `int=1`, `float=2`, `bool=3`, `str=5`, `seq=6`, `dict=7`.
 
 ---
 
-## 19. Safety Model
+## 20. Safety Model
 
 Rex has two safety levels, declared per-protocol with a decorator:
 
@@ -1354,7 +1817,7 @@ an `#unsafe` protocol are a **compile-time error**.
 
 ---
 
-## 20. Keywords Reference
+## 21. Keywords Reference
 
 ### Reserved — Types
 `int`, `float`, `bool`, `str`, `char`, `byte`, `seq`, `arr`, `dict`, `tup`
@@ -1383,7 +1846,7 @@ an `#unsafe` protocol are a **compile-time error**.
 
 ---
 
-## 21. Standard Library Modules (planned)
+## 22. Standard Library Modules (planned)
 
 | Module   | Contents                                             |
 |----------|------------------------------------------------------|
@@ -1397,7 +1860,7 @@ an `#unsafe` protocol are a **compile-time error**.
 
 ---
 
-## 22. Design Goals Summary
+## 23. Design Goals Summary
 
 | Goal                      | How Rex achieves it                                              |
 |---------------------------|------------------------------------------------------------------|
@@ -1412,7 +1875,7 @@ an `#unsafe` protocol are a **compile-time error**.
 
 ---
 
-## 23. Example Programs
+## 24. Example Programs
 
 ### Hello World
 ```rex
