@@ -1580,12 +1580,6 @@ output(x == y)                 // true
 
 ```rex
 output(x)           // print x followed by newline (type-dispatched)
-show(x)             // print x without newline
-write(buf)          // raw bytes to stdout (seq[byte] or arr[byte, N])
-flush()             // drain stdout buffer
-debug(x)            // stderr: "type: value\n" — development only
-warn("msg")         // stderr: warning message with newline
-err("msg")          // stderr: error message + exit code 1
 ```
 
 `output` takes **one expression**. For multiple values on one line use string
@@ -1611,7 +1605,7 @@ int age = int(input("Enter your age: "))
 ### 15.4 File I/O — `with open`
 
 Rex uses Python-style `with open(...) as var:` for file access. The file is
-automatically closed when the block exits — whether normally or via `err`.
+automatically closed when the block exits.
 Manual `.close()` is not needed inside a `with` block.
 
 ```rex
@@ -1705,7 +1699,7 @@ code 1. Wrap in a checked file-existence test if needed:
 // Check first, then open
 bool exists = file_exists("data.txt")
 if not exists:
-    err("data.txt not found")
+    output("data.txt not found")
 
 with open("data.txt", "r") as f:
     output(f.read())
@@ -1915,7 +1909,7 @@ an `#unsafe` protocol are a **compile-time error**.
 `true`, `neutral`, `false`, `null`
 
 ### Reserved — Statements
-`output`, `show`, `write`, `flush`, `debug`, `warn`, `err`, `input`, `fmt`
+`output`, `input`, `fmt`
 `if`, `elif`, `else`, `when`, `is`, `match`
 `for`, `each`, `while`, `repeat`, `stop`, `skip`, `pass`
 `return`, `prot`, `use`, `swap`, `push`, `pop`

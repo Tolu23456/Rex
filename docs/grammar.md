@@ -100,12 +100,6 @@ statement       ::= declaration
                   | assignment
                   | multi_assign
                   | output_stmt
-                  | show_stmt
-                  | write_stmt
-                  | debug_stmt
-                  | warn_stmt
-                  | err_stmt
-                  | flush_stmt
                   | if_stmt
                   | when_stmt
                   | for_stmt
@@ -138,26 +132,13 @@ Every statement occupies one or more lines. Block bodies are delimited by
 ```ebnf
 output_stmt     ::= "output" "(" expr ")" <NEWLINE>
 
-show_stmt       ::= "show" "(" expr ")" <NEWLINE>
-
-write_stmt      ::= "write" "(" expr ")" <NEWLINE>
-
-debug_stmt      ::= "debug" "(" expr ")" <NEWLINE>
-
-warn_stmt       ::= "warn" "(" expr ")" <NEWLINE>
-
-err_stmt        ::= "err" "(" expr ")" <NEWLINE>
-
-flush_stmt      ::= "flush" "(" ")" <NEWLINE>
-
 input_expr      ::= "input" "(" expr ")"
 
 fmt_expr        ::= "fmt" "(" expr ")"
 ```
 
 `output` dispatches to the correct printer at compile time from the type of
-`expr`. `show` is identical but omits the trailing newline. `write` emits
-raw bytes (requires `seq[byte]` or `arr[byte, N]`).
+`expr`, appending a newline.
 
 ---
 
@@ -460,7 +441,7 @@ Returns `bool`. Does not open the file. Used to guard `open` in `"r"` mode.
 
 ```rex
 if not file_exists("config.txt"):
-    err("config.txt not found")
+    output("config.txt not found")
 ```
 
 `file_exists` is classified as a **built-in expression** (same tier as
@@ -702,7 +683,7 @@ Keywords are reserved and cannot be used as identifiers.
 |-------------|-------------------------------------------------------------------------------------------------------------|
 | Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup`                                          |
 | Literals    | `true` `neutral` `false` `null`                                                                             |
-| Statements  | `output` `show` `write` `debug` `warn` `err` `flush` `input` `fmt`                                         |
+| Statements  | `output` `input` `fmt`                                                                                      |
 |             | `if` `elif` `else` `when` `is` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`                    |
 |             | `return` `swap` `flip` `prot` `use`                                                                         |
 |             | `with` `open` `as`                                                                                          |

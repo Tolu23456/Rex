@@ -1123,7 +1123,7 @@ with open("src.bin", "rb") as src:
 **Check before open:**
 ```rex
 if not file_exists("config.txt"):
-    err("config.txt not found")
+    output("config.txt not found")
 
 with open("config.txt", "r") as f:
     output(f.read())
@@ -1135,12 +1135,6 @@ with open("config.txt", "r") as f:
 
 ```rex
 output(x)           // print x + newline (type-dispatched)
-show(x)             // print x without newline
-write(buf)          // raw bytes to stdout
-flush()             // drain stdout buffer
-debug(x)            // stderr: "type: value\n"
-warn("msg")         // stderr: warning + newline
-err("msg")          // stderr: error + exit 1
 
 str name = input("Enter your name: ")
 str fmt_val = fmt("score: {score:.1f}")
