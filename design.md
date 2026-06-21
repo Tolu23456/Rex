@@ -93,7 +93,7 @@ result = @add(2, 3) // infers from protocol return type
 ```
 
 Rules:
-- `5` → `int`, `3.14` → `float`, `"..."` → `str`, `true`/`false`/`unknown` → `bool`
+- `5` → `int`, `3.14` → `float`, `"..."` → `str`, `true`/`neutral`/`false` → `bool`
 - Inference does not cross scope boundaries.
 - `int x = 3.14` is a compile-time type mismatch error.
 - Without an initial value the type must be stated explicitly.
@@ -108,7 +108,7 @@ Rules:
 |---------|----------------------|-----------------|---------------------------------------------|
 | `int`   | `int a = 5`          | 64-bit signed   | Decimal, hex `0xFF`, binary `0b1010`, octal `0o17` |
 | `float` | `float b = 1.5`      | 64-bit IEEE 754 | SSE2 registers                              |
-| `bool`  | `bool f = true`      | 0 / 1 / entropy | Tri-state: `true`, `false`, `unknown`       |
+| `bool`  | `bool f = true`      | −1 / 0 / 1 signed | Tri-state: `true` (1), `neutral` (0), `false` (−1) |
 | `str`   | `str s = "Rex"`      | Heap pointer    | UTF-8; header `[cap][len][data]`            |
 | `char`  | `char c = 'R'`       | 8-bit unsigned  | Single UTF-8 byte; single-quoted literal    |
 | `byte`  | `byte b = 0xFF`      | 8-bit unsigned  | Raw binary; `output` prints numeric value  |
@@ -122,41 +122,72 @@ Rules:
 | `dict[T]`    | `dict[int] d`        | SipHash-2-4 map; keys always `str`              |
 | `tup[T...]`  | `tup[int, str] t`    | Fixed heterogeneous tuple; positional; immutable by default |
 
-### 4.3 `bool` — Kleene Three-Valued Logic
+### 4.3 `bool` — Signed Ternary Logic
 
-Rex `bool` has exactly three values: `true` (1), `false` (0), and `unknown`
-(hardware entropy via `rdrand`). This is **Kleene strong three-valued logic**.
+Rex `bool` has exactly three values stored as a signed 8-bit integer:
 
-`unknown` represents genuine indeterminacy — it is a first-class value, not an
-error state.
+| Literal   | Stored value | Meaning                                        |
+|-----------|-------------|------------------------------------------------|
+| `true`    | `1`         | Affirmative — the condition holds              |
+| `neutral` | `0`         | Indeterminate — neither confirmed nor denied   |
+| `false`   | `-1`        | Negative — the condition does not hold         |
 
-**`and` table — false dominates:**
+This is **Łukasiewicz three-valued logic** expressed as a signed number line.
+`and` is `min(a, b)` and `or` is `max(a, b)` over the ordering `false < neutral < true`.
+`not` negates: `not x` → `-x`, so `not true` = `false`, `not false` = `true`,
+`not neutral` = `neutral`.
 
-| `and`       | `false` | `true`  | `unknown` |
-|-------------|---------|---------|-----------|
-| **`false`** | false   | false   | false     |
-| **`true`**  | false   | true    | unknown   |
-| **`unknown`**| false  | unknown | unknown   |
+**`and` table — minimum of both sides:**
 
-**`or` table — true dominates:**
+| `and`         | `false` (−1) | `neutral` (0) | `true` (1) |
+|---------------|--------------|---------------|------------|
+| **`false`**   | false        | false         | false      |
+| **`neutral`** | false        | neutral       | neutral    |
+| **`true`**    | false        | neutral       | true       |
 
-| `or`        | `false` | `true` | `unknown` |
-|-------------|---------|--------|-----------|
-| **`false`** | false   | true   | unknown   |
-| **`true`**  | true    | true   | true      |
-| **`unknown`**| unknown| true   | unknown   |
+**`or` table — maximum of both sides:**
 
-**`not`:** `not false` → `true`, `not true` → `false`, `not unknown` → `unknown`
+| `or`          | `false` (−1) | `neutral` (0) | `true` (1) |
+|---------------|--------------|---------------|------------|
+| **`false`**   | false        | neutral       | true       |
+| **`neutral`** | neutral      | neutral       | true       |
+| **`true`**    | true         | true          | true       |
+
+**`not` — numeric negation:**
+
+| Input     | Result  |
+|-----------|---------|
+| `true`    | `false` |
+| `neutral` | `neutral` |
+| `false`   | `true`  |
 
 ```rex
-bool coin = unknown         // hardware-entropy value
 bool a = true
-bool b = unknown
+bool b = neutral
+bool c = false
 bool result
-:result = a and b           // unknown
-:result = a or b            // true (true dominates)
-:result = not b             // unknown
+
+:result = a and b       // neutral  (min(1, 0) = 0)
+:result = a or b        // true     (max(1, 0) = 1)
+:result = b or c        // neutral  (max(0, -1) = 0)
+:result = not b         // neutral  (-(0) = 0)
+:result = not c         // true     (-(-1) = 1)
+
+output(result)          // prints: true
 ```
+
+**Casting to/from int:**
+```rex
+int n = int(a)          // true → 1, neutral → 0, false → -1
+bool b = bool(1)        // 1 → true, 0 → neutral, -1 → false
+bool b2 = bool(5)       // any positive → true
+bool b3 = bool(-3)      // any negative → false
+```
+
+**Short-circuit evaluation:**
+- `and`: if the left side is `false`, the right side is never evaluated (result is `false`).
+- `or`: if the left side is `true`, the right side is never evaluated (result is `true`).
+- `neutral` never short-circuits — both sides are always evaluated.
 
 ### 4.4 Numeric Literals
 
@@ -167,6 +198,303 @@ int c = 0b11111111  // binary
 int d = 0o377       // octal
 float f = 3.14
 float g = 1.0e-4    // scientific notation
+```
+
+---
+
+### 4.5 `int` Methods
+
+All methods return new values — they never mutate the source variable.
+Type conversions use cast functions (`float(n)`, `str(n)`) not methods.
+
+#### Arithmetic
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.abs()`            | `int`   | Absolute value                                     |
+| `.min(other)`       | `int`   | Smaller of self and `other`                        |
+| `.max(other)`       | `int`   | Larger of self and `other`                         |
+| `.clamp(lo, hi)`    | `int`   | `lo` if below, `hi` if above, self otherwise       |
+| `.pow(n)`           | `int`   | Self raised to the power `n` (integer exponentiation) |
+| `.gcd(other)`       | `int`   | Greatest common divisor                            |
+| `.lcm(other)`       | `int`   | Least common multiple                              |
+| `.signum()`         | `int`   | −1 if negative, 0 if zero, 1 if positive           |
+
+#### Predicates
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.is_zero()`        | `bool`  | `true` if value is 0                               |
+| `.is_positive()`    | `bool`  | `true` if value > 0                                |
+| `.is_negative()`    | `bool`  | `true` if value < 0                                |
+| `.is_even()`        | `bool`  | `true` if value % 2 == 0                           |
+| `.is_odd()`         | `bool`  | `true` if value % 2 != 0                           |
+
+#### Bit Operations
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.popcount()`       | `int`   | Number of set bits (1s) in the 64-bit representation |
+| `.leading_zeros()`  | `int`   | Count of leading zero bits (`clz`)                 |
+| `.trailing_zeros()` | `int`   | Count of trailing zero bits (`ctz`)                |
+| `.bit_len()`        | `int`   | Minimum bits required to represent the value       |
+| `.swap_bytes()`     | `int`   | Reverse byte order (endian flip)                   |
+| `.rotate_left(n)`   | `int`   | Rotate bits left by `n` positions                  |
+| `.rotate_right(n)`  | `int`   | Rotate bits right by `n` positions                 |
+
+#### String Representations
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.to_bin()`         | `str`   | Binary string e.g. `"1010"` (no `0b` prefix)      |
+| `.to_hex()`         | `str`   | Lowercase hex e.g. `"ff"` (no `0x` prefix)        |
+| `.to_oct()`         | `str`   | Octal string e.g. `"377"` (no `0o` prefix)        |
+
+```rex
+int n = -42
+output(n.abs())              // 42
+output(n.signum())           // -1
+output(n.clamp(-100, 0))     // -42
+output(n.is_negative())      // true
+
+int x = 255
+output(x.popcount())         // 8
+output(x.to_hex())           // "ff"
+output(x.to_bin())           // "11111111"
+output(x.leading_zeros())    // 56
+
+output(@gcd(12, 8))         // — or:
+output(12.gcd(8))            // 4
+output(3.pow(4))             // 81
+```
+
+---
+
+### 4.6 `float` Methods
+
+All methods return new values. Type conversions use cast functions.
+
+#### Rounding
+
+| Method        | Returns | Notes                                              |
+|---------------|---------|----------------------------------------------------|
+| `.ceil()`     | `int`   | Round up toward positive infinity                  |
+| `.floor()`    | `int`   | Round down toward negative infinity                |
+| `.round()`    | `int`   | Round to nearest integer (half rounds up)          |
+| `.trunc()`    | `float` | Truncate fractional part (toward zero), keep float |
+| `.fract()`    | `float` | Fractional part only (self − trunc)                |
+
+#### Arithmetic
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.abs()`            | `float` | Absolute value                                     |
+| `.min(other)`       | `float` | Smaller of self and `other`                        |
+| `.max(other)`       | `float` | Larger of self and `other`                         |
+| `.clamp(lo, hi)`    | `float` | Clamp to `[lo, hi]` range                          |
+| `.signum()`         | `float` | −1.0, 0.0, or 1.0                                 |
+| `.pow(n)`           | `float` | Self raised to float power `n`                     |
+| `.sqrt()`           | `float` | Square root; runtime error if negative             |
+| `.cbrt()`           | `float` | Cube root                                          |
+| `.recip()`          | `float` | Reciprocal: 1.0 / self                             |
+
+#### Logarithm and Exponential
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.exp()`            | `float` | eˣ (natural exponential)                           |
+| `.ln()`             | `float` | Natural logarithm (base e)                         |
+| `.log2()`           | `float` | Logarithm base 2                                   |
+| `.log10()`          | `float` | Logarithm base 10                                  |
+| `.log(base)`        | `float` | Logarithm with arbitrary float base                |
+
+#### Trigonometry
+
+| Method        | Returns | Notes                         |
+|---------------|---------|-------------------------------|
+| `.sin()`      | `float` | Sine (radians)                |
+| `.cos()`      | `float` | Cosine (radians)              |
+| `.tan()`      | `float` | Tangent (radians)             |
+| `.asin()`     | `float` | Arc sine (result in radians)  |
+| `.acos()`     | `float` | Arc cosine                    |
+| `.atan()`     | `float` | Arc tangent                   |
+| `.atan2(y)`   | `float` | Arc tangent of self/y (quadrant-aware) |
+| `.to_deg()`   | `float` | Convert radians to degrees    |
+| `.to_rad()`   | `float` | Convert degrees to radians    |
+
+#### Predicates
+
+| Method          | Returns | Notes                                              |
+|-----------------|---------|----------------------------------------------------|
+| `.is_nan()`     | `bool`  | `true` if not-a-number                             |
+| `.is_inf()`     | `bool`  | `true` if positive or negative infinity            |
+| `.is_finite()`  | `bool`  | `true` if neither NaN nor infinity                 |
+| `.is_zero()`    | `bool`  | `true` if value is 0.0                             |
+| `.is_positive()`| `bool`  | `true` if value > 0.0                              |
+| `.is_negative()`| `bool`  | `true` if value < 0.0                              |
+
+```rex
+float f = 3.7
+output(f.ceil())         // 4
+output(f.floor())        // 3
+output(f.round())        // 4
+output(f.fract())        // 0.7
+output(f.abs())          // 3.7
+
+float pi = 3.14159
+output(pi.sin())         // ~0.0
+output(pi.cos())         // ~-1.0
+output(pi.to_deg())      // ~180.0
+
+float x = 2.0
+output(x.sqrt())         // 1.4142...
+output(x.pow(10.0))      // 1024.0
+output(x.log2())         // 1.0
+```
+
+---
+
+### 4.7 `bool` Methods
+
+| Method           | Returns | Notes                                              |
+|------------------|---------|----------------------------------------------------|
+| `.is_true()`     | `bool`  | `true` only if self is `true` (value 1)            |
+| `.is_false()`    | `bool`  | `true` only if self is `false` (value −1)          |
+| `.is_neutral()`  | `bool`  | `true` only if self is `neutral` (value 0)         |
+| `.is_decided()`  | `bool`  | `true` if self is `true` or `false` (not neutral)  |
+| `.flip()`        | `bool`  | Negate: `true`↔`false`, `neutral` stays `neutral`  |
+| `.to_int()`      | `int`   | `true`→1, `neutral`→0, `false`→−1                 |
+| `.to_str()`      | `str`   | `"true"`, `"neutral"`, or `"false"`               |
+| `.and(other)`    | `bool`  | Same as `self and other` (min)                     |
+| `.or(other)`     | `bool`  | Same as `self or other` (max)                      |
+
+```rex
+bool a = true
+bool b = neutral
+bool c = false
+
+output(a.is_true())      // true
+output(b.is_neutral())   // true
+output(c.is_decided())   // true  (false is decided)
+output(b.is_decided())   // false (neutral is not decided)
+
+output(a.flip())         // false
+output(b.flip())         // neutral
+output(c.flip())         // true
+
+output(a.to_int())       // 1
+output(b.to_int())       // 0
+output(c.to_int())       // -1
+
+output(a.and(b))         // neutral
+output(a.or(c))          // true
+```
+
+---
+
+### 4.8 `char` Methods
+
+A `char` is a single UTF-8 byte. Its methods inspect and transform the character.
+
+#### Classification
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.is_alpha()`       | `bool`  | Letter (a–z, A–Z)                                  |
+| `.is_digit()`       | `bool`  | Decimal digit (0–9)                                |
+| `.is_alnum()`       | `bool`  | Letter or digit                                    |
+| `.is_whitespace()`  | `bool`  | Space, tab, newline, carriage return               |
+| `.is_upper()`       | `bool`  | Uppercase letter (A–Z)                             |
+| `.is_lower()`       | `bool`  | Lowercase letter (a–z)                             |
+| `.is_punct()`       | `bool`  | Printable non-alphanumeric (!, @, #, …)            |
+| `.is_printable()`   | `bool`  | Printable ASCII (code point 0x20–0x7E)             |
+| `.is_ascii()`       | `bool`  | Value ≤ 127                                        |
+
+#### Transformation
+
+| Method        | Returns | Notes                                              |
+|---------------|---------|----------------------------------------------------|
+| `.to_upper()` | `char`  | Uppercase (A–Z only; others unchanged)             |
+| `.to_lower()` | `char`  | Lowercase (a–z only; others unchanged)             |
+
+#### Conversion
+
+| Method        | Returns | Notes                                              |
+|---------------|---------|----------------------------------------------------|
+| `.to_int()`   | `int`   | UTF-8 code point (same as `int(c)`)                |
+| `.to_byte()`  | `byte`  | Raw byte value (same as `byte(c)`)                 |
+| `.to_str()`   | `str`   | Single-character string                            |
+| `.to_digit()` | `int`   | Numeric value of `'0'`–`'9'`; −1 if not a digit   |
+
+```rex
+char c = 'R'
+output(c.is_alpha())        // true
+output(c.is_upper())        // true
+output(c.to_lower())        // 'r'
+output(c.to_int())          // 82
+output(c.to_str())          // "R"
+
+char d = '7'
+output(d.is_digit())        // true
+output(d.to_digit())        // 7
+
+char sp = ' '
+output(sp.is_whitespace())  // true
+output(sp.is_printable())   // true
+```
+
+---
+
+### 4.9 `byte` Methods
+
+A `byte` is a raw unsigned 8-bit value (0–255). Methods treat it as a machine
+word fragment.
+
+#### Inspection
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.popcount()`       | `int`   | Number of set bits                                 |
+| `.leading_zeros()`  | `int`   | Count of leading zero bits (of the 8-bit value)    |
+| `.trailing_zeros()` | `int`   | Count of trailing zero bits                        |
+| `.bit(n)`           | `bool`  | `true` if bit `n` is set (0 = least significant)  |
+
+#### Transformation
+
+| Method              | Returns | Notes                                              |
+|---------------------|---------|----------------------------------------------------|
+| `.rotate_left(n)`   | `byte`  | Rotate bits left by `n` within 8 bits              |
+| `.rotate_right(n)`  | `byte`  | Rotate bits right by `n` within 8 bits             |
+| `.swap_nibbles()`   | `byte`  | Swap upper and lower 4-bit nibbles                 |
+
+#### Conversion
+
+| Method        | Returns | Notes                                              |
+|---------------|---------|----------------------------------------------------|
+| `.to_int()`   | `int`   | Zero-extend to 64-bit integer                      |
+| `.to_char()`  | `char`  | Interpret as UTF-8 byte (same as `char(b)`)        |
+| `.to_hex()`   | `str`   | Two-character lowercase hex e.g. `"0f"`, `"ff"`   |
+| `.to_bin()`   | `str`   | Eight-character binary string e.g. `"00001111"`   |
+
+#### Predicates
+
+| Method          | Returns | Notes                                              |
+|-----------------|---------|----------------------------------------------------|
+| `.is_zero()`    | `bool`  | `true` if value is 0                               |
+| `.is_ascii()`   | `bool`  | `true` if value ≤ 127                              |
+
+```rex
+byte b = 0b10110100
+output(b.popcount())         // 4
+output(b.leading_zeros())    // 0
+output(b.to_hex())           // "b4"
+output(b.to_bin())           // "10110100"
+output(b.bit(2))             // true  (bit 2 of 0b10110100 is 1)
+output(b.swap_nibbles())     // 0b01001011 = 0x4B
+
+byte x = 0xFF
+output(x.rotate_left(3))     // 0xFF (all bits set, rotation unchanged)
+output(x.to_char())          // char with code 255
 ```
 
 ---
@@ -221,7 +549,7 @@ if a == 1 or b == 1:   // RHS skipped if LHS true
 All six operators: `==`, `!=`, `<`, `>`, `<=`, `>=`
 
 For `str`: lexicographic byte comparison.
-For `bool`: value comparison (0/1; `unknown` compares by its random bit).
+For `bool`: signed integer comparison over `false (−1) < neutral (0) < true (1)`.
 
 ### 5.6 Identity and Membership
 
@@ -263,11 +591,11 @@ a + b -> @process()         // @process(a + b)
 ### 5.9 Hardware Features
 
 ```rex
-bool c = carry              // CPU carry flag after last arithmetic op
-bool ov = overflow          // CPU overflow flag
+bool c = carry              // CPU carry flag after last arithmetic op → true or false
+bool ov = overflow          // CPU overflow flag → true or false
 int n = rand                // hardware entropy integer via rdrand
 bool b = true
-flip b                      // b = not b (bitwise NOT of bool)
+flip b                      // b = not b  (true→false, false→true, neutral→neutral)
 int h = hash s              // SipHash-2-4 of memory region s
 ```
 
@@ -294,7 +622,7 @@ The type name is the cast function. No dot notation.
 | `str(x)`     | `int`, `float`, `bool`, `char`, `byte` | Human-readable representation |
 | `char(x)`    | `int`, `byte`                 | Interprets as UTF-8 code point            |
 | `byte(x)`    | `int`, `char`                 | Low 8 bits                                |
-| `bool(x)`    | `int`                         | 0 → `false`, non-zero → `true`            |
+| `bool(x)`    | `int`                         | positive → `true`, 0 → `neutral`, negative → `false` |
 
 ```rex
 float f = 3.7
@@ -302,6 +630,9 @@ int i = int(f)          // 3 — truncates toward zero
 str s = str(42)         // "42"
 int parsed = int("42")  // 42
 char c = char(65)       // 'A'
+bool b = bool(5)        // true  (positive)
+bool n = bool(0)        // neutral
+bool fb = bool(-2)      // false (negative)
 ```
 
 ---
@@ -1029,7 +1360,7 @@ an `#unsafe` protocol are a **compile-time error**.
 `int`, `float`, `bool`, `str`, `char`, `byte`, `seq`, `arr`, `dict`, `tup`
 
 ### Reserved — Literals
-`true`, `false`, `unknown`, `null`
+`true`, `neutral`, `false`, `null`
 
 ### Reserved — Statements
 `output`, `show`, `write`, `flush`, `debug`, `warn`, `err`, `input`, `fmt`
