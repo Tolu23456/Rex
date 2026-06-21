@@ -1608,21 +1608,110 @@ output("Hello, {name}!")
 int age = int(input("Enter your age: "))
 ```
 
-### 14.4 File I/O
+### 15.4 File I/O — `with open`
+
+Rex uses Python-style `with open(...) as var:` for file access. The file is
+automatically closed when the block exits — whether normally or via `err`.
+Manual `.close()` is not needed inside a `with` block.
 
 ```rex
-use file:
-    file :f = open("data.txt", "r")
+with open("data.txt", "r") as f:
     str contents = f.read()
-    f.close()
+    output(contents)
 
-use file:
-    file :f = open("out.txt", "w")
-    f.writeln("hello")
-    f.close()
+with open("log.txt", "w") as f:
+    f.writeln("started")
+    f.writeln("done")
+
+with open("image.png", "rb") as f:
+    seq[byte] raw = f.read_bytes(f.size())
 ```
 
-Modes: `"r"`, `"w"`, `"a"`, `"rb"`, `"wb"`.
+**Open modes:**
+
+| Mode  | Meaning                                               |
+|-------|-------------------------------------------------------|
+| `"r"` | Read text (UTF-8); error if file does not exist       |
+| `"w"` | Write text; creates or truncates                      |
+| `"a"` | Append text; creates if absent; never truncates       |
+| `"rb"`| Read raw bytes                                        |
+| `"wb"`| Write raw bytes; creates or truncates                 |
+| `"ab"`| Append raw bytes                                      |
+| `"r+"`| Read and write; file must exist                       |
+| `"w+"`| Read and write; creates or truncates                  |
+
+**File handle methods:**
+
+| Method                | Returns    | Notes                                                  |
+|-----------------------|------------|--------------------------------------------------------|
+| `.read()`             | `str`      | Read entire file as a string (text modes)              |
+| `.read_line()`        | `str`      | Read one line including `\n`; empty at EOF             |
+| `.read_bytes(n)`      | `seq[byte]`| Read exactly `n` bytes; fewer at EOF                  |
+| `.read_all_bytes()`   | `seq[byte]`| Read entire file as bytes (binary modes)               |
+| `.lines()`            | `seq[str]` | Read all lines, each stripped of trailing `\n`         |
+| `.write(s)`           | `void`     | Write string or bytes; no newline added                |
+| `.writeln(s)`         | `void`     | Write string and append `\n`                           |
+| `.write_bytes(buf)`   | `void`     | Write raw `seq[byte]` or `arr[byte, N]`                |
+| `.seek(n)`            | `void`     | Seek to byte offset `n` from start                     |
+| `.seek_end(n)`        | `void`     | Seek `n` bytes before end (e.g. `.seek_end(0)` = EOF) |
+| `.pos()`              | `int`      | Current byte position                                  |
+| `.size()`             | `int`      | Total file size in bytes                               |
+| `.is_eof()`           | `bool`     | `true` if at end of file                               |
+| `.flush()`            | `void`     | Flush write buffer to OS                               |
+| `.path()`             | `str`      | File path as given to `open`                           |
+
+**Reading line by line:**
+
+```rex
+with open("words.txt", "r") as f:
+    while not f.is_eof():
+        str line = f.read_line()
+        if line.is_empty():
+            stop
+        output(line.trim())
+```
+
+**Using `.lines()` (reads whole file at once):**
+
+```rex
+with open("words.txt", "r") as f:
+    each line in f.lines():
+        output(line.upper())
+```
+
+**Writing and flushing:**
+
+```rex
+with open("output.txt", "w") as f:
+    for i in 0..100:
+        f.writeln("line {i}")
+    f.flush()
+```
+
+**Binary copy:**
+
+```rex
+with open("a.bin", "rb") as src:
+    with open("b.bin", "wb") as dst:
+        dst.write_bytes(src.read_all_bytes())
+```
+
+**Error handling:**
+If `open` fails (file not found for `"r"`, permission denied, etc.),
+Rex raises a runtime error with a descriptive message and exits with
+code 1. Wrap in a checked file-existence test if needed:
+
+```rex
+// Check first, then open
+bool exists = file_exists("data.txt")
+if not exists:
+    err("data.txt not found")
+
+with open("data.txt", "r") as f:
+    output(f.read())
+```
+
+`file_exists(path)` is a built-in that returns `bool` without opening the file.
 
 ---
 

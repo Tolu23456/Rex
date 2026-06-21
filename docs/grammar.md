@@ -125,6 +125,7 @@ statement       ::= declaration
                   | use_stmt
                   | blast_stmt
                   | pipe_stmt
+                  | with_stmt
 ```
 
 Every statement occupies one or more lines. Block bodies are delimited by
@@ -395,7 +396,79 @@ See `docs/mm.md` for full specification.
 
 ---
 
-## 15. Vectorised Loops
+## 15. File I/O — `with open`
+
+```ebnf
+with_stmt       ::= "with" "open" "(" expr "," open_mode ")" "as" <IDENT> ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+
+open_mode       ::= <STR_LIT>
+```
+
+Valid mode strings: `"r"`, `"w"`, `"a"`, `"rb"`, `"wb"`, `"ab"`, `"r+"`, `"w+"`.
+
+The `<IDENT>` after `as` binds a **file handle** — a scoped, opaque value whose
+type is `file`. It is visible only inside the `with` block. The file is
+automatically closed (flushed and fd released) on block exit, including via
+`err`. No explicit `.close()` is needed or permitted inside a `with` block.
+
+**File handle method call syntax follows the standard `postfix_expr` rule
+(§12), e.g.:**
+
+```rex
+with open("data.txt", "r") as f:
+    str contents = f.read()
+    each line in f.lines():
+        output(line.trim())
+
+with open("out.txt", "w") as f:
+    f.writeln("hello")
+    f.writeln("world")
+
+with open("a.bin", "rb") as src:
+    with open("b.bin", "wb") as dst:
+        dst.write_bytes(src.read_all_bytes())
+```
+
+**The `file` type — methods:**
+
+| Method                | Returns    | Valid modes     | Notes                               |
+|-----------------------|------------|-----------------|-------------------------------------|
+| `.read()`             | `str`      | `r`, `r+`, `w+` | Read entire file as UTF-8 string    |
+| `.read_line()`        | `str`      | text modes      | One line incl. `\n`; `""` at EOF   |
+| `.read_bytes(n)`      | `seq[byte]`| `rb`, `r+`, `wb`| Read up to `n` bytes                |
+| `.read_all_bytes()`   | `seq[byte]`| binary modes    | Read entire file as bytes           |
+| `.lines()`            | `seq[str]` | text modes      | All lines, `\n` stripped            |
+| `.write(s)`           | `void`     | write modes     | Write `str`; no newline added       |
+| `.writeln(s)`         | `void`     | write modes     | Write `str` + `\n`                  |
+| `.write_bytes(buf)`   | `void`     | binary modes    | Write `seq[byte]` or `arr[byte, N]` |
+| `.seek(n)`            | `void`     | any             | Seek to byte offset from start      |
+| `.seek_end(n)`        | `void`     | any             | Seek `n` bytes before end           |
+| `.pos()`              | `int`      | any             | Current byte position               |
+| `.size()`             | `int`      | any             | Total file size in bytes            |
+| `.is_eof()`           | `bool`     | any             | `true` if at end of file            |
+| `.flush()`            | `void`     | write modes     | Flush write buffer to OS            |
+| `.path()`             | `str`      | any             | Path as given to `open`             |
+
+**`file_exists` built-in:**
+
+```ebnf
+file_exists_expr ::= "file_exists" "(" expr ")"
+```
+
+Returns `bool`. Does not open the file. Used to guard `open` in `"r"` mode.
+
+```rex
+if not file_exists("config.txt"):
+    err("config.txt not found")
+```
+
+`file_exists` is classified as a **built-in expression** (same tier as
+`typeof`, `rand`) and produces a `bool` at call site.
+
+---
+
+## 16. Vectorised Loops
 
 ```ebnf
 blast_stmt      ::= "blast" <IDENT> "in" <IDENT> ":" <NEWLINE>
@@ -407,7 +480,7 @@ pipe_stmt       ::= "pipe" <IDENT> "from" <IDENT> "into" <IDENT> ":" <NEWLINE>
 
 ---
 
-## 16. Expressions
+## 17. Expressions
 
 Expressions form a strict 6-tier recursive-descent hierarchy.
 Higher tiers bind less tightly (evaluated last).
@@ -471,7 +544,7 @@ primary_expr    ::= <INT_LIT>
 
 ---
 
-## 17. Bool Literals
+## 18. Bool Literals
 
 ```ebnf
 bool_lit        ::= "true" | "neutral" | "false"
@@ -488,7 +561,7 @@ bool_lit        ::= "true" | "neutral" | "false"
 
 ---
 
-## 18. Container Literals
+## 19. Container Literals
 
 ```ebnf
 seq_lit         ::= "[" [ expr { "," expr } ] "]"
@@ -509,7 +582,7 @@ declaration syntax — context disambiguates).
 
 ---
 
-## 19. `fn` Literals (Anonymous Protocols)
+## 20. `fn` Literals (Anonymous Protocols)
 
 ```ebnf
 fn_lit          ::= "fn" "(" fn_param_list ")" [ "->" type_expr ] ":" fn_body
@@ -534,7 +607,7 @@ int total = nums.reduce(0, fn(int acc, int x) -> int: acc + x)
 
 ---
 
-## 20. Cast Expressions
+## 21. Cast Expressions
 
 ```ebnf
 cast_expr       ::= "int" "(" expr ")"
@@ -556,7 +629,7 @@ cast_expr       ::= "int" "(" expr ")"
 
 ---
 
-## 21. Special Expressions
+## 22. Special Expressions
 
 ```ebnf
 typeof_expr     ::= "typeof" expr
@@ -576,7 +649,7 @@ operation — both return `bool` (`true` or `false`, never `neutral`).
 
 ---
 
-## 22. Literals and Terminals
+## 23. Literals and Terminals
 
 ```ebnf
 <INT_LIT>       ::= <DECIMAL>
@@ -610,7 +683,7 @@ literal brace characters. A `:` inside `{}` activates format mode:
 
 ---
 
-## 23. Identifiers
+## 24. Identifiers
 
 ```ebnf
 <IDENT>         ::= <ALPHA_UNDER> { <ALPHA_UNDER> | <DIGIT> }
@@ -623,7 +696,7 @@ Keywords are reserved and cannot be used as identifiers.
 
 ---
 
-## 24. Reserved Keywords
+## 25. Reserved Keywords
 
 | Category    | Keywords                                                                                                    |
 |-------------|-------------------------------------------------------------------------------------------------------------|
@@ -632,15 +705,17 @@ Keywords are reserved and cannot be used as identifiers.
 | Statements  | `output` `show` `write` `debug` `warn` `err` `flush` `input` `fmt`                                         |
 |             | `if` `elif` `else` `when` `is` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`                    |
 |             | `return` `swap` `flip` `prot` `use`                                                                         |
+|             | `with` `open` `as`                                                                                          |
 | Operators   | `and` `or` `not`                                                                                            |
-| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn`                                                              |
+| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn` `file_exists`                                               |
+| Types       | `file` (built-in opaque handle type; only valid inside `with open … as` block)                              |
 | Memory      | `mm` `gc` `arena` `pool` `stack` `heap` `static` `sweep` `ref` `gen` `inc` `region`                        |
 | Decorators  | `memo` `pure` `total` `inline` `noinline` `hot` `cold` `safe` `unsafe`                                     |
 | Future      | `blast` `pipe` `match` `assert` `unreachable` `move` `own` `free` `align` `const` `volatile`               |
 
 ---
 
-## 25. Lexical Structure
+## 26. Lexical Structure
 
 ```ebnf
 comment         ::= "//" { <any_char_except_newline> } <NEWLINE>
@@ -666,7 +741,7 @@ comment         ::= "//" { <any_char_except_newline> } <NEWLINE>
 
 ---
 
-## 26. Operator Precedence Summary
+## 27. Operator Precedence Summary
 
 From lowest to highest binding:
 
@@ -691,7 +766,7 @@ From lowest to highest binding:
 
 ---
 
-## 27. Type System Summary
+## 28. Type System Summary
 
 | Type      | Tag | Storage                              | Notes                              |
 |-----------|-----|--------------------------------------|------------------------------------|
@@ -713,7 +788,7 @@ Type propagation in binary expressions:
 
 ---
 
-## 28. Variable Table Layout
+## 29. Variable Table Layout
 
 Each variable occupies one 64-byte entry in the flat `var_table` array:
 
@@ -733,7 +808,7 @@ Maximum 256 entries (`VAR_MAX`). Exceeding this limit is a compile-time error.
 
 ---
 
-## 29. Protocol Table Layout
+## 30. Protocol Table Layout
 
 Each protocol occupies one 64-byte entry in the flat `proto_table` array:
 
@@ -751,7 +826,7 @@ offset  size  field
 
 ---
 
-## 30. Formal Constraints
+## 31. Formal Constraints
 
 The following rules are enforced by the compiler and are **not** captured by
 the EBNF alone:
