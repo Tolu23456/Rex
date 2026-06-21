@@ -1873,6 +1873,59 @@ offset  size  field     description
 - Load base: `0x400000`
 - No `.plt`, no `.got`, no dynamic linker segment.
 
+### 18.3 Implementation Mandate — Assembly-First & Self-Hosting Goal
+
+**Rex must be implemented strictly in x86-64 assembly (NASM syntax). No C,
+no C++, no other compiled language is permitted anywhere in the compiler,
+runtime, or standard library blobs.** Every byte of the toolchain — lexer,
+parser, IR buffer, optimiser, code emitter, ELF writer, and all runtime blobs
+— is hand-written assembly.
+
+This is a deliberate and non-negotiable constraint, not a temporary measure.
+Reasons:
+
+1. **Total control.** Assembly allows exact knowledge of every instruction
+   emitted, every byte of the binary, and every memory access. There are no
+   hidden costs introduced by a host compiler's code generation.
+
+2. **Zero-dependency proof.** If the compiler itself links no external
+   libraries, it demonstrates that the language it compiles can also link none.
+   The toolchain must eat its own cooking.
+
+3. **Auditability.** A systems language whose compiler cannot be read and
+   understood at the machine level is a systems language in name only. The
+   full compiler must be auditable by any programmer who understands x86-64.
+
+4. **Bootstrap simplicity.** One NASM invocation produces the compiler binary.
+   No build system, no package manager, no host-language runtime is needed to
+   build Rex from source.
+
+#### Ultimate Goal — Rex Self-Hosting
+
+The long-term goal of the Rex project is **full self-hosting**: the Rex
+compiler is eventually rewritten in Rex itself and can compile its own source
+code to produce an identical binary.
+
+The bootstrap path is:
+
+```
+Stage 0  rex_compiler.asm     — hand-written NASM; produces the first rex binary
+              │
+              ▼
+Stage 1  rex_compiler.rex     — Rex source of the compiler; compiled by Stage 0
+              │
+              ▼
+Stage 2  rex_compiler (self)  — Stage 1 binary compiles rex_compiler.rex
+              │
+              ▼
+         Quine check: Stage 1 output == Stage 2 output  ✓  self-hosting achieved
+```
+
+A Rex build is considered **self-hosted** when the Rex-compiled compiler binary
+produces byte-for-byte identical output to the assembly-compiled binary on the
+full Rex test suite. Until that point, the NASM stage-0 compiler remains the
+authoritative reference implementation.
+
 ---
 
 ## 19. Type Inspection

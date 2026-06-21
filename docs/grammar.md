@@ -134,11 +134,61 @@ output_stmt     ::= "output" "(" expr ")" <NEWLINE>
 
 input_expr      ::= "input" "(" expr ")"
 
-fmt_expr        ::= "fmt" "(" expr ")"
+fmt_expr        ::= "fmt" "(" fmt_str ")"
+
+fmt_str         ::= <STRING_LIT_WITH_FIELDS>
+
+fmt_field       ::= "{" <IDENT> [ ":" fmt_spec ] "}"
+
+fmt_spec        ::= [ fmt_fill ] [ fmt_align ] [ fmt_sign ]
+                    [ fmt_width ] [ "." fmt_prec ] fmt_type
+
+fmt_fill        ::= <any_char_except_brace>
+fmt_align       ::= "<" | ">" | "^"
+fmt_sign        ::= "+" | "-"
+fmt_width       ::= <DECIMAL>
+fmt_prec        ::= <DECIMAL>
+fmt_type        ::= "d" | "f" | "e" | "g"
+                  | "b" | "o" | "x" | "X"
+                  | "s" | "c"
 ```
 
 `output` dispatches to the correct printer at compile time from the type of
 `expr`, appending a newline.
+
+`fmt` returns a `str`. Fields inside the template string use `{name}` or
+`{name:spec}` syntax. The format specifier mirrors Python's mini-language:
+
+| Specifier | Meaning                                    | Example spec | Input | Output      |
+|-----------|--------------------------------------------|--------------|-------|-------------|
+| `d`       | Decimal integer (default for `int`)        | `d`          | 42    | `42`        |
+| `f`       | Fixed-point float (default for `float`)    | `.2f`        | 3.14159 | `3.14`   |
+| `e`       | Scientific notation                        | `.2e`        | 12345.0 | `1.23e4` |
+| `g`       | Shorter of `f`/`e`                         | `g`          | 0.0001 | `1e-4`   |
+| `b`       | Binary                                     | `08b`        | 5     | `00000101`  |
+| `o`       | Octal                                      | `o`          | 8     | `10`        |
+| `x`       | Hex lowercase                              | `x`          | 255   | `ff`        |
+| `X`       | Hex uppercase                              | `X`          | 255   | `FF`        |
+| `s`       | String (default for `str`, `char`)         | `10s`        | `"hi"` | `hi        ` |
+| `c`       | Single character from `int` codepoint      | `c`          | 65    | `A`         |
+
+**Width and fill:** `{n:08d}` pads `n` to 8 digits with leading zeros.
+`{s:<20s}` left-aligns `s` in a 20-character field. `{v:^10f}` centres `v`.
+
+**Sign:** `{x:+d}` always emits a sign; `{x:-d}` emits sign only for negatives (default).
+
+**Type-dispatch rules:**
+
+| Rex type  | Default fmt | Allowed specifiers          |
+|-----------|-------------|-----------------------------|
+| `int`     | `d`         | `d` `b` `o` `x` `X` `c`    |
+| `float`   | `g`         | `f` `e` `g`                 |
+| `bool`    | `s`         | `s` (emits `true`/`neutral`/`false`) |
+| `str`     | `s`         | `s`                         |
+| `char`    | `c`         | `c` `d` `x` `X`             |
+| `byte`    | `x`         | `d` `b` `o` `x` `X`        |
+
+A specifier incompatible with the expression's type is a **compile-time error**.
 
 ---
 
