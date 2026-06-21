@@ -1,21 +1,16 @@
-# Rex V5.0 — Formal Grammar (EBNF)
+# Rex — Formal Grammar (EBNF)
 
-**Status markers used in this document:**
-- ✅ Implemented and tested
-- 📋 Planned — Stage 9 / Stage 10 roadmap
-
-Productions marked 📋 are included for completeness; they do not parse in the
-current bootstrap compiler.
+This is the **authoritative EBNF grammar** for Rex as specified in `design.md`.
 
 Notation:
 ```
-rule    ::= definition
-[ x ]   = optional
-{ x }   = zero or more repetitions
-( x )   = grouping
-x | y   = alternative
-"x"     = literal terminal
-<x>     = named terminal (described in Terminals section)
+rule      ::= definition
+[ x ]      = optional (zero or one)
+{ x }      = zero or more repetitions
+( x | y )  = grouping with alternatives
+x | y      = top-level alternative
+"x"        = literal terminal
+<x>        = named terminal (described in §13 Terminals)
 ```
 
 ---
@@ -28,88 +23,144 @@ program         ::= { statement } <EOF>
 
 ---
 
-## 2. Statements ✅
+## 2. Type Expressions
+
+```ebnf
+type_expr       ::= primitive_type
+                  | generic_type
+
+primitive_type  ::= "int"
+                  | "float"
+                  | "bool"
+                  | "str"
+                  | "char"
+                  | "byte"
+
+generic_type    ::= "seq" "[" type_expr "]"
+                  | "arr" "[" type_expr "," <INT_LIT> "]"
+                  | "dict" "[" type_expr "]"
+                  | "tup" "[" type_expr { "," type_expr } "]"
+```
+
+The `arr` size argument (`<INT_LIT>`) must be a positive compile-time constant.
+`tup` requires at least one type argument.
+
+---
+
+## 3. Declarations
+
+```ebnf
+declaration     ::= type_expr [ ":" ] <IDENT> [ "=" expr ] <NEWLINE>
+```
+
+- Without `":"`: variable is **immutable**. The initial `= expr` value is
+  fixed at declaration and no `:x = …` assignment is permitted later.
+- With `":"`: variable is **mutable**. `= expr` is optional inline
+  initialisation.
+
+```rex
+int count = 0           // immutable
+:int total = 0          // mutable, inline init
+seq[str] names          // mutable, no init value
+bool :flag = true       // alternative — ":" may precede or follow type_expr
+```
+
+Both forms `type_expr ":" <IDENT>` and `":" type_expr <IDENT>` are accepted
+for readability. The sigil position does not change semantics.
+
+---
+
+## 4. Assignment and Mutation
+
+```ebnf
+assignment      ::= ":" lvalue "=" expr <NEWLINE>
+
+lvalue          ::= <IDENT>
+                  | <IDENT> "[" expr "]"
+                  | <IDENT> "." <INT_LIT>
+
+multi_assign    ::= ":" lvalue { "," ":" lvalue } "=" expr <NEWLINE>
+```
+
+The `:` sigil is required at every mutation site. Assigning to an immutable
+variable is a compile-time error.
+
+`multi_assign` is used to unpack tuples and multiple return values:
+```rex
+:lo, :hi = @minmax(nums)
+:a, :b, :c = triple
+```
+
+---
+
+## 5. Statements
 
 ```ebnf
 statement       ::= declaration
                   | assignment
+                  | multi_assign
                   | output_stmt
+                  | show_stmt
+                  | write_stmt
+                  | debug_stmt
+                  | warn_stmt
+                  | err_stmt
+                  | flush_stmt
                   | if_stmt
                   | when_stmt
                   | for_stmt
                   | while_stmt
+                  | each_stmt
+                  | repeat_stmt
                   | stop_stmt
                   | skip_stmt
                   | pass_stmt
                   | prot_def
                   | call_stmt
+                  | method_stmt
                   | return_stmt
-                  | err_stmt
-                  | push_stmt
-                  | pop_stmt
                   | swap_stmt
                   | inc_dec_stmt
-                  | dict_set_stmt
+                  | flip_stmt
                   | use_stmt
-                  | repeat_stmt        (📋)
-                  | blast_stmt         (📋)
-                  | pipe_stmt          (📋)
+                  | blast_stmt
+                  | pipe_stmt
 ```
 
-Every statement occupies one or more lines. Indented bodies are delimited by
+Every statement occupies one or more lines. Block bodies are delimited by
 `<INDENT>` and `<DEDENT>` tokens emitted by the lexer.
 
 ---
 
-## 3. Declarations ✅
+## 6. Output and I/O Statements
 
 ```ebnf
-declaration     ::= type_kw [ ":" ] <IDENT> [ "=" expr ] <NEWLINE>
+output_stmt     ::= "output" "(" expr ")" <NEWLINE>
 
-type_kw         ::= "int"
-                  | "float"
-                  | "bool"
-                  | "str"
-                  | "complex"
-                  | "seq"
-                  | "dict"
+show_stmt       ::= "show" "(" expr ")" <NEWLINE>
+
+write_stmt      ::= "write" "(" expr ")" <NEWLINE>
+
+debug_stmt      ::= "debug" "(" expr ")" <NEWLINE>
+
+warn_stmt       ::= "warn" "(" expr ")" <NEWLINE>
+
+err_stmt        ::= "err" "(" expr ")" <NEWLINE>
+
+flush_stmt      ::= "flush" "(" ")" <NEWLINE>
+
+input_expr      ::= "input" "(" expr ")"
+
+fmt_expr        ::= "fmt" "(" expr ")"
 ```
 
-- Without `":"`: the variable is **immutable** (constant). If `= expr` is
-  present, the value is fixed at compile time and no `:x =` assignment is
-  allowed later.
-- With `":"`: the variable is **mutable**. `= expr` is an optional inline
-  initialisation.
+`output` dispatches to the correct printer at compile time from the type of
+`expr`. `show` is identical but omits the trailing newline. `write` emits
+raw bytes (requires `seq[byte]` or `arr[byte, N]`).
 
 ---
 
-## 4. Assignment ✅
-
-```ebnf
-assignment      ::= ":" <IDENT> "=" expr <NEWLINE>
-```
-
-The `:` sigil is mandatory at every mutation site. Assignment to a
-constant variable is a compile-time error.
-
----
-
-## 5. Output ✅
-
-```ebnf
-output_stmt     ::= "output" expr <NEWLINE>
-```
-
-`output` resolves the printer at compile time from `cur_type`:
-- `TYPE_INT` → `rt_pri_blob`
-- `TYPE_FLOAT` → `rt_prf_blob`
-- `TYPE_BOOL` → `rt_prb_blob`
-- `TYPE_STR` → `rt_prs_blob`
-- `TYPE_COMPLEX` → `rt_prc_blob` (passes address)
-
----
-
-## 6. Conditional ✅
+## 7. Conditional
 
 ```ebnf
 if_stmt         ::= "if" expr ":" <NEWLINE>
@@ -124,209 +175,210 @@ else_clause     ::= "else" ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 ```
 
+The condition expression must be of type `bool`. A `bool` with value `neutral`
+is treated as **falsy** (neither branch is taken if an `elif`/`else` matches).
+Truthy: only `true` (`1`). Falsy: `false` (`-1`) and `neutral` (`0`).
+
 ---
 
-## 7. `when` / `is` ✅
+## 8. `when` / `is`
 
 ```ebnf
-when_stmt       ::= "when" <IDENT> ":" <NEWLINE>
+when_stmt       ::= "when" expr ":" <NEWLINE>
                     <INDENT> { is_clause } [ when_else ] <DEDENT>
 
-is_clause       ::= "is" <INT_LIT> ":" <NEWLINE>
+is_clause       ::= "is" when_pattern ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
+
+when_pattern    ::= <INT_LIT>
+                  | <STR_LIT>
+                  | <FLOAT_LIT>
+                  | bool_lit
+                  | "_"
 
 when_else       ::= "else" ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 ```
 
-`when` evaluates the named variable once and emits a linear `cmp`/`jz` chain
-for each `is` case. An O(1) jump-table optimisation for dense integer ranges
-is planned (see `docs/issues.md` #27).
+`when` evaluates the subject expression once and dispatches by value.
+The `_` pattern is the wildcard (matches anything); it must be the last clause.
+Patterns must be literals or `_` — no expressions or ranges.
 
 ---
 
-## 8. For Loop ✅
+## 9. Loops
+
+### 9.1 `for` — Range Loop
 
 ```ebnf
-for_stmt        ::= "for" ":" <IDENT> "in" expr ".." expr
+for_stmt        ::= "for" <IDENT> "in" expr ".." expr
                     [ "step" expr ] ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
-                    [ loop_else ]                          (📋)
+                    [ loop_else ]
 ```
 
-- The counter variable is declared mutable by the loop and reclaimed on exit.
-- Both bounds accept full expressions (variables, arithmetic, unary negation).
-- `step` is optional; defaults to 1 when omitted.
-- An optional `else:` block (📋) executes if the loop exits without a `stop`.
+The counter variable is mutable within the loop body and is reclaimed on exit.
+Both bounds are expressions evaluated once before the loop begins.
+`step` is optional; defaults to `1`. Negative `step` values iterate downward.
 
----
-
-## 9. While Loop ✅
+### 9.2 `while` — Conditional Loop
 
 ```ebnf
 while_stmt      ::= "while" expr ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
-                    [ loop_else ]                          (📋)
+                    [ loop_else ]
 ```
 
-The condition is a full expression evaluated on every iteration.
-
----
-
-## 10. Loop `else` 📋
+### 9.3 `each` — Collection Iterator
 
 ```ebnf
-loop_else       ::= "else" ":" <NEWLINE>
+each_stmt       ::= "each" each_target "in" expr ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
+                    [ loop_else ]
+
+each_target     ::= [ ":" ] <IDENT>
+                  | <IDENT> "," [ ":" ] <IDENT>
 ```
 
-Executes only when the parent loop completes naturally (no `stop` was reached).
-Planned implementation: a per-loop boolean flag variable is created in
-`var_table` at loop entry (reclaimed via `scope_stack`) and set by every `stop`
-site before the break JMP. The `else:` body is guarded by `if flag == false`.
+- Single `<IDENT>`: binds each element by value (read-only).
+- `":" <IDENT>`: mutating form — writes back to the collection on each iteration.
+- `<IDENT> "," <IDENT>`: index-and-value form (`i, item`). The index is always
+  read-only. The value target may use `:` for mutations.
 
----
+Iterating over `str` yields `char`. Iterating over `dict` yields `str` (key)
+and `T` (value) — the two-target form is required.
 
-## 11. `stop` / `stop N` ✅ / 📋
-
-```ebnf
-stop_stmt       ::= "stop" [ <INT_LIT> ] <NEWLINE>
-```
-
-- `stop` (no argument): breaks the innermost loop. ✅
-- `stop N`: breaks `N` levels of nested loops simultaneously. 📋
-  `N = 1` is identical to bare `stop`. Values exceeding the current nesting
-  depth are a compile-time error.
-
----
-
-## 12. `skip` / `skip N` ✅
-
-```ebnf
-skip_stmt       ::= "skip" [ <INT_LIT> ] <NEWLINE>
-```
-
-- `skip` (no argument): continues the innermost loop (jumps to condition check).
-- `skip N`: continues the Nth enclosing loop's condition check.
-  `N = 1` is the innermost loop.
-
----
-
-## 13. `pass` ✅
-
-```ebnf
-pass_stmt       ::= "pass" <NEWLINE>
-```
-
-Emits zero bytes. Legal in any block that requires at least one statement.
-
----
-
-## 14. `repeat N` 📋
+### 9.4 `repeat` — Counted Loop
 
 ```ebnf
 repeat_stmt     ::= "repeat" expr ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 ```
 
-Emits a single `dec`/`jnz` hardware loop. The counter register is not
-exposed inside the body. `expr` must evaluate to a non-negative integer.
+The counter is not exposed. `expr` must evaluate to a non-negative `int`.
+Emits a single `dec`/`jnz` hardware loop.
 
----
-
-## 15. Protocol Definition ✅
+### 9.5 Loop Control
 
 ```ebnf
-prot_def        ::= "prot" <IDENT> "(" param_list ")" [ "->" type_kw ] ":" <NEWLINE>
-                    <INDENT> { statement } <DEDENT>
+stop_stmt       ::= "stop" [ <INT_LIT> ] <NEWLINE>
 
-param_list      ::= "None"
-                  | <IDENT> { "," <IDENT> }
+skip_stmt       ::= "skip" [ <INT_LIT> ] <NEWLINE>
+
+loop_else       ::= "else" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
 ```
 
-Up to 6 parameters are supported (mapped to rdi, rsi, rdx, rcx, r8, r9).
-`None` declares an explicitly parameter-free protocol.
-The optional `-> type_kw` return-type annotation is stored in `proto_table`
-and restores `cur_type` at call sites.
+- `stop` / `stop 1`: break the innermost loop.
+- `stop N` (N > 1): break N levels simultaneously. Exceeding nesting depth is
+  a compile-time error.
+- `skip` / `skip 1`: continue the innermost loop's condition check.
+- `skip N`: continue the Nth enclosing loop.
+- `loop_else`: executes only if the loop exits without `stop`.
 
 ---
 
-## 16. Protocol Call ✅
+## 10. Protocols (Functions)
+
+```ebnf
+prot_def        ::= { decorator } "prot" <IDENT> "(" param_list ")"
+                    [ "->" return_type ] ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+
+decorator       ::= "#" decorator_name <NEWLINE>
+
+decorator_name  ::= "memo" | "pure" | "total" | "inline" | "noinline"
+                  | "hot" | "cold" | "safe" | "unsafe"
+
+param_list      ::= [ param { "," param } ]
+
+param           ::= type_expr <IDENT>
+
+return_type     ::= type_expr
+                  | "(" type_expr { "," type_expr } ")"
+
+return_stmt     ::= "return" [ expr ] <NEWLINE>
+
+pass_stmt       ::= "pass" <NEWLINE>
+```
+
+Up to 6 parameters are supported (SysV ABI: `rdi`, `rsi`, `rdx`, `rcx`,
+`r8`, `r9`). Empty `param_list` declares a zero-parameter protocol.
+Multi-value return uses a parenthesised `return_type`; values come back in
+`rax`+`rdx` (2 values) or a caller-allocated stack buffer (3+).
+
+---
+
+## 11. Protocol Calls
 
 ```ebnf
 call_stmt       ::= "@" <IDENT> "(" arg_list ")" <NEWLINE>
 
+call_expr       ::= "@" <IDENT> "(" arg_list ")"
+
 arg_list        ::= [ expr { "," expr } ]
 ```
 
-When `@name(args)` appears as an expression atom (not a standalone statement),
-it participates in `parse_factor` — see Section 24.
+`@` is the protocol call prefix. It is required at every call site.
+`call_expr` is the form used when the call appears inside an expression.
 
 ---
 
-## 17. `return` ✅
+## 12. Method Calls and Field Access
 
 ```ebnf
-return_stmt     ::= "return" [ expr ] <NEWLINE>
+method_stmt     ::= ":" postfix_expr "." <IDENT> "(" arg_list ")" <NEWLINE>
+                  | postfix_expr "." <IDENT> "(" arg_list ")" <NEWLINE>
+
+method_expr     ::= postfix_expr "." <IDENT> "(" arg_list ")"
+
+field_access    ::= postfix_expr "." <INT_LIT>
+
+subscript_expr  ::= postfix_expr "[" expr "]"
+
+subscript_stmt  ::= ":" postfix_expr "[" expr "]" "=" expr <NEWLINE>
+
+postfix_expr    ::= primary_expr { postfix_op }
+
+postfix_op      ::= "." <IDENT> "(" arg_list ")"
+                  | "." <INT_LIT>
+                  | "[" expr "]"
 ```
 
-Bare `return` emits a void `ret`. `return expr` evaluates the expression into
-`rax` (or `xmm0` for floats) before `ret`.
+Method calls chain left-to-right. Each postfix operation applies to the result
+of the previous one:
+```rex
+nums.filter(fn(int x) -> bool: x > 0).map(fn(int x) -> int: x * 2).sum()
+```
+
+Mutating method calls use the `:` sigil on the whole statement:
+```rex
+:nums.sort()
+:nums.push(42)
+```
+
+Methods that return new values (not `void`) do not require `:` when the result
+is immediately used in an expression or discarded.
 
 ---
 
-## 18. `err` ✅
-
-```ebnf
-err_stmt        ::= "err" expr <NEWLINE>
-```
-
-If `expr` evaluates to `TYPE_STR`, passes the pointer to `rt_err_blob`
-(writes to stderr, exits 1). For other types, prints the value via the
-correct typed printer then exits 1. Full `int → str` conversion requires
-the planned `str(expr)` cast.
-
----
-
-## 19. Sequence Operations ✅
-
-```ebnf
-pop_stmt        ::= "pop" <IDENT> <NEWLINE>
-```
-
-`pop` removes and returns the last element; the result is available as
-an expression atom — see `pop_expr` in Section 24.
-
----
-
-## 20. Dict Assignment ✅
-
-```ebnf
-dict_set_stmt   ::= <IDENT> "[" <STR_LIT> "]" "=" expr <NEWLINE>
-```
-
-Variable-key subscript `d[x]` is planned (see `docs/issues.md` #23).
-
----
-
-## 21. Swap ✅
+## 13. Other Statements
 
 ```ebnf
 swap_stmt       ::= "swap" <IDENT> <IDENT> <NEWLINE>
+
+inc_dec_stmt    ::= ( "++" | "--" ) <IDENT> <NEWLINE>
+                  | <IDENT> ( "++" | "--" ) <NEWLINE>
+
+flip_stmt       ::= "flip" <IDENT> <NEWLINE>
 ```
+
+`flip` negates a `bool` variable in place (`true`↔`false`; `neutral` stays
+`neutral`). Equivalent to `:b = not b`. The variable must be declared mutable.
 
 ---
 
-## 22. Increment / Decrement ✅
-
-```ebnf
-inc_dec_stmt    ::= "++" <IDENT> <NEWLINE>
-                  | "--" <IDENT> <NEWLINE>
-```
-
----
-
-## 23. Memory Context ✅
+## 14. Memory Context
 
 ```ebnf
 use_stmt        ::= "use" "mm" mm_mode [ "gc" gc_mode ] ":" <NEWLINE>
@@ -334,24 +386,16 @@ use_stmt        ::= "use" "mm" mm_mode [ "gc" gc_mode ] ":" <NEWLINE>
                   | "use" "gc" gc_mode ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 
-mm_mode         ::= "arena"                    (✅ bump-pointer, O(1) free)
-                  | "pool"                     (✅ fixed-size freelist)
-                  | "stack"                    (✅ LIFO)
-                  | "heap"                     (✅ general malloc)
-                  | "static"                   (✅ compile-time static region)
+mm_mode         ::= "arena" | "pool" | "stack" | "heap" | "static"
 
-gc_mode         ::= "sweep"                    (✅ mark-and-sweep)
-                  | "ref"                      (✅ reference counting)
-                  | "gen"                      (✅ generational)
-                  | "inc"                      (✅ incremental / no pauses)
-                  | "region"                   (✅ region-based)
+gc_mode         ::= "sweep" | "ref" | "gen" | "inc" | "region"
 ```
 
-See `docs/mm.md` for full specification, behaviour, and comparison table.
+See `docs/mm.md` for full specification.
 
 ---
 
-## 24. Vectorized Loops 📋
+## 15. Vectorised Loops
 
 ```ebnf
 blast_stmt      ::= "blast" <IDENT> "in" <IDENT> ":" <NEWLINE>
@@ -363,19 +407,29 @@ pipe_stmt       ::= "pipe" <IDENT> "from" <IDENT> "into" <IDENT> ":" <NEWLINE>
 
 ---
 
-## 25. Expressions ✅
+## 16. Expressions
 
-Expressions are parsed in a strict 5-tier recursive-descent hierarchy.
+Expressions form a strict 6-tier recursive-descent hierarchy.
 Higher tiers bind less tightly (evaluated last).
 
 ```ebnf
-expr            ::= comparison
+expr            ::= or_expr
 
-comparison      ::= additive { cmp_op additive }
-                  | additive { "and" additive }
-                  | additive { "or" additive }
+or_expr         ::= and_expr { "or" and_expr }
+
+and_expr        ::= not_expr { "and" not_expr }
+
+not_expr        ::= "not" not_expr
+                  | comparison
+
+comparison      ::= in_expr { cmp_op in_expr }
 
 cmp_op          ::= "==" | "!=" | "<" | ">" | "<=" | ">="
+
+in_expr         ::= additive [ "in" additive ]
+                  | additive [ "is" additive ]
+                  | additive [ "is" "not" additive ]
+                  | additive
 
 additive        ::= term { add_op term }
 
@@ -387,73 +441,142 @@ mul_op          ::= "*" | "/" | "%" | "<<" | ">>"
 
 unary           ::= "-" unary
                   | "~" unary
-                  | factor
+                  | postfix_expr
 
-factor          ::= <INT_LIT>
+postfix_expr    ::= primary_expr { postfix_op }
+
+postfix_op      ::= "." <IDENT> "(" arg_list ")"
+                  | "." <INT_LIT>
+                  | "[" expr "]"
+
+primary_expr    ::= <INT_LIT>
                   | <FLOAT_LIT>
                   | <STR_LIT>
-                  | "true" | "false" | "unknown"
+                  | <CHAR_LIT>
+                  | bool_lit
+                  | "null"
                   | <IDENT>
-                  | dict_get_expr
                   | call_expr
-                  | pop_expr
-                  | len_expr
-                  | cap_expr
-                  | abs_expr
-                  | typeof_expr
                   | cast_expr
+                  | typeof_expr
+                  | input_expr
+                  | fmt_expr
+                  | hardware_expr
+                  | seq_lit
+                  | dict_lit
+                  | tup_lit
+                  | fn_lit
                   | "(" expr ")"
-                  | is_expr           (📋)
-                  | not_expr          (📋)
-                  | in_expr           (📋)
-                  | hash_expr         (📋)
-                  | syscall_expr      (📋)
 ```
 
 ---
 
-## 26. Expression Atoms ✅
+## 17. Bool Literals
 
 ```ebnf
-dict_get_expr   ::= <IDENT> "[" <STR_LIT> "]"
+bool_lit        ::= "true" | "neutral" | "false"
+```
 
-call_expr       ::= "@" <IDENT> "(" arg_list ")"
+| Literal   | Stored value | Meaning                            |
+|-----------|--------------|------------------------------------|
+| `true`    | `1`          | Affirmative                        |
+| `neutral` | `0`          | Indeterminate — neither confirmed nor denied |
+| `false`   | `-1`         | Negative                           |
 
-pop_expr        ::= "pop" <IDENT>
+`and` = `min(a, b)`, `or` = `max(a, b)`, `not` = `-x` over the signed ordering
+`false(−1) < neutral(0) < true(1)`.
 
-len_expr        ::= "len" <IDENT>
+---
 
-cap_expr        ::= "cap" <IDENT>
+## 18. Container Literals
 
-abs_expr        ::= "abs" "(" expr ")"
+```ebnf
+seq_lit         ::= "[" [ expr { "," expr } ] "]"
 
-typeof_expr     ::= "typeof" <IDENT>
+dict_lit        ::= "{" [ dict_pair { "," dict_pair } ] "}"
 
+dict_pair       ::= <STR_LIT> ":" expr
+
+tup_lit         ::= "(" expr { "," expr } ")"
+```
+
+`seq_lit` is also used to initialise `arr[T, N]` — the compiler checks the
+element count against `N` at compile time.
+
+`tup_lit` with a single element `(x)` is parenthesised precedence, not a tuple.
+A 1-tuple must be written as `tup[T] t = (x,)` with a trailing comma (or via
+declaration syntax — context disambiguates).
+
+---
+
+## 19. `fn` Literals (Anonymous Protocols)
+
+```ebnf
+fn_lit          ::= "fn" "(" fn_param_list ")" [ "->" type_expr ] ":" fn_body
+
+fn_param_list   ::= [ fn_param { "," fn_param } ]
+
+fn_param        ::= type_expr <IDENT>
+
+fn_body         ::= expr
+                  | <NEWLINE> <INDENT> { statement } <DEDENT>
+```
+
+`fn` literals are used as arguments to higher-order methods (`.map`, `.filter`,
+`.sort_by`, etc.). They capture no variables from the enclosing scope (no
+closures — Rex does not have heap closures).
+
+```rex
+seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
+seq[int] pos = nums.filter(fn(int x) -> bool: x > 0)
+int total = nums.reduce(0, fn(int acc, int x) -> int: acc + x)
+```
+
+---
+
+## 20. Cast Expressions
+
+```ebnf
 cast_expr       ::= "int" "(" expr ")"
                   | "float" "(" expr ")"
-                  | "str" "(" expr ")"     (📋)
+                  | "str" "(" expr ")"
+                  | "char" "(" expr ")"
+                  | "byte" "(" expr ")"
+                  | "bool" "(" expr ")"
 ```
+
+| Cast         | From types               | Notes                                                        |
+|--------------|--------------------------|--------------------------------------------------------------|
+| `int(x)`     | `float`, `str`, `char`, `byte`, `bool` | `float` truncates toward zero; `str` parses decimal; `bool` → −1/0/1 |
+| `float(x)`   | `int`, `str`             | `str` parses decimal notation                                |
+| `str(x)`     | any primitive            | Human-readable representation                                |
+| `char(x)`    | `int`, `byte`            | Interprets as UTF-8 code point                               |
+| `byte(x)`    | `int`, `char`            | Low 8 bits                                                   |
+| `bool(x)`    | `int`                    | positive → `true`, 0 → `neutral`, negative → `false`        |
 
 ---
 
-## 27. Planned Expression Atoms 📋
+## 21. Special Expressions
 
 ```ebnf
-not_expr        ::= "not" expr
+typeof_expr     ::= "typeof" expr
 
-is_expr         ::= expr "is" expr
-                  | expr "is" "not" expr
-
-in_expr         ::= expr "in" <IDENT>
-
-hash_expr       ::= "hash" <IDENT>
-
-syscall_expr    ::= "$" "(" arg_list ")"
+hardware_expr   ::= "rand"
+                  | "carry"
+                  | "overflow"
+                  | "hash" expr
 ```
+
+`typeof` returns the compile-time type token as an `int` constant.
+
+`rand` reads one hardware-entropy integer via `rdrand`.
+`carry` and `overflow` read the CPU flag bits after the most recent arithmetic
+operation — both return `bool` (`true` or `false`, never `neutral`).
+`hash expr` computes a SipHash-2-4 digest of the memory region `expr` refers to.
 
 ---
 
-## 28. Literals
+## 22. Literals and Terminals
 
 ```ebnf
 <INT_LIT>       ::= <DECIMAL>
@@ -461,13 +584,18 @@ syscall_expr    ::= "$" "(" arg_list ")"
                   | "0b" <BIN_DIGIT> { <BIN_DIGIT> }
                   | "0o" <OCT_DIGIT> { <OCT_DIGIT> }
 
-<FLOAT_LIT>     ::= <DECIMAL> "." <DECIMAL>
+<FLOAT_LIT>     ::= <DECIMAL> "." <DECIMAL> [ ( "e" | "E" ) [ "+" | "-" ] <DECIMAL> ]
 
-<COMPLEX_LIT>   ::= <DECIMAL> "+" <DECIMAL> "j"
-                  | <FLOAT_LIT> "+" <FLOAT_LIT> "j"
+<STR_LIT>       ::= '"' { str_char } '"'
 
-<STR_LIT>       ::= '"' { <UTF8_CHAR> } '"'
-                    (max 63 bytes of content; excess truncated)
+str_char        ::= <UTF8_CHAR_EXCEPT_BRACE_AND_QUOTE>
+                  | "{" expr "}"
+                  | "{{" | "}}"
+                  | escape_seq
+
+escape_seq      ::= "\\" ( "n" | "t" | "r" | "\\" | '"' | "0" | "x" <HEX_DIGIT> <HEX_DIGIT> )
+
+<CHAR_LIT>      ::= "'" ( <UTF8_CHAR> | escape_seq ) "'"
 
 <DECIMAL>       ::= <DIGIT> { <DIGIT> }
 <DIGIT>         ::= "0" … "9"
@@ -476,128 +604,169 @@ syscall_expr    ::= "$" "(" arg_list ")"
 <OCT_DIGIT>     ::= "0" … "7"
 ```
 
+String literals support `{expr}` interpolation inline. `{{` and `}}` produce
+literal brace characters. A `:` inside `{}` activates format mode:
+`{pi:.2f}`, `{n:08b}`, `{n:x}`, `{name:10s}`.
+
 ---
 
-## 29. Identifiers and Keywords
+## 23. Identifiers
 
 ```ebnf
-<IDENT>         ::= <ALPHA> { <ALPHA> | <DIGIT> | "_" }
-                    (max 31 bytes)
+<IDENT>         ::= <ALPHA_UNDER> { <ALPHA_UNDER> | <DIGIT> }
 
-<ALPHA>         ::= "a" … "z" | "A" … "Z"
+<ALPHA_UNDER>   ::= "a" … "z" | "A" … "Z" | "_"
 ```
 
-### Reserved Keywords
-
-The following identifiers are reserved and cannot be used as variable or
-protocol names:
-
-| Category | Keywords |
-|---|---|
-| Types | `int` `float` `bool` `str` `complex` `seq` `dict` |
-| Literals | `true` `false` `unknown` |
-| Statements | `output` `if` `elif` `else` `when` `is` `for` `in` `while` `stop` `skip` `pass` `repeat` `return` `err` `pop` `swap` `prot` `use` |
-| Operators | `and` `or` `not` `abs` `len` `cap` `typeof` `typeof` `swap` |
-| Memory | `mm` `gc` `arena` `pool` `stack` `heap` `static` `sweep` `ref` `gen` `inc` `region` `own` `move` `free` `align` `const` `volatile` |
-| Future | `blast` `pipe` `each` `match` `repeat` `hash` `flip` `rand` `carry` `overflow` `sign` `clz` `ceil` `floor` `fract` `real` `imag` `conj` `assert` `unreachable` |
+Maximum identifier length is 255 bytes. Identifiers are case-sensitive.
+Keywords are reserved and cannot be used as identifiers.
 
 ---
 
-## 30. Indentation and Layout
+## 24. Reserved Keywords
+
+| Category    | Keywords                                                                                                    |
+|-------------|-------------------------------------------------------------------------------------------------------------|
+| Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup`                                          |
+| Literals    | `true` `neutral` `false` `null`                                                                             |
+| Statements  | `output` `show` `write` `debug` `warn` `err` `flush` `input` `fmt`                                         |
+|             | `if` `elif` `else` `when` `is` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`                    |
+|             | `return` `swap` `flip` `prot` `use`                                                                         |
+| Operators   | `and` `or` `not`                                                                                            |
+| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn`                                                              |
+| Memory      | `mm` `gc` `arena` `pool` `stack` `heap` `static` `sweep` `ref` `gen` `inc` `region`                        |
+| Decorators  | `memo` `pure` `total` `inline` `noinline` `hot` `cold` `safe` `unsafe`                                     |
+| Future      | `blast` `pipe` `match` `assert` `unreachable` `move` `own` `free` `align` `const` `volatile`               |
+
+---
+
+## 25. Lexical Structure
 
 ```ebnf
-<INDENT>        ::= increase in leading spaces relative to previous line
-                    (multiples of 4 spaces recommended; any consistent
-                    indentation level is accepted)
+comment         ::= "//" { <any_char_except_newline> } <NEWLINE>
 
-<DEDENT>        ::= return to previous indentation level
+<INDENT>        ::= increase in leading whitespace relative to the previous
+                    logical line (multiples of 4 spaces recommended)
+
+<DEDENT>        ::= return to a previous indentation level
 
 <NEWLINE>       ::= "\n" | "\r\n"
 
 <EOF>           ::= end of input
 ```
 
-Block bodies must contain at least one statement (use `pass` for empty blocks).
-Blank lines and `//` comments are consumed by the lexer and do not produce tokens.
+- Comments begin with `//` and extend to end of line. There are no block comments.
+- Blank lines and comments are consumed by the lexer and produce no tokens.
+- Indentation is significant. Block bodies are opened by `:` + `<NEWLINE>` and
+  the subsequent `<INDENT>`, and closed by `<DEDENT>`.
+- A block body must contain at least one statement. Use `pass` for empty blocks.
+- Trailing whitespace on a line is ignored.
+- The lexer enforces consistent indentation within a block (mixing tabs and spaces
+  is a lexer error).
 
 ---
 
-## 31. Comments
-
-```ebnf
-comment         ::= "//" { <any_char_except_newline> } <NEWLINE>
-```
-
-Comments are stripped during lexing. UTF-8 content after `//` is safely consumed.
-
----
-
-## 32. Operator Precedence Summary
+## 26. Operator Precedence Summary
 
 From lowest to highest binding:
 
-| Tier | Operators | Notes |
-|---|---|---|
-| 5 (lowest) | `==` `!=` `<` `>` `<=` `>=` `and` `or` | Comparison and logical — returns 0 or 1 |
-| 4 | `+` `-` `&` `\|` `^` | Additive and bitwise |
-| 3 | `*` `/` `%` `<<` `>>` | Multiplicative and shift |
-| 2 | `-x` `~x` | Unary negation and bitwise NOT |
-| 1 (highest) | literals, variables, calls, `(expr)` | Atoms and parentheticals |
+| Tier | Operators                            | Associativity | Notes                             |
+|------|--------------------------------------|---------------|-----------------------------------|
+| 6    | `or`                                 | left          | Logical or (max)                  |
+| 5    | `and`                                | left          | Logical and (min)                 |
+| 4    | `not`                                | right (unary) | Logical negation (negate)         |
+| 3    | `==` `!=` `<` `>` `<=` `>=` `in` `is` | left        | Comparison and membership         |
+| 2    | `+` `-` `&` `\|` `^`                  | left          | Additive, bitwise                 |
+| 1    | `*` `/` `%` `<<` `>>`               | left          | Multiplicative, shift             |
+| 0    | `-x` `~x`                            | right (unary) | Unary negation, bitwise NOT       |
+| -1   | `.method()` `.field` `[index]`       | left          | Postfix — highest precedence      |
 
-`and` and `or` are short-circuit: the RHS is not evaluated if the result is
-determined from the LHS alone. `not` (📋) will bind at the unary tier (2).
+`and`/`or` short-circuit:
+- `and`: skips RHS if LHS is `false` (result is `false`).
+- `or`: skips RHS if LHS is `true` (result is `true`).
+- `neutral` on either side of `and`/`or` never short-circuits.
 
----
-
-## 33. Type System Summary
-
-| Type token | Constant | Storage | Printer blob |
-|---|---|---|---|
-| `TYPE_INT` | 1 | `qword` in `var_table` | `rt_pri_blob` |
-| `TYPE_FLOAT` | 2 | `qword` (IEEE 754 double) in `var_table` | `rt_prf_blob` |
-| `TYPE_BOOL` | 3 | `qword` (0/1/rdrand) in `var_table` | `rt_prb_blob` |
-| `TYPE_COMPLEX` | 4 | two `qword` in `var_table` (real, imag) | `rt_prc_blob` (via LEA) |
-| `TYPE_STR` | 5 | `qword` pointer in `var_table` | `rt_prs_blob` |
-| `TYPE_SEQ` | 6 | `qword` pointer to heap block in `var_table` | — |
-| `TYPE_DICT` | 7 | `qword` pointer to hash table in `var_table` | — |
-
-Type propagation in binary expressions: `float` dominates `int`; `%` always
-yields `TYPE_INT`. Other inter-type arithmetic is not yet defined.
+`not` is numeric negation of the signed bool value: `not true` = `false`,
+`not false` = `true`, `not neutral` = `neutral`.
 
 ---
 
-## 34. Variable Table Layout
+## 27. Type System Summary
+
+| Type      | Tag | Storage                              | Notes                              |
+|-----------|-----|--------------------------------------|------------------------------------|
+| `int`     | 1   | 64-bit signed integer (`qword`)      | Two's complement                   |
+| `float`   | 2   | 64-bit IEEE 754 double               | `qword` (bit pattern)              |
+| `bool`    | 3   | 8-bit signed integer (`sbyte`)       | −1 / 0 / 1 only                   |
+| `str`     | 5   | `qword` heap pointer                 | UTF-8; `[cap:8][len:8][data:N]`   |
+| `char`    | 8   | 8-bit unsigned integer               | Single UTF-8 byte                  |
+| `byte`    | 9   | 8-bit unsigned integer               | Raw byte; 0–255                    |
+| `seq[T]`  | 6   | `qword` heap pointer                 | `[cap:8][len:8][data:N]`          |
+| `arr[T,N]`| 10  | inline stack array                   | Size `N` is compile-time constant  |
+| `dict[T]` | 7   | `qword` heap pointer (hash table)    | SipHash-2-4; keys always `str`    |
+| `tup[T…]` | 11  | inline stack struct                  | Immutable; positional access       |
+
+Type propagation in binary expressions:
+- `float` dominates `int` in arithmetic.
+- `bool` arithmetic uses signed 8-bit values; results may be cast to `int`.
+- Container element types must match exactly (no implicit widening).
+
+---
+
+## 28. Variable Table Layout
 
 Each variable occupies one 64-byte entry in the flat `var_table` array:
 
 ```
 offset  size  field
-──────  ────  ──────────────────────────────
- 0      32    name (null-padded ASCII string)
+──────  ────  ──────────────────────────────────────────────────
+ 0      32    name (null-padded ASCII, max 31 bytes + NUL)
 32       8    value (qword — int / float bits / pointer)
-40       1    is_initialized flag (0 or 1)
-41       6    (reserved)
-48       1    type (TYPE_* constant)
-49      15    (reserved / padding to 64 bytes)
+40       1    is_initialized  (0 = no, 1 = yes)
+41       1    is_mutable      (0 = immutable, 1 = mutable)
+42       1    type tag        (TYPE_* constant from §27)
+43       5    (reserved — padding)
+48      16    (reserved — future use, e.g. generic type params)
 ```
 
-Maximum 256 entries (`VAR_MAX`). `var_add` halts with a compile-time error if
-this ceiling is exceeded.
+Maximum 256 entries (`VAR_MAX`). Exceeding this limit is a compile-time error.
 
 ---
 
-## 35. Protocol Table Layout
+## 29. Protocol Table Layout
 
-Each protocol occupies one 48-byte entry in the flat `proto_table` array:
+Each protocol occupies one 64-byte entry in the flat `proto_table` array:
 
 ```
 offset  size  field
-──────  ────  ──────────────────────────────
- 0      32    name (null-padded ASCII string)
-32       8    out_idx — byte offset of protocol body start in out_buffer
+──────  ────  ──────────────────────────────────────────────────
+ 0      32    name (null-padded ASCII, max 31 bytes + NUL)
+32       8    body_offset — byte offset of protocol body in output buffer
 40       1    param_count (0–6)
-41       6    param var indices (one byte each; unused slots = 0)
-47       1    ret_type (TYPE_* constant; TYPE_VOID = 0 for void protocols)
+41       6    param var_table indices (one byte each; unused = 0)
+47       1    ret_type tag (TYPE_* constant; 0 = void)
+48       1    ret_count (0 = void, 1 = single, 2+ = multi-value)
+49      15    (reserved — decorators bitmask, future use)
 ```
 
-All lookups and writes use `imul rax, 48`.
+---
+
+## 30. Formal Constraints
+
+The following rules are enforced by the compiler and are **not** captured by
+the EBNF alone:
+
+1. **Mutability**: `:x = …` is legal only if `x` was declared with `":"`.
+2. **Initialization**: Reading an uninitialized variable is a compile-time error.
+3. **Arity**: Protocol calls must supply exactly as many arguments as declared.
+4. **Type matching**: All operands must be compatible types (see §27 propagation).
+5. **Loop depth**: `stop N` / `skip N` where N exceeds the current nesting depth
+   is a compile-time error.
+6. **`arr` size**: The literal element count in `[…]` must equal `N`.
+7. **`tup` immutability**: Tuple fields may not be assigned via `:t.0 = …`.
+8. **`fn` capture**: `fn` literals may not reference variables from the enclosing
+   scope. All inputs must be explicit parameters.
+9. **`when` exhaustiveness**: `when` without an `else` and without covering all
+   possible values is a compile-time warning; with `_` it is always exhaustive.
+10. **`dict` keys**: All dict operations that write use `str` keys only. Variable
+    key expressions are supported; key type must be `str`.
