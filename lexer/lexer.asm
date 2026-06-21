@@ -1365,16 +1365,45 @@ lexer_classify:
     mov byte [tok_type], TOK_FMT
     ret
 .nkw_str_at:
-    ; "str_at": s,t,r,_ = LE 0x5F727473; [4]='a',[5]='t',[6]=0
+    ; "str_*": s,t,r,_ = LE 0x5F727473; dispatch on [4]
     cmp eax, 0x5F727473
     jne .nkw_char_kw
     cmp byte [tok_ident+4], 'a'
-    jne .nkw_char_kw
+    je .nkw_str_at_inner
+    cmp byte [tok_ident+4], 'e'
+    je .nkw_str_eq_check
+    cmp byte [tok_ident+4], 's'
+    je .nkw_str_slice_check
+    jmp .nkw_char_kw
+.nkw_str_at_inner:
+    ; "str_at": [4]='a',[5]='t',[6]=0
     cmp byte [tok_ident+5], 't'
     jne .nkw_char_kw
     cmp byte [tok_ident+6], 0
     jne .nkw_char_kw
     mov byte [tok_type], TOK_STR_AT
+    ret
+.nkw_str_eq_check:
+    ; "str_eq": [4]='e',[5]='q',[6]=0
+    cmp byte [tok_ident+5], 'q'
+    jne .nkw_char_kw
+    cmp byte [tok_ident+6], 0
+    jne .nkw_char_kw
+    mov byte [tok_type], TOK_STR_EQ
+    ret
+.nkw_str_slice_check:
+    ; "str_slice": [4]='s',[5]='l',[6]='i',[7]='c',[8]='e',[9]=0
+    cmp byte [tok_ident+5], 'l'
+    jne .nkw_char_kw
+    cmp byte [tok_ident+6], 'i'
+    jne .nkw_char_kw
+    cmp byte [tok_ident+7], 'c'
+    jne .nkw_char_kw
+    cmp byte [tok_ident+8], 'e'
+    jne .nkw_char_kw
+    cmp byte [tok_ident+9], 0
+    jne .nkw_char_kw
+    mov byte [tok_type], TOK_STR_SLICE
     ret
 .nkw_char_kw:
     ; "char": c,h,a,r = LE 0x72616863; [4]=0

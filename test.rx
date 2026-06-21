@@ -1,0 +1,5 @@
+; test.rx — minimal Rex source file used by rex_bootstrap.rx Phase-2 verification.
+; The bootstrap lexer reads this file and tokenises it; expected result: >0 tokens.
+int x = 42
+str s = "hello"
+x = x + 1

@@ -60,6 +60,7 @@ global codegen_emit_exit1
 global codegen_emit_str_at_rax
 global codegen_emit_file_open_inline, codegen_emit_file_read_all_call
 global codegen_emit_file_write_inline, codegen_emit_file_close_inline
+global codegen_emit_str_eq_rax, codegen_emit_str_slice_rax
 global codegen_emit_exit_inline, codegen_emit_alloc_inline
 global codegen_emit_char_from_rax
 global codegen_push_loop_else_flag, codegen_pop_loop_else_flag, codegen_peek_loop_else_flag
@@ -562,9 +563,8 @@ codegen_finish:
     add rax, 0x46000    ; BSS: var_table (0x44000) + memo_ptr_base (0x1000) + tables (0x1000)
     mov [rcx+64+40], rax
     ; O3: peephole optimise the output buffer
-    call codegen_peephole
-    ; O3b: store-load elimination pass
-    call codegen_peephole_slx
+    ; call codegen_peephole      ; TEMP DISABLED: debugging str_at crash
+    ; call codegen_peephole_slx  ; TEMP DISABLED
     ret
 
 ; ── output helpers ────────────────────────────────────────────────────────────
@@ -7570,6 +7570,28 @@ emit_buf_overflow_msg: db "error: compiler output buffer overflow",10
 emit_buf_overflow_len  equ $ - emit_buf_overflow_msg
 jmp_stack_overflow_msg: db "error: if/loop nesting depth exceeded",10
 jmp_stack_overflow_len  equ $ - jmp_stack_overflow_msg
+; str_eq inline blob: 35-byte char-by-char null-terminated strcmp → 1 (eq) / 0 (neq)
+; Pre: rbx=ptr_a, rax=ptr_b  Post: rax=1 if equal, 0 if not
+str_eq_inline_blob:
+    db 0x48, 0x89, 0xDF          ; mov rdi, rbx
+    db 0x48, 0x89, 0xC6          ; mov rsi, rax
+    ; .loop (offset 6):
+    db 0x8A, 0x07                ; mov al, [rdi]
+    db 0x8A, 0x0E                ; mov cl, [rsi]
+    db 0x48, 0xFF, 0xC7          ; inc rdi
+    db 0x48, 0xFF, 0xC6          ; inc rsi
+    db 0x38, 0xC8                ; cmp al, cl
+    db 0x75, 0x06                ; jne .neq  (to offset 26, rel8=+6 from pc=20)
+    db 0x84, 0xC0                ; test al, al
+    db 0x74, 0x06                ; jz  .eq   (to offset 30, rel8=+6 from pc=24)
+    db 0xEB, 0xEC                ; jmp .loop (to offset 6,  rel8=-20 from pc=26)
+    ; .neq (offset 26):
+    db 0x31, 0xC0                ; xor eax, eax
+    db 0xEB, 0x05                ; jmp .done (to offset 35, rel8=+5 from pc=30)
+    ; .eq (offset 30):
+    db 0xB8, 0x01, 0x00, 0x00, 0x00  ; mov eax, 1
+    ; .done (offset 35):
+str_eq_inline_blob_size equ $ - str_eq_inline_blob
 ; O32d: 55-byte clock_gettime sequence as a blob for single emit_blob call
 ; ── codegen_emit_dict_new: emit call rt_dict_new + store ptr to var ──────────
 ; rdi = var_idx
@@ -7901,6 +7923,105 @@ codegen_emit_alloc_inline:
     add rdx, LOAD_BASE
     sub rax, rdx
     call emit_d
+    ret
+
+; ── codegen_emit_str_eq_rax ───────────────────────────────────────────────────
+; Pre: rbx = ptr_a, rax = ptr_b  (typical: save_rax pushed a, restore_rbx popped a)
+; Emits: 35-byte inline strcmp loop → rax = 1 if equal, 0 if not
+codegen_emit_str_eq_rax:
+    lea rsi, [str_eq_inline_blob]
+    mov rcx, str_eq_inline_blob_size
+    jmp emit_blob                       ; tail call — does not return here
+
+; ── codegen_emit_str_slice_rax ────────────────────────────────────────────────
+; Pre: rax = end_idx;  two prior codegen_emit_expr_save_rax left [start, ptr] on stack.
+; Emits inline: pop start→rbx, pop ptr→rcx, compute len=end-start, alloc len+1 via
+;               rt_alc (actual_alc_va), memcpy s[start..end) → new buf, null terminate.
+; Post: rax = new null-terminated substring str
+codegen_emit_str_slice_rax:
+    ; --- pop rbx (start from stack)
+    mov al, 0x5B
+    call emit_b
+    ; --- pop rcx (s ptr from stack)
+    mov al, 0x59
+    call emit_b
+    ; --- push rcx (save s ptr for later load of rdi)
+    mov al, 0x51
+    call emit_b
+    ; --- push rbx (save start for later load of rdx)
+    mov al, 0x53
+    call emit_b
+    ; --- sub rax, rbx  (len = end - start)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x29
+    call emit_b
+    mov al, 0xD8
+    call emit_b
+    ; --- lea rdi, [rax+1]  (alloc size = len+1)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x78
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    ; --- push rax (save len)
+    mov al, 0x50
+    call emit_b
+    ; --- call rt_alc   (rdi = len+1 → rax = new buffer)
+    mov al, 0xE8
+    call emit_b
+    mov rax, [actual_alc_va]
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ; --- pop rcx (restore len → movsb count)
+    mov al, 0x59
+    call emit_b
+    ; --- pop rdx (restore start → index into s)
+    mov al, 0x5A
+    call emit_b
+    ; --- pop rdi (restore s base ptr)
+    mov al, 0x5F
+    call emit_b
+    ; --- push rax (save new buffer ptr = return value)
+    mov al, 0x50
+    call emit_b
+    ; --- lea rsi, [rdi+rdx]  SIB: rsi = s_ptr + start  (48 8D 34 17)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8D
+    call emit_b
+    mov al, 0x34
+    call emit_b
+    mov al, 0x17
+    call emit_b
+    ; --- mov rdi, rax  (dst = new buf)
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    ; --- rep movsb  (copy len bytes: rcx=len, rsi=src, rdi=dst)
+    mov al, 0xF3
+    call emit_b
+    mov al, 0xA4
+    call emit_b
+    ; --- mov byte [rdi], 0  (null terminate)
+    mov al, 0xC6
+    call emit_b
+    mov al, 0x07
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ; --- pop rax (return value = new buffer)
+    mov al, 0x58
+    call emit_b
     ret
 
 ; ── codegen_emit_char_from_rax ────────────────────────────────────────────────

@@ -9,6 +9,7 @@ global codegen_emit_file_open_inline, codegen_emit_file_read_all_call
 global codegen_emit_file_write_inline, codegen_emit_file_close_inline
 global codegen_emit_exit_inline, codegen_emit_alloc_inline
 global codegen_emit_char_from_rax
+global codegen_emit_str_eq_rax, codegen_emit_str_slice_rax
 
 section .text
 
@@ -20,4 +21,6 @@ codegen_emit_file_close_inline:
 codegen_emit_exit_inline:
 codegen_emit_alloc_inline:
 codegen_emit_char_from_rax:
+codegen_emit_str_eq_rax:
+codegen_emit_str_slice_rax:
     ret

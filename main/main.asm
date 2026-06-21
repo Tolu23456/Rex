@@ -205,8 +205,15 @@ prescan_blobs:
     or eax, 0x40
 .p_file:; "file" → FILE_IO (bit 9 = 0x200) + ALC (0x40, file_read_all uses rt_alc)
     cmp r8d, 0x656C6966
-    jne .pb
+    jne .p_str_builtin
     or eax, 0x240
+.p_str_builtin:
+    ; "str_" prefix (0x5F727473) — check 5th byte for str_slice ('s') needing ALC
+    cmp r8d, 0x5F727473
+    jne .pb
+    cmp byte [r12+rbx+4], 's' ; "str_s..." → str_slice → needs ALC (inline rt_alc call)
+    jne .pb
+    or eax, 0x40             ; ALC bit
 .pb:; 3-byte patterns (safe since >= 4 bytes remain)
     ; "str" → PRS : low 3 bytes = s(73) t(74) r(72) → 0x00727473
     mov ecx, r8d

@@ -25,16 +25,15 @@ be written:
 
 | # | Feature | Status |
 |---|---------|--------|
-| 1 | Recursive protocols (`@recurse` or indirect call) | open — issue #18 |
-| 2 | String operations (concat, char-index, compare, slice) | partial — issues #24, #11 |
+| 1 | Recursive protocols (`@recurse` or indirect call) | **done** — per-call stack frames, `@proto` syntax |
+| 2 | String operations (concat, char-index, compare, slice) | **done** — `str_at`, `str_eq`, `str_slice` wired |
 | 3 | Dynamic sequences (realloc on overflow) | **done** — issue #19 fixed |
-| 4 | File I/O syscall wrappers (read, write, open, close) | planned |
+| 4 | File I/O syscall wrappers (read, write, open, close) | **done** — `file_open/read_all/write/close` live |
 | 5 | Dict / hash-map for symbol tables | **done** — Stage 4 complete |
 | 6 | Bitwise byte operations (shr 8, and 0xFF) | **done** — Stage 3b complete |
 | 7 | Module / include system | planned |
 
-The minimum viable subset for a one-file bootstrap lexer+parser is (1)+(2).
-Prerequisite (3) is now satisfied; sequences grow automatically on overflow.
+All blocking prerequisites for Phase 2 are now satisfied.
 
 ---
 
@@ -42,18 +41,16 @@ Prerequisite (3) is now satisfied; sequences grow automatically on overflow.
 
 ### Phase 0 — Current (V5.0)
 Hand-written NASM ELF64 compiler.  All language features through Stage 7 are
-complete.  Known blocking limitations: no recursion in protocols (per-call stack
-frames needed — issue #18), no file I/O syscall wrappers.
+complete.
 
-### Phase 1 — Language Completion
-Fix the prerequisites above.  Key milestones:
+### Phase 1 — Language Completion ✅
+All milestones met:
 
-- Recursive protocol calls with proper per-call stack frames (issue #18).
-- `file_open(path, flags) → fd`, `file_read(fd, buf, n) → n`,
-  `file_write(fd, buf, n) → n`, `file_close(fd)` as built-in calls
-  (via direct `syscall` emission in codegen).
-- `str_cat`, `str_cmp`, `str_len`, `str_at` built-ins (issue #24).
-- Dict literal `{k: v, ...}` and variable-key subscript `d[x]` (issue #23).
+- Recursive protocol calls with proper per-call stack frames — **done**.
+- `file_open(path, flags) → fd`, `file_read_all(path) → str`,
+  `file_write(fd, s)`, `file_close(fd)` — **done** (inline syscall emission).
+- `str_at(s,i) → int`, `str_eq(a,b) → int`, `str_slice(s,i,j) → str` — **done**.
+- Dict literal `{k: v, ...}` and variable-key subscript `d[x]` — **done** (Stage 4).
 
 ### Phase 2 — Bootstrap Lexer in Rex (`rex_bootstrap.rx`)
 Write the Rex lexer in Rex.  Input: null-terminated source string.

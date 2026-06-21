@@ -29,6 +29,7 @@ extern codegen_emit_file_open_inline, codegen_emit_file_read_all_call
 extern codegen_emit_file_write_inline, codegen_emit_file_close_inline
 extern codegen_emit_exit_inline, codegen_emit_alloc_inline
 extern codegen_emit_char_from_rax
+extern codegen_emit_str_eq_rax, codegen_emit_str_slice_rax
 extern codegen_emit_add_rax_rbx, codegen_emit_sub_rax_rbx
 extern codegen_emit_imul_rax_rbx, codegen_emit_idiv_rbx_by_rax, codegen_emit_imod_rbx_by_rax
 extern codegen_emit_cmp_rbx_rax_setcc, codegen_emit_test_rax_jz
@@ -444,6 +445,10 @@ parse_factor:
     je .exit_kw_x
     cmp al, TOK_ALLOC_KW
     je .alloc_kw_x
+    cmp al, TOK_STR_EQ
+    je .str_eq_x
+    cmp al, TOK_STR_SLICE
+    je .str_slice_x
     ; default: zero + advance past unknown token (#35)
     call lexer_next
     mov rdi, 0
@@ -1115,6 +1120,50 @@ parse_factor:
 .alloc_kw_bail:
     call codegen_emit_alloc_inline
     mov byte [cur_type], TYPE_INT
+    jmp .done
+.str_eq_x:
+    ; str_eq(str_a, str_b) → int  1 if equal, 0 otherwise
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_save_rax
+    cmp byte [tok_type], TOK_COMMA
+    jne .str_eq_bail
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_restore_rbx
+    call codegen_emit_str_eq_rax
+.str_eq_bail:
+    mov byte [cur_type], TYPE_INT
+    cmp byte [tok_type], TOK_RPAREN
+    jne .done
+    call lexer_next
+    jmp .done
+.str_slice_x:
+    ; str_slice(str_expr, start_int, end_int) → str  s[start..end)
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr                      ; parse s → rax
+    call codegen_emit_expr_save_rax      ; push s ptr
+    cmp byte [tok_type], TOK_COMMA
+    jne .str_slice_bail
+    call lexer_next
+    call parse_expr                      ; parse start → rax
+    call codegen_emit_expr_save_rax      ; push start
+    cmp byte [tok_type], TOK_COMMA
+    jne .str_slice_bail
+    call lexer_next
+    call parse_expr                      ; parse end → rax
+.str_slice_bail:
+    call codegen_emit_str_slice_rax      ; pops start+ptr from stack, returns new str
+    mov byte [cur_type], TYPE_STR
+    cmp byte [tok_type], TOK_RPAREN
+    jne .done
+    call lexer_next
     jmp .done
 .done:
     pop r13
@@ -1795,6 +1844,7 @@ parse_stmt:
 .pinit:
     call lexer_next
     call parse_expr
+    jmp .done   ; DBG-B: right after parse_expr
     lea rdi, [saved_name]
     xor rsi, rsi
     movzx edx, byte [decl_mutable]

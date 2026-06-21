@@ -328,6 +328,8 @@ TOK_FILE_WRITE equ 144 ; file_write(fd,s)   — write str to fd
 TOK_FILE_CLOSE equ 145 ; file_close(fd)     — close fd
 TOK_EXIT_KW   equ 146  ; exit(code)         — exit with code
 TOK_ALLOC_KW  equ 147  ; alloc(n)           — allocate n bytes → int (addr)
+TOK_STR_EQ    equ 148  ; str_eq(a,b)        — 1 if strings equal, 0 otherwise
+TOK_STR_SLICE equ 149  ; str_slice(s,i,j)   — substring s[i..j) as new str
 
 ; ── Self-hosting runtime blobs ────────────────────────────────────────────────
 RT_FILE_READ_ALL_SIZE equ 512  ; rt_file_read_all: open+read+close → str
