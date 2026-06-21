@@ -1793,54 +1793,93 @@ Modules resolve at compile time. No runtime dynamic loading.
 
 ## 18. Compiler Pipeline
 
-The compiler processes source in a single linear pass:
+Rex uses a **multi-pass** architecture. Each pass operates on a well-defined
+data structure and has a single, bounded responsibility. No pass peeks ahead
+into a later pass's concern.
 
 ```
 source.rex
     │
     ▼
-[ Lexer ]
-    Produces a token stream:
-    TOK_INT, TOK_IDENT, TOK_IF, TOK_FOR, …
-    Tracks INDENT / DEDENT from indentation changes.
-    Strips comments and blank lines.
+┌─────────────────────────────────────────────────────────────────┐
+│  PASS 1 — Lexer                                                  │
+│  Read the entire source file once.                               │
+│  Emit a flat token array:                                        │
+│      TOK_INT, TOK_IDENT, TOK_IF, TOK_FOR, TOK_NEWLINE, …        │
+│  Track INDENT / DEDENT from column changes.                      │
+│  Strip comments and blank lines.                                 │
+│  Output: token_buf[]  (immutable for all later passes)           │
+└─────────────────────────────────────────────────────────────────┘
     │
     ▼
-[ Parser ]
-    Recursive-descent.
-    Maintains var_table (name, type, value, mutability, initialisation).
-    Maintains proto_table (name, return type, param count, param types).
-    Emits IR records instead of machine bytes.
+┌─────────────────────────────────────────────────────────────────┐
+│  PASS 2 — Symbol Collection                                      │
+│  Walk token_buf once without emitting code.                      │
+│  Record every top-level declaration:                             │
+│    • Protocol name, return type, parameter names and types       │
+│    • Global variable name and declared type                      │
+│    • Module imports                                              │
+│  Populate proto_table and var_table headers.                     │
+│  Output: complete proto_table[], var_table[] (names + types)     │
+│  Effect: forward references to any protocol are now legal.       │
+│  Mutual recursion is resolved without pre-declaration stubs.     │
+└─────────────────────────────────────────────────────────────────┘
     │
     ▼
-[ IR Buffer ]
-    Flat array of 32-byte records.
-    One record per compiler operation.
+┌─────────────────────────────────────────────────────────────────┐
+│  PASS 3 — Type Checking & IR Emission                            │
+│  Recursive-descent parse of token_buf.                           │
+│  Full type knowledge available (proto_table complete).           │
+│  Type-check every expression; reject mismatches at this pass.    │
+│  Fill in var_table entries (mutability, initialisation flag).    │
+│  Emit IR records into ir_buf[].                                  │
+│  Output: ir_buf[]  (32-byte records, one per compiler op)        │
+└─────────────────────────────────────────────────────────────────┘
     │
     ▼
-[ Optimisation Passes ]
-    Pass 1: Constant folding      — evaluate compile-time expressions
-    Pass 2: Dead store elimination — remove stores never read
-    Pass 3: Load-store coalescing  — collapse redundant load/store pairs
-    Pass 4: Linear scan register allocation — map vregs to physical registers
-    Pass 5: Peephole optimisation  — collapse adjacent instruction pairs
+┌─────────────────────────────────────────────────────────────────┐
+│  PASS 4 — IR Optimisation (5 sub-passes, iterated until stable)  │
+│  4a: Constant folding         — collapse compile-time exprs      │
+│  4b: Dead store elimination   — remove stores never read         │
+│  4c: Load-store coalescing    — collapse redundant pairs         │
+│  4d: Linear scan reg alloc    — map vregs → physical registers   │
+│  4e: Peephole optimisation    — collapse adjacent instr pairs    │
+│  Output: optimised ir_buf[]                                      │
+└─────────────────────────────────────────────────────────────────┘
     │
     ▼
-[ x86-64 Emission ]
-    Convert IR records to machine bytes.
-    IR_NOP records are silently skipped.
-    Forward jumps patched via label resolution table.
+┌─────────────────────────────────────────────────────────────────┐
+│  PASS 5 — x86-64 Emission                                        │
+│  Walk ir_buf[], convert each record to machine bytes.            │
+│  IR_NOP records silently skipped.                                │
+│  Forward jumps patched via a label-resolution table.             │
+│  Output: code_buf[]  (raw machine bytes)                         │
+└─────────────────────────────────────────────────────────────────┘
     │
     ▼
-[ ELF64 Writer ]
-    Prepend 120-byte ELF64 + program header.
-    Inline all runtime blobs (print, alloc, hash, error).
-    Emit a 5-byte JMP past the runtime blobs to user code start.
-    Write complete executable to disk — no linker step.
+┌─────────────────────────────────────────────────────────────────┐
+│  PASS 6 — ELF64 Writer                                           │
+│  Prepend 120-byte ELF64 header + program header (LOAD, RWX).    │
+│  Emit a 5-byte JMP past runtime blobs to user code start.       │
+│  Inline all runtime blobs (print, alloc, hash).                  │
+│  Append code_buf[].                                              │
+│  Write complete binary to disk in one syscall — no linker.       │
+│  Output: ./output  (self-contained ELF64 executable)            │
+└─────────────────────────────────────────────────────────────────┘
     │
     ▼
   ./output   (self-contained ELF64 binary)
 ```
+
+**Why multi-pass matters:**
+
+| Benefit                        | Single-pass limit              | Multi-pass solution                      |
+|-------------------------------|--------------------------------|------------------------------------------|
+| Forward references            | Required pre-declaration stubs | Pass 2 collects all names first          |
+| Mutual recursion              | Impossible without workarounds | Natural — both protos known before pass 3 |
+| Whole-program type checking   | Only sees declarations so far  | Full symbol table available in pass 3    |
+| Dead code at program scope    | Cannot detect cross-function   | Pass 4b sees full IR of all protocols    |
+| Constant propagation          | Bounded to one scope           | Pass 4a can fold across protocol calls   |
 
 ### 17.1 IR Record Layout (32 bytes)
 

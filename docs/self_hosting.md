@@ -85,9 +85,14 @@ diff rex2 rex3                        # should be identical
 The ELF binary is fully static.  All runtime support is inlined or linked at
 a fixed offset (same strategy as the NASM compiler).
 
-### Single-Pass Codegen
-The NASM compiler uses a single-pass walk: parse then immediately emit.
-The Rex-hosted compiler will mirror this design to keep it simple.
+### Multi-Pass Codegen
+The compiler uses 6 ordered passes: Lexer → Symbol Collection → Type Checking
+& IR Emission → IR Optimisation (5 sub-passes) → x86-64 Emission → ELF64
+Writer. The Rex-hosted compiler must implement all 6 passes in the same order.
+Pass 2 (Symbol Collection) is the critical difference from a single-pass design
+— it gives pass 3 full knowledge of every protocol and global variable before
+any type-checking or IR emission begins, eliminating forward-reference stubs
+and enabling mutual recursion.
 
 ### Fixed Symbol-Table Layout
 Use a flat array of 64-byte VAR_ENTRY records (same as NASM compiler) so the

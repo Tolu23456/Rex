@@ -9,7 +9,7 @@
 | Compilation target   | Direct ELF64 binary  | Machine code (gcc)  | Machine code (g++)   | Machine code (LLVM) | CPython bytecode    |
 | Linker required      | Build: `ld` (NASM obj files) / Output: **No** | Yes | Yes | Yes | N/A |
 | Runtime dependencies | **None**             | libc (glibc)        | libc + libstdc++     | libc or musl        | CPython interpreter |
-| Optimiser passes     | None (single-pass)   | GCC -O0..3          | G++ -O0..3           | LLVM -O0..3         | N/A                 |
+| Optimiser passes     | 5 IR passes (multi-pass) | GCC -O0..3      | G++ -O0..3           | LLVM -O0..3         | N/A                 |
 | Binary size (min)    | **~500 bytes**       | ~15 KB (dyn.)       | ~15 KB (dyn.)        | ~8 KB (stripped)    | N/A                 |
 | Process startup      | **~0.05 ms**         | ~10 ms              | ~14 ms               | ~0.5 ms             | ~50–100 ms          |
 
@@ -64,7 +64,7 @@ Full methodology in `benchmark/README.md`.
 | C++       | **340**   | G++ -O2                                |
 | C         | 362       | GCC -O2                                |
 | Rust      | ~340      | rustc -O (LLVM)                        |
-| Rex       | ~850      | Single-pass, no loop optimiser         |
+| Rex       | ~850      | Multi-pass; loop optimiser not yet implemented |
 
 Rex is ~2.4× slower on tight integer loops due to the absence of a backend optimiser.
 GCC applies loop-induction-variable elimination and register renaming that Rex skips.

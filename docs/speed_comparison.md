@@ -42,7 +42,7 @@ System:  x86-64 Linux, 3.6 GHz, NVMe SSD
 
 | Compiler | Median real time | Notes |
 |---|---|---|
-| **Rex rexc** | **0.4 ms** | Single pass, no linker invocation |
+| **Rex rexc** | **0.4 ms** | Multi-pass (6 passes), no linker invocation |
 | GCC `-O0` | 94 ms | Preprocessing + parsing + codegen + ld |
 | GCC `-O2` | 220 ms | Full optimiser pipeline |
 | G++ | 340 ms | Includes template instantiation |
@@ -150,7 +150,7 @@ These map directly to single x86-64 instructions with no abstraction overhead.
 | Property | Rex | Notes |
 |---|---|---|
 | **Compiler written in** | NASM x86-64 ASM | Zero abstraction overhead in the toolchain itself |
-| **Compilation model** | Single-pass, no IR | No parse tree, no SSA, no register allocation passes |
+| **Compilation model** | Multi-pass (6 passes) with IR | Symbol collection, type check, IR opt, x86-64 emit, ELF write |
 | **External dependencies** | `nasm` only (build time) | No LLVM, no GCC, no libc headers |
 | **Output format** | Raw ELF64 (hand-crafted) | Static 120-byte header (64 ELF + 56 PH) |
 | **Target ABI** | Linux x86-64 SysV | Direct kernel interface via `syscall` instruction |
@@ -162,7 +162,7 @@ These map directly to single x86-64 instructions with no abstraction overhead.
 
 | Limitation | Impact | Planned fix |
 |---|---|---|
-| No optimiser pass | Generated code unoptimised (~C `-O0`) | Optional peephole pass (see `docs/rex_ir.md`) |
+| IR optimiser (5 sub-passes) | Covers folding, dead stores, coalescing, reg alloc, peephole | Whole-program passes enabled by multi-pass design |
 | Variable table is flat linear scan | O(n) lookup, hard ceiling at 128 vars | Open-addressing hash map (Stage 9) |
 | Single-file compilation only | No module system | Multi-file support (Stage 7) |
 | Recursive protocols use global var slots | Recursive calls corrupt caller's params | Per-call stack frames (Stage 5 — open issue #18) |
