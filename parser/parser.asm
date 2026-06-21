@@ -312,36 +312,8 @@ var_find:
     dec rcx
     jmp .l
 .nf:
-    ; DEBUG: print "DBG nf vc=N\n" to stderr
-    push rax
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_nf_msg]
-    mov rdx, 10
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    mov rcx, [var_count]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_nl]
-    mov rdx, 1
-    syscall
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rax
+    ; Variable not found — return -1 to caller.
+    ; (All debug syscall output has been removed.)
     mov rax, -1
 .done:
     pop rdi
@@ -662,15 +634,14 @@ parse_factor:
     jmp .done
 .prt_sco:
     ; Sibling-Call Optimization (SCO): call to another protocol in tail position
-    ; Emit leave to clean up current frame, then jump to callee's start
+    ; Emit leave to clean up current frame, then jump to callee's body start.
+    ;
+    ; BUG FIX: proto_find returns [proto_entry+32] which is the callee's body out_idx
+    ; (same value type that tco_body_entry holds for self-TCO).  The old code mistakenly
+    ; treated r12 as a sequential proto table index and multiplied by PROTO_ENTRY_SIZE,
+    ; producing a garbage address.  r12 already IS the out_idx we need.
     call codegen_emit_leave
-    mov rdi, r12                ; r12 is the proto_idx from proto_find
-    ; We need the actual out_idx of the callee.
-    ; r12 is the index in proto_table.
-    mov rax, r12
-    imul rax, PROTO_ENTRY_SIZE
-    lea rdx, [proto_table]
-    mov rdi, [rdx + rax + 32]   ; out_idx is at offset 32 (after 32-byte name)
+    mov rdi, r12                ; r12 = body out_idx returned by proto_find ([proto_entry+32])
     call codegen_emit_jmp_prot
     mov byte [tco_was_emitted], 1
     jmp .done
@@ -733,7 +704,7 @@ parse_factor:
 .prt_skip:
     ; Forward reference: proto not defined yet — emit placeholder call and register for patching
     mov r13, [fwd_ref_count]
-    cmp r13, 16
+    cmp r13, 128            ; fwd_ref_patches is resq 128; fwd_ref_names is resb 4096 (128*32)
     jge .prt_fwd_overflow
     ; Reserve this slot immediately so nested forward refs use later slots
     inc qword [fwd_ref_count]

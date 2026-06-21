@@ -171,10 +171,12 @@ static int cmd_build(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Rename "output" to the correct output name */
+    /* Move "output" to the correct output name.
+     * BUG FIX: use move_file() instead of rename() so cross-device moves (EXDEV)
+     * work correctly — e.g. when the build dir and /tmp are on different filesystems. */
     if (strcmp(out_name, "output") != 0) {
-        if (rename("output", out_name) != 0)
-            die("rename output → %s: %s", out_name, strerror(errno));
+        if (move_file("output", out_name) != 0)
+            die("cannot move output to %s: %s", out_name, strerror(errno));
     }
 
     /* Make executable */
@@ -288,7 +290,9 @@ static int cmd_check(int argc, char *argv[]) {
     unlink("output");
 
     if (json_mode) {
-        /* Emit JSON diagnostics */
+        /* Emit JSON diagnostics.
+         * BUG FIX: raw error strings embedded directly into JSON break parsers when
+         * the message contains '"', '\', or control characters.  Escape them properly. */
         if (exit_code != 0 && errlen > 0) {
             printf("[");
             int first = 1;
@@ -298,10 +302,22 @@ static int cmd_check(int argc, char *argv[]) {
                 if (nl) *nl = '\0';
                 if (*line) {
                     if (!first) printf(",");
-                    /* Escape the message for JSON */
                     printf("{\"range\":{\"start\":{\"line\":0,\"character\":0},"
                            "\"end\":{\"line\":0,\"character\":80}},"
-                           "\"severity\":1,\"source\":\"rex\",\"message\":\"%s\"}", line);
+                           "\"severity\":1,\"source\":\"rex\",\"message\":\"");
+                    /* JSON-string escape: \, ", and control characters */
+                    for (const char *p = line; *p; p++) {
+                        unsigned char ch = (unsigned char)*p;
+                        if (ch == '"')       printf("\\\"");
+                        else if (ch == '\\') printf("\\\\");
+                        else if (ch == '\b') printf("\\b");
+                        else if (ch == '\f') printf("\\f");
+                        else if (ch == '\r') printf("\\r");
+                        else if (ch == '\t') printf("\\t");
+                        else if (ch < 0x20)  printf("\\u%04x", ch);
+                        else                 putchar(ch);
+                    }
+                    printf("\"}");
                     first = 0;
                 }
                 if (nl) { line = nl + 1; } else break;
@@ -425,8 +441,29 @@ static char *format_rex(const char *src, int src_len) {
             }
 
             if (!in_string) {
-                /* Binary operators: exactly 1 space each side (a + b) */
-                if ((*c == '+' || *c == '-' || *c == '*' || *c == '/' || *c == '%' || *c == '=') && 
+                /* Binary operators: exactly 1 space each side (a + b).
+                 * BUG FIX: skip spacing logic when the character is part of a
+                 * two-character operator (++, --, ->, ==, !=, <=, >=) to avoid
+                 * splitting them into "= =", "+ +", "- >", etc. */
+                int is_multichar_op = 0;
+                if (*c == '+' && c + 1 < content_end && c[1] == '+') is_multichar_op = 1;
+                if (*c == '-' && c + 1 < content_end && c[1] == '-') is_multichar_op = 1;
+                if (*c == '-' && c + 1 < content_end && c[1] == '>') is_multichar_op = 1;
+                if (*c == '=' && c + 1 < content_end && c[1] == '=') is_multichar_op = 1;
+                if (*c == '!' && c + 1 < content_end && c[1] == '=') is_multichar_op = 1;
+                if (*c == '<' && c + 1 < content_end && c[1] == '=') is_multichar_op = 1;
+                if (*c == '>' && c + 1 < content_end && c[1] == '=') is_multichar_op = 1;
+                /* Also skip the second character of a two-char operator already emitted */
+                if (c > content) {
+                    if (c[-1] == '+' && *c == '+') is_multichar_op = 1;
+                    if (c[-1] == '-' && (*c == '-' || *c == '>')) is_multichar_op = 1;
+                    if (c[-1] == '=' && *c == '=') is_multichar_op = 1;
+                    if (c[-1] == '!' && *c == '=') is_multichar_op = 1;
+                    if (c[-1] == '<' && *c == '=') is_multichar_op = 1;
+                    if (c[-1] == '>' && *c == '=') is_multichar_op = 1;
+                }
+                if (!is_multichar_op &&
+                    (*c == '+' || *c == '-' || *c == '*' || *c == '/' || *c == '%' || *c == '=') && 
                     (c > content && isalnum((unsigned char)c[-1])) && 
                     (c + 1 < content_end && isalnum((unsigned char)c[1]))) {
                     if (out[olen-1] != ' ') out[olen++] = ' ';

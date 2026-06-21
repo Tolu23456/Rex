@@ -316,13 +316,20 @@ emit_q:
     pop rbx
     ret
 emit_blob:
+    ; rsi=src, rcx=byte_count — copy blob to out_buffer with overflow guard.
+    ; BUG FIX: emit_b/d/q all guard against out_buffer overflow; emit_blob must too.
+    ; Use the same codegen_buf_overflow_fatal path that emit_b/d/q use (BUG-05).
     push rdi
     push rsi
     push rcx
     push rdx
     mov rdx, [out_idx]
+    mov rdi, rdx
+    add rdi, rcx                    ; out_idx + byte_count
+    cmp rdi, 524288                 ; guard: must not exceed 512 KB buffer
+    jg codegen_buf_overflow_fatal   ; tail call — does not return
     lea rdi, [out_buffer]
-    add rdi, rdx
+    add rdi, rdx                    ; rdi = &out_buffer[out_idx]
     cld
     rep movsb
     pop rdx
@@ -641,10 +648,13 @@ codegen_output_rax:
 ; ── assign / bool ─────────────────────────────────────────────────────────────
 codegen_emit_assign_var:
     ; rdi=var_idx rsi=value: emit mov rax,imm; mov [var_addr],rax
-    ; PERF-07: Use immediate store if value fits in 32 bits.
+    ; PERF-07: Use immediate store if value fits in signed 32 bits (sign-extended imm32).
+    ; BUG FIX: use signed jg/jl comparisons so negative 64-bit values that fit in
+    ; imm32 (e.g. -1 = 0xFFFFFFFFFFFFFFFF) are correctly emitted as 9-byte imm32 stores
+    ; rather than being mis-routed to the 18-byte imm64 path by unsigned `ja`.
     mov rax, rsi
     cmp rax, 0x7FFFFFFF
-    ja .long_val
+    jg .long_val
     cmp rax, -0x80000000
     jl .long_val
 

@@ -42,15 +42,34 @@
 #define PROTO_SIG_LEN    256
 #define PROTO_DOC_LEN    512
 
-/* Rex keyword list */
+/* Rex keyword list — keep sorted for readability; completeness checked against
+ * lexer/lexer.asm classify table and include/rex_defs.inc TOK_* constants.
+ * BUG FIX: many V5.0 keywords were missing from the original list. */
 static const char *REX_KEYWORDS[] = {
-    "int","float","bool","str","char","byte","seq","dict","set","tup",
-    "const","volatile","if","elif","else","for","while","each","repeat",
-    "stop","skip","pass","prot","return","when","is","use","mm","gc",
-    "arena","pool","true","false","maybe","and","or","not","in","as",
-    "output","err","input","push","pop","len","cap","typeof","abs","swap",
-    "assert","unreachable","import","from","blast","pipe",
-    "#memo","#hot","#inline","#unsafe",
+    /* types */
+    "int","float","bool","str","char","byte","seq","dict","set","tup","arr",
+    /* storage / memory */
+    "const","volatile","own","move","align","mm","gc","arena","pool",
+    /* control flow */
+    "if","elif","else","for","while","each","repeat","when","match",
+    "stop","skip","pass","return","try","except","finally","ctx",
+    /* declarations */
+    "prot","fn","use","import","from","as","is","in",
+    /* literals / values */
+    "true","false","maybe",
+    /* logic */
+    "and","or","not",
+    /* I/O and built-ins */
+    "output","show","warn","debug","write","flush",
+    "err","input","push","pop",
+    /* operators / functions */
+    "len","cap","typeof","abs","swap","fmt","rand","flip","clock","hash",
+    /* error / assertions */
+    "assert","unreachable","blast","pipe",
+    /* overflow / carry arithmetic */
+    "carry","overflow",
+    /* attributes */
+    "#memo","#hot","#inline","#unsafe","#cold","#pure","#total",
     NULL
 };
 

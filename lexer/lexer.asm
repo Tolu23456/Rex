@@ -104,50 +104,8 @@ lexer_next:
     mov [lex_line_start], rcx
     jmp .r
 .ie:
-    ; DEBUG: print "IE id=N pd=N\n"
-    push rax
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [ldbg_ie_msg]
-    mov rdx, 6
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    mov rcx, [indent_depth]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [ldbg_sep]
-    mov rdx, 4
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    mov rcx, [pending_dedents]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [ldbg_nl]
-    mov rdx, 1
-    syscall
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rax
+    ; Indent tracking hit EOF — clear at_line_start flag and resume normal lexing.
+    ; (All debug syscall output has been removed.)
     mov byte [at_line_start], 0
     mov [lex_pos], rcx
     jmp .r
