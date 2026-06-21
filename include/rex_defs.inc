@@ -319,6 +319,25 @@ RT_DICT_GET_SIZE equ 512    ; rt_dict_get sub-blob size (offset 512 within blob)
 RT_DICT_SET_SIZE equ 1024   ; rt_dict_set sub-blob size (offset 1024 within blob)
 RT_DICT_OFFSET   equ NEW_CODE_START   ; use as RT_DICT_OFFSET-125 in incbin
 
+; ── Self-hosting built-in tokens ─────────────────────────────────────────────
+TOK_STR_AT    equ 140  ; str_at(s,i)        — byte at index i (→ int)
+TOK_CHAR_KW   equ 141  ; char(n)            — int → 1-char str
+TOK_FILE_OPEN equ 142  ; file_open(p,f)     — open file → fd int
+TOK_FILE_READ equ 143  ; file_read_all(p)   — read entire file → str
+TOK_FILE_WRITE equ 144 ; file_write(fd,s)   — write str to fd
+TOK_FILE_CLOSE equ 145 ; file_close(fd)     — close fd
+TOK_EXIT_KW   equ 146  ; exit(code)         — exit with code
+TOK_ALLOC_KW  equ 147  ; alloc(n)           — allocate n bytes → int (addr)
+
+; ── Self-hosting runtime blobs ────────────────────────────────────────────────
+RT_FILE_READ_ALL_SIZE equ 512  ; rt_file_read_all: open+read+close → str
+RT_FILE_WRITE_SIZE    equ 256  ; rt_file_write: write str to fd
+RT_CHAR_BUF_SIZE      equ 128  ; rt_char_from_int: int → 1-char str via rt_alc
+
+; These blobs are appended after RT_DICT_OFFSET + RT_DICT_SIZE
+RT_FILE_READ_ALL_OFFSET equ RT_DICT_OFFSET + RT_DICT_SIZE
+RT_FILE_WRITE_OFFSET    equ RT_FILE_READ_ALL_OFFSET + RT_FILE_READ_ALL_SIZE
+
 ; ── GC/allocator context ─────────────────────────────────────────────────────
 GC_MODE_ADDR equ VAR_STORAGE_BASE - 8  ; runtime gc-mode word (written by use gc)
 

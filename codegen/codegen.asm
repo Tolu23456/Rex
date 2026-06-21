@@ -1,6 +1,7 @@
 default rel
 %include "include/rex_defs.inc"
 global codegen_write_headers, codegen_init, codegen_finish, out_buffer, out_idx
+global emit_b, emit_d
 global codegen_output_const, codegen_output_typed, codegen_patch_jump
 global codegen_save_chain_base, codegen_emit_jmp_end, codegen_patch_chain_end
 global codegen_begin_protos, codegen_end_protos
@@ -55,6 +56,12 @@ global codegen_emit_cap_rax
 global codegen_emit_clock_ms
 global codegen_set_for_step, for_step_val
 global codegen_emit_exit1
+; ── self-hosting built-ins ────────────────────────────────────────────────────
+global codegen_emit_str_at_rax
+global codegen_emit_file_open_inline, codegen_emit_file_read_all_call
+global codegen_emit_file_write_inline, codegen_emit_file_close_inline
+global codegen_emit_exit_inline, codegen_emit_alloc_inline
+global codegen_emit_char_from_rax
 global codegen_push_loop_else_flag, codegen_pop_loop_else_flag, codegen_peek_loop_else_flag
 global codegen_emit_each_start, codegen_emit_each_end
 ; O1: stack frames  O2: loop pin  O3: peephole  O4: TCO  O5: frame locals
@@ -78,6 +85,7 @@ extern elf_header, program_header
 extern proto_count, var_table, var_count
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
 extern rt_sip_blob, rt_alc_blob, rt_prq_blob, rt_dict_blob
+extern rt_file_read_all_blob, rt_file_write_blob
 section .bss
 out_buffer:       resb 524288    ; 512 KB — enables bounds-check removal in emit_b
 out_idx:          resq 1
@@ -210,6 +218,8 @@ actual_alc_va:       resq 1
 actual_prq_va:       resq 1
 actual_alc_mode_va:  resq 1  ; = actual_alc_va + RT_ALC_SIZE - 8 (the allocator .mode var)
 actual_dict_va:      resq 1  ; VA of rt_dict blob (rt_dict_new at +0, rt_dict_get at +512, rt_dict_set at +1024)
+actual_file_read_all_va: resq 1  ; VA of rt_file_read_all blob (self-hosting: open+read+close → str)
+actual_file_write_va:    resq 1  ; VA of rt_file_write blob (self-hosting: write str to fd)
 cur_proto_is_unsafe: resb 1
 overflow_err_cnt:    resq 1
 compiler_error_count: resq 1
@@ -368,10 +378,10 @@ codegen_init:
     push r13
     mov r12d, edi               ; save blob mask (low byte sufficient)
     mov qword [for_step_val], 1
-    ; Zero actual-VA table (10 qwords: pri..prq + alc_mode + dict)
+    ; Zero actual-VA table (12 qwords: pri..prq + alc_mode + dict + file_read_all + file_write)
     lea rdi, [actual_pri_va]
     xor eax, eax
-    mov ecx, 10
+    mov ecx, 12
     rep stosq
     ; ── Compute total size of needed blobs ───────────────────────────────────
     xor r13d, r13d
@@ -411,6 +421,10 @@ codegen_init:
     jz .ci_ndict
     add r13d, RT_DICT_SIZE
 .ci_ndict:
+    test r12d, 0x200
+    jz .ci_nfio
+    add r13d, RT_FILE_READ_ALL_SIZE + RT_FILE_WRITE_SIZE
+.ci_nfio:
     ; Emit JMP over blobs: E9 <total_needed_size>
     mov al, 0xE9
     call emit_b
@@ -500,6 +514,21 @@ codegen_init:
     mov rcx, RT_DICT_SIZE
     call emit_blob
 .ci_sdict:
+    test r12d, 0x200
+    jz .ci_sfio
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_file_read_all_va], rax
+    lea rsi, [rt_file_read_all_blob]
+    mov rcx, RT_FILE_READ_ALL_SIZE
+    call emit_blob
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_file_write_va], rax
+    lea rsi, [rt_file_write_blob]
+    mov rcx, RT_FILE_WRITE_SIZE
+    call emit_blob
+.ci_sfio:
     pop r13
     pop r12
     pop rbx
@@ -7657,3 +7686,255 @@ clock_ms_blob:
     db 0xB9, 0x40, 0x42, 0x0F, 0x00    ; mov ecx, 1000000
     db 0x48, 0xF7, 0xF9                 ; idiv rcx
     db 0x4C, 0x01, 0xC0                 ; add rax, r8
+
+; ══════════════════════════════════════════════════════════════════════════════
+; Self-hosting built-in emit functions
+; ══════════════════════════════════════════════════════════════════════════════
+
+; ── codegen_emit_str_at_rax ───────────────────────────────────────────────────
+; Pre: rbx = str_ptr, rax = byte_index
+; Emits: add rax, rbx (48 01 D8)   ; rax = address of byte
+;        movzx eax, byte [rax]  (0F B6 00)  ; rax = byte value (zero-extended)
+codegen_emit_str_at_rax:
+    mov al, 0x48
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0xD8
+    call emit_b
+    mov al, 0x0F
+    call emit_b
+    mov al, 0xB6
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ret
+
+; ── codegen_emit_file_open_inline ─────────────────────────────────────────────
+; Pre: rbx = path_ptr, rax = flags (O_RDONLY=0, O_WRONLY|O_CREAT|O_TRUNC=577)
+; Emits sys_open(rbx, rax, 0o644) → fd in rax
+; mov rdi, rbx   (48 89 DF)
+; mov rsi, rax   (48 89 C6)
+; mov edx, 0x1A4 (BA A4 01 00 00)
+; mov eax, 2     (B8 02 00 00 00)
+; syscall        (0F 05)
+codegen_emit_file_open_inline:
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xDF
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    mov al, 0xBA
+    call emit_b
+    mov eax, 0x1A4
+    call emit_d
+    mov al, 0xB8
+    call emit_b
+    mov eax, 2
+    call emit_d
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    ret
+
+; ── codegen_emit_file_read_all_call ───────────────────────────────────────────
+; Pre: rax = path_ptr
+; Emits: mov rdi, rax (48 89 C7)
+;        call rt_file_read_all (E8 rel32)
+; Post: rax = newly allocated str holding entire file contents
+codegen_emit_file_read_all_call:
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xE8
+    call emit_b
+    mov rax, [actual_file_read_all_va]
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ret
+
+; ── codegen_emit_file_write_inline ────────────────────────────────────────────
+; Pre: rbx = fd, rax = str_ptr
+; Emits inline strlen + sys_write(fd, str, len)
+; push rax (50)                     ; save str_ptr
+; push rbx (53)                     ; save fd
+; mov rdi, rax (48 89 C7)           ; rdi = str_ptr for scasb
+; xor eax, eax (31 C0)              ; al = 0 (null sentinel)
+; or rcx, -1 (48 83 C9 FF)          ; rcx = -1
+; repne scasb (F2 AE)               ; scan for null
+; not rcx (48 F7 D1)                ; ~(-1-(len+1)) = len+1
+; dec rcx (48 FF C9)                ; len
+; mov rdx, rcx (48 89 CA)           ; rdx = len
+; pop rdi (5F)                      ; rdi = fd
+; pop rsi (5E)                      ; rsi = str_ptr
+; mov eax, 1 (B8 01 00 00 00)       ; sys_write
+; syscall (0F 05)
+codegen_emit_file_write_inline:
+    mov al, 0x50
+    call emit_b
+    mov al, 0x53
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0x31
+    call emit_b
+    mov al, 0xC0
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x83
+    call emit_b
+    mov al, 0xC9
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0xF2
+    call emit_b
+    mov al, 0xAE
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0xF7
+    call emit_b
+    mov al, 0xD1
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0xFF
+    call emit_b
+    mov al, 0xC9
+    call emit_b
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xCA
+    call emit_b
+    mov al, 0x5F
+    call emit_b
+    mov al, 0x5E
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov eax, 1
+    call emit_d
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    ret
+
+; ── codegen_emit_file_close_inline ────────────────────────────────────────────
+; Pre: rax = fd
+; Emits: mov rdi, rax (48 89 C7); mov eax, 3 (B8 03 00 00 00); syscall (0F 05)
+codegen_emit_file_close_inline:
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov eax, 3
+    call emit_d
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    ret
+
+; ── codegen_emit_exit_inline ──────────────────────────────────────────────────
+; Pre: rax = exit code
+; Emits: mov rdi, rax (48 89 C7); mov eax, 60 (B8 3C 00 00 00); syscall (0F 05)
+codegen_emit_exit_inline:
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xB8
+    call emit_b
+    mov eax, 60
+    call emit_d
+    mov al, 0x0F
+    call emit_b
+    mov al, 0x05
+    call emit_b
+    ret
+
+; ── codegen_emit_alloc_inline ─────────────────────────────────────────────────
+; Pre: rax = byte count
+; Emits: mov rdi, rax (48 89 C7); call rt_alc (E8 rel32)
+; Post: rax = allocated buffer ptr
+codegen_emit_alloc_inline:
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC7
+    call emit_b
+    mov al, 0xE8
+    call emit_b
+    mov rax, [actual_alc_va]
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ret
+
+; ── codegen_emit_char_from_rax ────────────────────────────────────────────────
+; Pre: rax = char code (low byte = the character)
+; Emits: push rax (50); mov edi, 2 (BF 02 00 00 00); call rt_alc (E8 rel32);
+;        pop rbx (5B); mov byte [rax], bl (88 18); mov byte [rax+1], 0 (C6 40 01 00)
+; Post: rax = ptr to freshly allocated 2-byte str (char + null)
+codegen_emit_char_from_rax:
+    mov al, 0x50
+    call emit_b
+    mov al, 0xBF
+    call emit_b
+    mov eax, 2
+    call emit_d
+    mov al, 0xE8
+    call emit_b
+    mov rax, [actual_alc_va]
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    mov al, 0x5B
+    call emit_b
+    mov al, 0x88
+    call emit_b
+    mov al, 0x18
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    mov al, 0x40
+    call emit_b
+    mov al, 0x01
+    call emit_b
+    mov al, 0x00
+    call emit_b
+    ret

@@ -201,8 +201,12 @@ prescan_blobs:
     or eax, 0x80
 .pf2:; "use " → ALC : u(75) s(73) e(65) space(20) → 0x20657375
     cmp r8d, 0x20657375
-    jne .pb
+    jne .p_file
     or eax, 0x40
+.p_file:; "file" → FILE_IO (bit 9 = 0x200) + ALC (0x40, file_read_all uses rt_alc)
+    cmp r8d, 0x656C6966
+    jne .pb
+    or eax, 0x240
 .pb:; 3-byte patterns (safe since >= 4 bytes remain)
     ; "str" → PRS : low 3 bytes = s(73) t(74) r(72) → 0x00727473
     mov ecx, r8d

@@ -23,6 +23,12 @@ extern codegen_emit_mov_rax_var, codegen_emit_store_rax_to_var
 extern push_style_frame, codegen_emit_memo_check, codegen_emit_memo_store
 extern codegen_emit_rdrand_rax, codegen_emit_neg_rax, codegen_emit_not_rax
 extern codegen_emit_bitwise_not_rax
+; self-hosting built-in emit functions
+extern codegen_emit_str_at_rax
+extern codegen_emit_file_open_inline, codegen_emit_file_read_all_call
+extern codegen_emit_file_write_inline, codegen_emit_file_close_inline
+extern codegen_emit_exit_inline, codegen_emit_alloc_inline
+extern codegen_emit_char_from_rax
 extern codegen_emit_add_rax_rbx, codegen_emit_sub_rax_rbx
 extern codegen_emit_imul_rax_rbx, codegen_emit_idiv_rbx_by_rax, codegen_emit_imod_rbx_by_rax
 extern codegen_emit_cmp_rbx_rax_setcc, codegen_emit_test_rax_jz
@@ -422,6 +428,22 @@ parse_factor:
     je .capx
     cmp al, TOK_CLOCK
     je .clockx
+    cmp al, TOK_STR_AT
+    je .str_at_x
+    cmp al, TOK_CHAR_KW
+    je .char_kw_x
+    cmp al, TOK_FILE_OPEN
+    je .file_open_x
+    cmp al, TOK_FILE_READ
+    je .file_read_x
+    cmp al, TOK_FILE_WRITE
+    je .file_write_x
+    cmp al, TOK_FILE_CLOSE
+    je .file_close_x
+    cmp al, TOK_EXIT_KW
+    je .exit_kw_x
+    cmp al, TOK_ALLOC_KW
+    je .alloc_kw_x
     ; default: zero + advance past unknown token (#35)
     call lexer_next
     mov rdi, 0
@@ -539,8 +561,10 @@ parse_factor:
     call codegen_emit_pop_rbx          ; no ']': cleanup
     jmp .done
 .idn_str_idx:
-    ; TODO: full rt_str_idx call — for now just pop/discard (str[i] stub)
+    ; str[i]: rax=idx, pop rbx=str_ptr → emit str_at → byte value as int
     call codegen_emit_pop_rbx
+    call codegen_emit_str_at_rax
+    mov byte [cur_type], TYPE_INT
     jmp .done
 .idn_seq_idx:
     call codegen_emit_pop_rbx          ; rbx = seq_ptr
@@ -960,6 +984,136 @@ parse_factor:
     call lexer_next                     ; consume ')'
 .clock_noparen:
     call codegen_emit_clock_ms
+    mov byte [cur_type], TYPE_INT
+    jmp .done
+.str_at_x:
+    ; str_at(str_expr, idx_expr) → int  byte value at str[idx]
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_save_rax
+    cmp byte [tok_type], TOK_COMMA
+    jne .str_at_bail
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_restore_rbx
+    call codegen_emit_str_at_rax
+.str_at_bail:
+    mov byte [cur_type], TYPE_INT
+    cmp byte [tok_type], TOK_RPAREN
+    jne .done
+    call lexer_next
+    jmp .done
+.char_kw_x:
+    ; char(int_expr) → str  1-char string via rt_alc
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    cmp byte [tok_type], TOK_RPAREN
+    jne .char_kw_bail
+    call lexer_next
+.char_kw_bail:
+    call codegen_emit_char_from_rax
+    mov byte [cur_type], TYPE_STR
+    jmp .done
+.file_open_x:
+    ; file_open(path_str, flags_int) → fd int
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_save_rax
+    cmp byte [tok_type], TOK_COMMA
+    jne .file_open_bail
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_restore_rbx
+    call codegen_emit_file_open_inline
+.file_open_bail:
+    mov byte [cur_type], TYPE_INT
+    cmp byte [tok_type], TOK_RPAREN
+    jne .done
+    call lexer_next
+    jmp .done
+.file_read_x:
+    ; file_read_all(path_str) → str
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    cmp byte [tok_type], TOK_RPAREN
+    jne .file_read_bail
+    call lexer_next
+.file_read_bail:
+    call codegen_emit_file_read_all_call
+    mov byte [cur_type], TYPE_STR
+    jmp .done
+.file_write_x:
+    ; file_write(fd_int, str_expr)
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_save_rax
+    cmp byte [tok_type], TOK_COMMA
+    jne .file_write_bail
+    call lexer_next
+    call parse_expr
+    call codegen_emit_expr_restore_rbx
+    call codegen_emit_file_write_inline
+.file_write_bail:
+    mov byte [cur_type], TYPE_INT
+    cmp byte [tok_type], TOK_RPAREN
+    jne .done
+    call lexer_next
+    jmp .done
+.file_close_x:
+    ; file_close(fd_int)
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    cmp byte [tok_type], TOK_RPAREN
+    jne .file_close_bail
+    call lexer_next
+.file_close_bail:
+    call codegen_emit_file_close_inline
+    mov byte [cur_type], TYPE_INT
+    jmp .done
+.exit_kw_x:
+    ; exit(int_expr)  → no return
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    cmp byte [tok_type], TOK_RPAREN
+    jne .exit_kw_bail
+    call lexer_next
+.exit_kw_bail:
+    call codegen_emit_exit_inline
+    mov byte [cur_type], TYPE_INT
+    jmp .done
+.alloc_kw_x:
+    ; alloc(size_int) → ptr as int
+    call lexer_next
+    cmp byte [tok_type], TOK_LPAREN
+    jne .done
+    call lexer_next
+    call parse_expr
+    cmp byte [tok_type], TOK_RPAREN
+    jne .alloc_kw_bail
+    call lexer_next
+.alloc_kw_bail:
+    call codegen_emit_alloc_inline
     mov byte [cur_type], TYPE_INT
     jmp .done
 .done:

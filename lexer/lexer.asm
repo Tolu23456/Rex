@@ -1359,10 +1359,123 @@ lexer_classify:
 .nkw_fmt:
     ; "fmt": f,m,t → 0x00746D66, byte[3]=0
     cmp eax, 0x00746D66
-    jne .kid
+    jne .nkw_str_at
     cmp byte [tok_ident+3], 0
-    jne .kid
+    jne .nkw_str_at
     mov byte [tok_type], TOK_FMT
+    ret
+.nkw_str_at:
+    ; "str_at": s,t,r,_ = LE 0x5F727473; [4]='a',[5]='t',[6]=0
+    cmp eax, 0x5F727473
+    jne .nkw_char_kw
+    cmp byte [tok_ident+4], 'a'
+    jne .nkw_char_kw
+    cmp byte [tok_ident+5], 't'
+    jne .nkw_char_kw
+    cmp byte [tok_ident+6], 0
+    jne .nkw_char_kw
+    mov byte [tok_type], TOK_STR_AT
+    ret
+.nkw_char_kw:
+    ; "char": c,h,a,r = LE 0x72616863; [4]=0
+    cmp eax, 0x72616863
+    jne .nkw_file
+    cmp byte [tok_ident+4], 0
+    jne .nkw_file
+    mov byte [tok_type], TOK_CHAR_KW
+    ret
+.nkw_file:
+    ; "file_*": f,i,l,e = LE 0x656C6966; [4]='_', dispatch on [5]
+    cmp eax, 0x656C6966
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+4], '_'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+5], 'o'
+    je .nkw_file_open
+    cmp byte [tok_ident+5], 'r'
+    je .nkw_file_read
+    cmp byte [tok_ident+5], 'w'
+    je .nkw_file_write
+    cmp byte [tok_ident+5], 'c'
+    je .nkw_file_close
+    jmp .nkw_exit_kw
+.nkw_file_open:
+    ; "file_open": [5]='o',[6]='p',[7]='e',[8]='n',[9]=0
+    cmp byte [tok_ident+6], 'p'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+7], 'e'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+8], 'n'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+9], 0
+    jne .nkw_exit_kw
+    mov byte [tok_type], TOK_FILE_OPEN
+    ret
+.nkw_file_read:
+    ; "file_read_all": ...[6]='e',[7]='a',[8]='d',[9]='_',[10]='a',[11]='l',[12]='l',[13]=0
+    cmp byte [tok_ident+6], 'e'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+7], 'a'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+8], 'd'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+9], '_'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+10], 'a'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+11], 'l'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+12], 'l'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+13], 0
+    jne .nkw_exit_kw
+    mov byte [tok_type], TOK_FILE_READ
+    ret
+.nkw_file_write:
+    ; "file_write": [5]='w',[6]='r',[7]='i',[8]='t',[9]='e',[10]=0
+    cmp byte [tok_ident+6], 'r'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+7], 'i'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+8], 't'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+9], 'e'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+10], 0
+    jne .nkw_exit_kw
+    mov byte [tok_type], TOK_FILE_WRITE
+    ret
+.nkw_file_close:
+    ; "file_close": [5]='c',[6]='l',[7]='o',[8]='s',[9]='e',[10]=0
+    cmp byte [tok_ident+6], 'l'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+7], 'o'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+8], 's'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+9], 'e'
+    jne .nkw_exit_kw
+    cmp byte [tok_ident+10], 0
+    jne .nkw_exit_kw
+    mov byte [tok_type], TOK_FILE_CLOSE
+    ret
+.nkw_exit_kw:
+    ; "exit": e,x,i,t = LE 0x74697865; [4]=0
+    cmp eax, 0x74697865
+    jne .nkw_alloc_kw
+    cmp byte [tok_ident+4], 0
+    jne .nkw_alloc_kw
+    mov byte [tok_type], TOK_EXIT_KW
+    ret
+.nkw_alloc_kw:
+    ; "alloc": a,l,l,o = LE 0x6F6C6C61; [4]='c',[5]=0
+    cmp eax, 0x6F6C6C61
+    jne .kid
+    cmp byte [tok_ident+4], 'c'
+    jne .kid
+    cmp byte [tok_ident+5], 0
+    jne .kid
+    mov byte [tok_type], TOK_ALLOC_KW
     ret
 .kid:
     mov byte [tok_type], TOK_IDENT

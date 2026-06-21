@@ -51,6 +51,8 @@ global rt_heap_alloc_blob
 global rt_heap_free_blob
 global rt_static_alloc_blob
 global rt_dict_blob
+global rt_file_read_all_blob
+global rt_file_write_blob
 
 section .data
 rt_pri_blob:
@@ -155,3 +157,7 @@ rt_static_alloc_blob:
     incbin "runtime/runtime.bin", RT_STATIC_ALLOC_OFFSET-125, RT_STATIC_ALLOC_SIZE
 rt_dict_blob:
     incbin "runtime/runtime.bin", RT_DICT_OFFSET-125, RT_DICT_SIZE
+rt_file_read_all_blob:
+    incbin "runtime/runtime.bin", RT_FILE_READ_ALL_OFFSET-125, RT_FILE_READ_ALL_SIZE
+rt_file_write_blob:
+    incbin "runtime/runtime.bin", RT_FILE_WRITE_OFFSET-125, RT_FILE_WRITE_SIZE

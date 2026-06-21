@@ -15,6 +15,8 @@
 %define RT_DICT_GET_SIZE 512
 %define RT_DICT_SET_SIZE 1024
 %define RT_DICT_SIZE 2048
+%define RT_FILE_READ_ALL_SIZE 512
+%define RT_FILE_WRITE_SIZE 256
 
 ; New blobs for T001
 %define RT_STR_CAT_SIZE 512
@@ -1804,3 +1806,103 @@ rt_dict_set:
     pop rbx
     ret
     times RT_DICT_SET_SIZE - ($ - rt_dict_set) db 0x90
+
+; ── rt_file_read_all (512B) ───────────────────────────────────────────────────
+; rdi = null-terminated path ptr
+; Returns: rax = mmap'd null-terminated str (caller must munmap when done), or 0 on fail
+; Self-contained: uses mmap(MAP_ANONYMOUS) — no rt_alc dependency.
+rt_file_read_all:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    ; open(path, O_RDONLY=0, 0)
+    mov eax, 2
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    syscall
+    test rax, rax
+    js .fra_fail
+    mov r13, rax          ; r13 = fd
+    ; lseek(fd, 0, SEEK_END=2) → file size
+    mov eax, 8
+    mov rdi, r13
+    xor esi, esi
+    mov edx, 2
+    syscall
+    test rax, rax
+    js .fra_closefail
+    mov r14, rax          ; r14 = file size
+    ; lseek(fd, 0, SEEK_SET=0)
+    mov eax, 8
+    mov rdi, r13
+    xor esi, esi
+    xor edx, edx
+    syscall
+    ; mmap(NULL, size+1, PROT_READ|PROT_WRITE=3, MAP_PRIVATE|MAP_ANONYMOUS=0x22, -1, 0)
+    lea rsi, [r14+1]
+    xor edi, edi
+    mov edx, 3
+    mov r10d, 0x22
+    mov r8d, -1
+    xor r9d, r9d
+    mov eax, 9
+    syscall
+    cmp rax, -1
+    je .fra_closefail
+    mov r15, rax          ; r15 = buffer ptr
+    ; read(fd, buf, size)
+    xor eax, eax
+    mov rdi, r13
+    mov rsi, r15
+    mov rdx, r14
+    syscall
+    ; null-terminate
+    mov byte [r15+r14], 0
+    ; close(fd)
+    mov eax, 3
+    mov rdi, r13
+    syscall
+    mov rax, r15
+    jmp .fra_done
+.fra_closefail:
+    mov eax, 3
+    mov rdi, r13
+    syscall
+.fra_fail:
+    xor eax, eax
+.fra_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+    times RT_FILE_READ_ALL_SIZE - ($ - rt_file_read_all) db 0x90
+
+; ── rt_file_write (256B) ─────────────────────────────────────────────────────
+; rdi = fd, rsi = null-terminated str
+; Returns: rax = bytes written (or negative errno on error)
+rt_file_write:
+    push r12
+    push r13
+    mov r12, rdi
+    mov r13, rsi
+    ; strlen(rsi) via repne scasb
+    mov rdi, r13
+    xor eax, eax
+    or rcx, -1
+    repne scasb
+    not rcx
+    dec rcx               ; rcx = length
+    ; write(fd, str, len)
+    mov eax, 1
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, rcx
+    syscall
+    pop r13
+    pop r12
+    ret
+    times RT_FILE_WRITE_SIZE - ($ - rt_file_write) db 0x90
