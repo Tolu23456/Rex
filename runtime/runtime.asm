@@ -50,6 +50,7 @@ global rt_seq_reverse_blob
 global rt_heap_alloc_blob
 global rt_heap_free_blob
 global rt_static_alloc_blob
+global rt_dict_blob
 
 section .data
 rt_pri_blob:
@@ -152,3 +153,5 @@ rt_heap_free_blob:
     incbin "runtime/runtime.bin", RT_HEAP_FREE_OFFSET-125, RT_HEAP_FREE_SIZE
 rt_static_alloc_blob:
     incbin "runtime/runtime.bin", RT_STATIC_ALLOC_OFFSET-125, RT_STATIC_ALLOC_SIZE
+rt_dict_blob:
+    incbin "runtime/runtime.bin", RT_DICT_OFFSET-125, RT_DICT_SIZE

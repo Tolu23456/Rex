@@ -312,6 +312,13 @@ RT_STATIC_ALLOC_OFFSET equ RT_HEAP_FREE_OFFSET  + RT_HEAP_FREE_SIZE
 ; New CODE_START after all new blobs are inserted
 NEW_CODE_START equ RT_STATIC_ALLOC_OFFSET + RT_STATIC_ALLOC_SIZE
 
+; ── Dict runtime blob ─────────────────────────────────────────────────────────
+RT_DICT_SIZE     equ 2048   ; total dict runtime blob (rt_dict_new + rt_dict_get + rt_dict_set)
+RT_DICT_NEW_SIZE equ 512    ; rt_dict_new sub-blob size (offset 0 within blob)
+RT_DICT_GET_SIZE equ 512    ; rt_dict_get sub-blob size (offset 512 within blob)
+RT_DICT_SET_SIZE equ 1024   ; rt_dict_set sub-blob size (offset 1024 within blob)
+RT_DICT_OFFSET   equ NEW_CODE_START   ; use as RT_DICT_OFFSET-125 in incbin
+
 ; ── GC/allocator context ─────────────────────────────────────────────────────
 GC_MODE_ADDR equ VAR_STORAGE_BASE - 8  ; runtime gc-mode word (written by use gc)
 

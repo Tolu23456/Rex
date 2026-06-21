@@ -10,6 +10,12 @@
 %define RT_ALC_SIZE  4096
 %define RT_PRQ_SIZE  1024
 
+; Dict runtime blob sizes
+%define RT_DICT_NEW_SIZE 512
+%define RT_DICT_GET_SIZE 512
+%define RT_DICT_SET_SIZE 1024
+%define RT_DICT_SIZE 2048
+
 ; New blobs for T001
 %define RT_STR_CAT_SIZE 512
 %define RT_STR_EQ_SIZE 256
@@ -1662,3 +1668,139 @@ rt_static_alloc:
     call rt_alc
     ret
     times RT_STATIC_ALLOC_SIZE - ($ - rt_static_alloc) db 0x90
+
+; ── rt_dict_new: allocate and initialise a dict (512B) ───────────────────────
+; No arguments → rax = dict_ptr
+; Header layout (24 bytes): [cap:8][count:8][slots_ptr:8]
+; Slot layout  (24 bytes):  [key:8][value:8][state:8]  (state 0=empty,1=occupied,2=deleted)
+; Allocates one mmap page (4096 bytes): header at [0], 64 slots at [24]
+rt_dict_new:
+    push rbx
+    mov eax, 9           ; sys_mmap
+    xor edi, edi         ; addr = NULL
+    mov esi, 4096        ; length = one page
+    mov edx, 3           ; PROT_READ | PROT_WRITE
+    mov r10d, 0x22       ; MAP_PRIVATE | MAP_ANONYMOUS
+    xor r8d, r8d
+    not r8               ; r8 = -1 (fd for anonymous mmap)
+    xor r9d, r9d         ; offset = 0
+    syscall              ; rax = mapped page ptr
+    mov rbx, rax
+    mov qword [rbx],    64   ; cap = 64
+    mov qword [rbx+8],   0   ; count = 0
+    lea rax, [rbx+24]
+    mov qword [rbx+16], rax  ; slots_ptr = &base[24]
+    ; zero 64 slots: 64 × 3 qwords = 192 qwords = 1536 bytes
+    mov rdi, rax
+    xor eax, eax
+    mov ecx, 192
+    rep stosq
+    mov rax, rbx             ; return dict ptr
+    pop rbx
+    ret
+    times RT_DICT_NEW_SIZE - ($ - rt_dict_new) db 0x90
+
+; ── rt_dict_get: look up key → rax = value (0 if not found) (512B) ───────────
+; rdi = dict_ptr, rsi = key
+rt_dict_get:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rdi           ; dict_ptr
+    mov r12, rsi           ; key
+    mov r13, [rbx]         ; cap
+    mov r14, [rbx+16]      ; slots_ptr
+    mov r15, r13
+    dec r15                ; mask = cap-1
+    mov rax, r12
+    and rax, r15           ; starting idx = key & mask
+    mov rdx, r13           ; probe counter = cap (max probes)
+.dg_probe:
+    test rdx, rdx
+    jz .dg_miss
+    mov rcx, rax
+    imul rcx, 24
+    add rcx, r14           ; rcx = &slot[idx]
+    cmp qword [rcx+16], 0
+    je .dg_miss            ; empty slot → not found
+    cmp qword [rcx+16], 1
+    jne .dg_skip           ; deleted slot → continue probing
+    cmp qword [rcx], r12   ; key match?
+    jne .dg_skip
+    mov rax, [rcx+8]       ; found → return value
+    jmp .dg_done
+.dg_skip:
+    inc rax
+    and rax, r15           ; idx = (idx+1) & mask
+    dec rdx
+    jmp .dg_probe
+.dg_miss:
+    xor eax, eax           ; not found → return 0
+.dg_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_DICT_GET_SIZE - ($ - rt_dict_get) db 0x90
+
+; ── rt_dict_set: insert or update key-value pair (1024B) ─────────────────────
+; rdi = dict_ptr, rsi = key, rdx = value
+; Silently does nothing if the dict is >= 3/4 full (cap=64 → max 48 entries).
+rt_dict_set:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rdi           ; dict_ptr
+    mov r12, rsi           ; key
+    mov r13, rdx           ; value
+    ; if count >= cap*3/4: silently skip (dict full)
+    mov rax, [rbx+8]       ; count
+    mov rcx, [rbx]         ; cap
+    lea rdx, [rcx+rcx*2]   ; rdx = cap*3
+    shr rdx, 2             ; rdx = cap*3/4
+    cmp rax, rdx
+    jge .ds_done
+    mov r14, [rbx+16]      ; slots_ptr
+    mov r15, [rbx]
+    dec r15                ; mask = cap-1
+    mov rax, r12
+    and rax, r15           ; starting idx = key & mask
+    mov rdx, [rbx]         ; probe counter = cap
+.ds_probe:
+    test rdx, rdx
+    jz .ds_done            ; all probes exhausted (shouldn't happen with count check)
+    mov rcx, rax
+    imul rcx, 24
+    add rcx, r14           ; rcx = &slot[idx]
+    cmp qword [rcx+16], 0
+    je .ds_insert          ; empty slot → insert here
+    cmp qword [rcx+16], 1
+    jne .ds_skip           ; deleted slot → keep probing
+    cmp qword [rcx], r12   ; occupied with same key?
+    jne .ds_skip
+    mov [rcx+8], r13       ; update value in place
+    jmp .ds_done
+.ds_skip:
+    inc rax
+    and rax, r15
+    dec rdx
+    jmp .ds_probe
+.ds_insert:
+    mov qword [rcx],    r12   ; key
+    mov [rcx+8],        r13   ; value
+    mov qword [rcx+16],   1   ; state = occupied
+    inc qword [rbx+8]         ; count++
+.ds_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+    times RT_DICT_SET_SIZE - ($ - rt_dict_set) db 0x90

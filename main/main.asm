@@ -2,6 +2,7 @@ default rel
 %include "include/rex_defs.inc"
 global _start
 extern lexer_init, lexer_next, parse_stmt, codegen_write_headers, codegen_init, codegen_finish
+extern proto_prescan
 extern codegen_finalize
 extern out_buffer, out_idx, out_name, tok_type
 section .bss
@@ -49,6 +50,13 @@ _start:
     call prescan_blobs          ; returns blob inclusion mask in rax
     mov rdi, rax
     call codegen_init
+    ; ── Pass 1: proto prescan — pre-register all proto signatures ─────────────
+    lea rdi, [src_buffer]
+    mov rsi, [src_len]
+    call lexer_init
+    call lexer_next
+    call proto_prescan       ; scans full source, pre-registers all proto names
+    ; ── Pass 2: full compilation ───────────────────────────────────────────────
     lea rdi, [src_buffer]
     mov rsi, [src_len]
     call lexer_init
@@ -171,10 +179,10 @@ prescan_blobs:
     cmp r8d, 0x68636165
     jne .p6
     or eax, 0x40
-.p6:; "dict" → ALC + PRQ
+.p6:; "dict" → ALC + PRQ + DICT blob (bit 8 = 0x100)
     cmp r8d, 0x74636964
     jne .p7
-    or eax, 0xC0
+    or eax, 0x1C0
 .p7:; "inpu" (input) → SIP
     cmp r8d, 0x75706E69
     jne .p8

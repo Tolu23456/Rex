@@ -1,6 +1,6 @@
 default rel
 %include "include/rex_defs.inc"
-global parse_stmt, parse_expr
+global parse_stmt, parse_expr, proto_prescan
 global var_table, var_count
 extern lexer_init, lexer_next, tok_type, tok_int, tok_ident
 extern codegen_output_const, codegen_output_typed
@@ -32,6 +32,7 @@ extern codegen_emit_mulsd_rax_rbx, codegen_emit_divsd_rax_rbx
 extern codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax, codegen_emit_cvtsi2sd_rbx
 extern codegen_emit_bitwise_and_rax_rbx, codegen_emit_bitwise_or_rax_rbx
 extern codegen_emit_bitwise_xor_rax_rbx
+extern codegen_emit_dict_new, codegen_emit_dict_get, codegen_emit_dict_set
 extern codegen_emit_and_bool_rax_rbx, codegen_emit_or_bool_rax_rbx
 extern codegen_emit_lnot_int_rax
 extern out_buffer
@@ -546,7 +547,9 @@ parse_factor:
     call codegen_emit_seq_elem_load    ; emit: mov rax,[rbx+rax*8+16]
     jmp .done
 .idn_dict_get:
-    call codegen_emit_pop_rbx          ; stub: cleanup
+    call codegen_emit_pop_rbx          ; rbx = dict_ptr (at runtime)
+    call codegen_emit_dict_get         ; emit: mov rsi,rax; mov rdi,rbx; call rt_dict_get
+    mov byte [cur_type], TYPE_INT      ; dict values are ints for now
     jmp .done
 .idn_done:
     jmp .done
@@ -568,6 +571,8 @@ parse_factor:
     call proto_find
     cmp rax, -1
     je .prt_skip
+    test rax, rax           ; multi-pass: body_offset=0 → prescan entry, treat as forward ref
+    jz .prt_skip
     mov r12, rax
     ; O26: save seq_idx before parse_expr calls may overwrite proto_find_seq_idx
     mov rax, [proto_find_seq_idx]
@@ -1557,8 +1562,8 @@ parse_stmt:
     call var_add
     cmp rax, -1
     je .done
-    ; Emit call to rt_dict_new (not yet implemented in runtime, so it should be a stub)
-    ; For now, we will just register it in var_table.
+    mov rdi, rax                  ; rdi = var_idx from var_add
+    call codegen_emit_dict_new    ; emit: call rt_dict_new + store ptr to var_addr
     jmp .done
 
 ; ── @memo — memoize next protocol definition ───────────────────────────────────
@@ -1977,48 +1982,6 @@ parse_stmt:
     jne .forl
     call lexer_next
 .forl:
-    ; DEBUG: print tok_type and var_count
-    push rax
-    push rdx
-    push rsi
-    push rdi
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_fl_msg]
-    mov rdx, 10
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    movzx rcx, byte [tok_type]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_fl2_msg]
-    mov rdx, 4
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    mov rcx, [var_count]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_nl]
-    mov rdx, 1
-    syscall
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rax
     movzx eax, byte [tok_type]
     cmp al, TOK_EOF
     je .ford
@@ -2031,36 +1994,6 @@ parse_stmt:
     jne .fornd
     call lexer_next
 .fornd:
-    ; DEBUG: print "DBG ford t=N\n"
-    push rax
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_ford_msg]
-    mov rdx, 9
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    movzx rcx, byte [tok_type]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_nl]
-    mov rdx, 1
-    syscall
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rax
     mov rdi, r15
     mov rsi, r14
     call codegen_emit_for_end
@@ -2264,38 +2197,6 @@ parse_stmt:
     mov rbx, [scope_depth]
     lea rcx, [scope_stack]
     mov rax, [var_count]
-    ; DEBUG: print var_count at while push
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_wp_msg]
-    mov rdx, 9
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    mov rcx, [var_count]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_nl]
-    mov rdx, 1
-    syscall
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
     mov [rcx+rbx*8], rax
     inc qword [scope_depth]
     ; allocate + init __le flag BEFORE loop_top so init runs only once
@@ -2359,36 +2260,6 @@ parse_stmt:
     call codegen_emit_while_end
     call codegen_pop_loop_else_flag  ; rax = le_var_idx or -1
     mov r14, rax                     ; save le_var_idx (r15 no longer needed)
-    ; DEBUG: print scope_depth before dec
-    push rax
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_sd_msg]
-    mov rdx, 9
-    syscall
-    mov rax, 1
-    mov rdi, 2
-    mov rcx, [scope_depth]
-    add rcx, '0'
-    push rcx
-    lea rsi, [rsp]
-    mov rdx, 1
-    syscall
-    pop rcx
-    mov rax, 1
-    mov rdi, 2
-    lea rsi, [dbg_nl]
-    mov rdx, 1
-    syscall
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rax
     ; restore scope (reclaim __le var)
     dec qword [scope_depth]
     mov rax, [scope_depth]
@@ -2435,6 +2306,12 @@ parse_stmt:
     inc qword [prot_body_depth]
     call codegen_begin_protos
     call lexer_next
+    ; multi-pass: check if proto was pre-registered by proto_prescan (Pass 1)
+    lea rdi, [tok_ident]
+    call proto_find
+    cmp rax, -1
+    jne .prot_prescan_entry       ; prescan entry exists (body_offset may be 0)
+    ; no prescan entry: add new proto at proto_table[proto_count]
     mov rax, [proto_count]
     imul rax, PROTO_ENTRY_SIZE
     lea r13, [proto_table]
@@ -2442,6 +2319,20 @@ parse_stmt:
     lea rsi, [tok_ident]
     mov rdi, r13
     call strcpy
+    mov rax, [proto_count]
+    mov [cur_proto_idx], rax
+    mov [codegen_cur_proto_seq_idx], rax
+    inc qword [proto_count]
+    jmp .prot_entry_ready
+.prot_prescan_entry:
+    ; reuse existing prescan entry (name already stored, get its sequential index)
+    mov rax, [proto_find_seq_idx]
+    mov [cur_proto_idx], rax
+    mov [codegen_cur_proto_seq_idx], rax
+    imul rax, PROTO_ENTRY_SIZE
+    lea r13, [proto_table]
+    add r13, rax
+.prot_entry_ready:
     mov rbx, [out_idx]
     mov [r13+32], rbx
     ; Patch any pending forward references to this protocol
@@ -2452,10 +2343,6 @@ parse_stmt:
     mov byte [r13+40], 0
     mov byte [r13+46], 0    ; clear has_loop flag for new proto
     mov byte [r13+47], 0
-    mov rax, [proto_count]
-    mov [cur_proto_idx], rax
-    mov [codegen_cur_proto_seq_idx], rax   ; O27: tell codegen which proto we are compiling
-    inc qword [proto_count]
     ; O20: reset self-recursive flag for this protocol
     mov byte [proto_is_self_recursive], 0
     ; @memo: latch memo flag if requested by 'memo' keyword
@@ -3341,8 +3228,10 @@ parse_stmt:
     call lexer_next          ; skip '='
     call parse_expr          ; parse value
     call codegen_emit_pop_rbx  ; pop index into rbx
-    ; call rt_dict_set(var_addr, key, value)
-    ; For now, stub
+    ; emit rt_dict_set(dict_ptr, key, value)
+    shr r12, 6             ; recover var_idx (was var_idx*64 from type check above)
+    mov rdi, r12
+    call codegen_emit_dict_set
     jmp .done
 .ident_push:
     call lexer_next
@@ -3801,6 +3690,218 @@ emit_d_indirect:
 
 get_var_va_indirect:
     jmp codegen_get_var_va_proxy
+
+; ── proto_prescan: Pass 1 — pre-register all proto signatures ─────────────────
+; Scans the entire token stream (lexer must be initialised and advanced once).
+; Pre-populates proto_table with name (offset 0), param count (offset 40), and
+; return type (offset 47). body_out_idx (offset 32) is left as 0 = "not yet
+; compiled" sentinel, so parse_factor treats forward calls as forward refs.
+; Skips each proto body by counting INDENT/DEDENT tokens.
+; Returns when TOK_EOF is encountered.
+proto_prescan:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+.pp_main:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .pp_exit
+    cmp al, TOK_PROT
+    je .pp_found_prot
+    call lexer_next
+    jmp .pp_main
+
+.pp_found_prot:
+    call lexer_next
+    cmp byte [tok_type], TOK_IDENT
+    jne .pp_main           ; malformed: skip
+    ; check if already registered (e.g. duplicate definition)
+    lea rdi, [tok_ident]
+    call proto_find
+    cmp rax, -1
+    jne .pp_existing
+    ; new entry at proto_table[proto_count]
+    cmp qword [proto_count], PROTO_MAX
+    jge .pp_main           ; table full — skip silently
+    mov rax, [proto_count]
+    imul r13, rax, PROTO_ENTRY_SIZE
+    lea rbx, [proto_table]
+    add r13, rbx           ; r13 = &proto_table[proto_count]
+    ; zero entry so body_out_idx (offset 32) stays 0 = "prescan sentinel"
+    push rdi
+    push rcx
+    mov rdi, r13
+    xor eax, eax
+    mov ecx, PROTO_ENTRY_SIZE
+    rep stosb
+    pop rcx
+    pop rdi
+    ; copy name (up to 15 chars, ensuring NUL termination)
+    mov rdi, r13
+    lea rsi, [tok_ident]
+    mov ecx, 15
+.pp_cpname:
+    mov al, [rsi]
+    mov [rdi], al
+    test al, al
+    jz .pp_cpname_done
+    inc rdi
+    inc rsi
+    dec ecx
+    jnz .pp_cpname
+    mov byte [rdi], 0      ; force NUL at position 15
+.pp_cpname_done:
+    inc qword [proto_count]
+    jmp .pp_sig
+
+.pp_existing:
+    ; reuse existing entry (already has name)
+    mov rax, [proto_find_seq_idx]
+    imul r13, rax, PROTO_ENTRY_SIZE
+    lea rbx, [proto_table]
+    add r13, rbx
+
+.pp_sig:
+    ; Parse optional parameter list to count params (r13 = proto entry ptr)
+    call lexer_next
+    xor r12, r12           ; param count = 0
+    cmp byte [tok_type], TOK_LPAREN
+    jne .pp_sig_noparam
+    call lexer_next
+.pp_sig_pl:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_RPAREN
+    je .pp_sig_pd
+    cmp al, TOK_EOF
+    je .pp_sig_pd
+    cmp al, TOK_NEWLINE
+    je .pp_sig_pd
+    ; skip optional type keyword before param name
+    cmp al, TOK_TYPE_INT
+    je .pp_sig_type
+    cmp al, TOK_TYPE_FLOAT
+    je .pp_sig_type
+    cmp al, TOK_TYPE_BOOL
+    je .pp_sig_type
+    cmp al, TOK_TYPE_STR
+    je .pp_sig_type
+    cmp al, TOK_TYPE_SEQ
+    je .pp_sig_type
+    cmp al, TOK_TYPE_DICT
+    je .pp_sig_type
+    jmp .pp_sig_name
+.pp_sig_type:
+    call lexer_next
+.pp_sig_name:
+    cmp byte [tok_type], TOK_IDENT
+    jne .pp_sig_comma
+    call lexer_next        ; consume param name
+.pp_sig_comma:
+    inc r12                ; count this param
+    cmp byte [tok_type], TOK_COMMA
+    jne .pp_sig_pl
+    call lexer_next        ; consume ','
+    jmp .pp_sig_pl
+.pp_sig_pd:
+    cmp byte [tok_type], TOK_RPAREN
+    jne .pp_sig_noparam
+    call lexer_next        ; consume ')'
+.pp_sig_noparam:
+    mov [r13+40], r12b     ; store param count at offset 40
+    ; optional '-> return_type'
+    cmp byte [tok_type], TOK_ARROW
+    jne .pp_dobody
+    call lexer_next        ; skip '->'
+    movzx eax, byte [tok_type]
+    xor ecx, ecx           ; default return type = 0 (treated as TYPE_INT by callers)
+    cmp al, TOK_TYPE_INT
+    jne .pp_rt2
+    mov cl, TYPE_INT
+    jmp .pp_rt_store
+.pp_rt2:
+    cmp al, TOK_TYPE_FLOAT
+    jne .pp_rt3
+    mov cl, TYPE_FLOAT
+    jmp .pp_rt_store
+.pp_rt3:
+    cmp al, TOK_TYPE_BOOL
+    jne .pp_rt4
+    mov cl, TYPE_BOOL
+    jmp .pp_rt_store
+.pp_rt4:
+    cmp al, TOK_TYPE_STR
+    jne .pp_rt5
+    mov cl, TYPE_STR
+    jmp .pp_rt_store
+.pp_rt5:
+    cmp al, TOK_TYPE_SEQ
+    jne .pp_rt6
+    mov cl, TYPE_SEQ
+    jmp .pp_rt_store
+.pp_rt6:
+    cmp al, TOK_TYPE_DICT
+    jne .pp_rt_store       ; unknown → leave cl=0
+    mov cl, TYPE_DICT
+.pp_rt_store:
+    mov [r13+47], cl       ; return type at offset 47
+    call lexer_next        ; consume type token
+
+.pp_dobody:
+    ; Skip proto body: scan forward to first INDENT then count INDENT/DEDENT
+    xor r15, r15           ; depth = 0
+.pp_hdr_scan:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .pp_exit
+    cmp al, TOK_INDENT
+    je .pp_body_enter
+    cmp al, TOK_NEWLINE
+    je .pp_after_nl
+    call lexer_next
+    jmp .pp_hdr_scan
+.pp_after_nl:
+    call lexer_next
+    cmp byte [tok_type], TOK_INDENT
+    je .pp_body_enter
+    jmp .pp_main           ; no INDENT → no body, continue main scan
+.pp_body_enter:
+    inc r15                ; depth = 1
+    call lexer_next
+.pp_body_scan:
+    movzx eax, byte [tok_type]
+    cmp al, TOK_EOF
+    je .pp_exit
+    cmp al, TOK_INDENT
+    je .pp_body_indent
+    cmp al, TOK_DEDENT
+    je .pp_body_dedent
+    call lexer_next
+    jmp .pp_body_scan
+.pp_body_indent:
+    inc r15
+    call lexer_next
+    jmp .pp_body_scan
+.pp_body_dedent:
+    dec r15
+    jz .pp_body_done       ; depth 0 → body finished
+    call lexer_next
+    jmp .pp_body_scan
+.pp_body_done:
+    call lexer_next        ; consume the depth-0 DEDENT
+    jmp .pp_main
+
+.pp_exit:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 ; ── proto_emit_restore ────────────────────────────────────────────────────────
 ; Emit the protocol epilogue: optional memo store, then leave + regalloc restore.

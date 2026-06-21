@@ -32,6 +32,7 @@ global codegen_emit_cmp_var_jne, codegen_emit_unknown_bool
 global codegen_emit_mm_switch, codegen_emit_gc_switch
 global codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
 global actual_prs_va, actual_prq_va, actual_sip_va
+global codegen_emit_dict_new, codegen_emit_dict_get, codegen_emit_dict_set
 global codegen_emit_jmp_get_slot, codegen_patch_slot_to_here
 global codegen_emit_push_rax, codegen_emit_pop_rbx
 global codegen_emit_expr_save_rax, codegen_emit_expr_restore_rbx
@@ -1783,4 +1784,12 @@ codegen_peephole:
 
 ; codegen_mark_r12_needed — no-op (no r12 register in RexC backend)
 codegen_mark_r12_needed:
+    ret
+
+; ── dict codegen stubs (RexC backend emits bytecode, not x86) ──────────────
+codegen_emit_dict_new:
+    ret
+codegen_emit_dict_get:
+    ret
+codegen_emit_dict_set:
     ret

@@ -14,6 +14,7 @@ global codegen_emit_assign_var, codegen_emit_zero_var, codegen_emit_cmp_var_jne,
 global codegen_emit_mm_switch, codegen_emit_gc_switch
 global codegen_emit_test_rax_jnz, codegen_emit_normalize_bool_rax
 global actual_prs_va, actual_prq_va, actual_sip_va
+global codegen_emit_dict_new, codegen_emit_dict_get, codegen_emit_dict_set
 global codegen_emit_cmp_rbx_rax_setcc, codegen_emit_test_rax_jz
 global codegen_emit_jmp_get_slot, codegen_patch_slot_to_here
 global codegen_emit_push_rax, codegen_emit_pop_rbx
@@ -76,7 +77,7 @@ global codegen_emit_expr_spill_save, codegen_emit_expr_spill_restore
 extern elf_header, program_header
 extern proto_count, var_table, var_count
 extern rt_pri_blob, rt_prs_blob, rt_prb_blob, rt_prf_blob, rt_prc_blob
-extern rt_sip_blob, rt_alc_blob, rt_prq_blob
+extern rt_sip_blob, rt_alc_blob, rt_prq_blob, rt_dict_blob
 section .bss
 out_buffer:       resb 524288    ; 512 KB — enables bounds-check removal in emit_b
 out_idx:          resq 1
@@ -208,6 +209,7 @@ actual_sip_va:       resq 1
 actual_alc_va:       resq 1
 actual_prq_va:       resq 1
 actual_alc_mode_va:  resq 1  ; = actual_alc_va + RT_ALC_SIZE - 8 (the allocator .mode var)
+actual_dict_va:      resq 1  ; VA of rt_dict blob (rt_dict_new at +0, rt_dict_get at +512, rt_dict_set at +1024)
 cur_proto_is_unsafe: resb 1
 overflow_err_cnt:    resq 1
 compiler_error_count: resq 1
@@ -366,10 +368,10 @@ codegen_init:
     push r13
     mov r12d, edi               ; save blob mask (low byte sufficient)
     mov qword [for_step_val], 1
-    ; Zero actual-VA table (9 qwords: pri..prq + alc_mode)
+    ; Zero actual-VA table (10 qwords: pri..prq + alc_mode + dict)
     lea rdi, [actual_pri_va]
     xor eax, eax
-    mov ecx, 9
+    mov ecx, 10
     rep stosq
     ; ── Compute total size of needed blobs ───────────────────────────────────
     xor r13d, r13d
@@ -405,6 +407,10 @@ codegen_init:
     jz .ci_npq
     add r13d, RT_PRQ_SIZE
 .ci_npq:
+    test r12d, 0x100
+    jz .ci_ndict
+    add r13d, RT_DICT_SIZE
+.ci_ndict:
     ; Emit JMP over blobs: E9 <total_needed_size>
     mov al, 0xE9
     call emit_b
@@ -485,6 +491,15 @@ codegen_init:
     mov rcx, RT_PRQ_SIZE
     call emit_blob
 .ci_spq:
+    test r12d, 0x100
+    jz .ci_sdict
+    mov rax, [out_idx]
+    add rax, LOAD_BASE
+    mov [actual_dict_va], rax
+    lea rsi, [rt_dict_blob]
+    mov rcx, RT_DICT_SIZE
+    call emit_blob
+.ci_sdict:
     pop r13
     pop r12
     pop rbx
@@ -7527,6 +7542,105 @@ emit_buf_overflow_len  equ $ - emit_buf_overflow_msg
 jmp_stack_overflow_msg: db "error: if/loop nesting depth exceeded",10
 jmp_stack_overflow_len  equ $ - jmp_stack_overflow_msg
 ; O32d: 55-byte clock_gettime sequence as a blob for single emit_blob call
+; ── codegen_emit_dict_new: emit call rt_dict_new + store ptr to var ──────────
+; rdi = var_idx
+codegen_emit_dict_new:
+    push rdi
+    ; emit: call rt_dict_new  →  E8 <rel32>
+    mov al, 0xE8
+    call emit_b
+    mov rax, [actual_dict_va]     ; VA of rt_dict_new (base of dict blob)
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx                  ; rel32 = target - (here+4)
+    call emit_d
+    ; emit: mov [var_addr], rax  →  48 89 04 25 <addr32>
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0x04
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
+    ret
+
+; ── codegen_emit_dict_get: emit mov rsi,rax; mov rdi,rbx; call rt_dict_get ───
+; No arguments — at runtime rbx=dict_ptr (from pop), rax=key (from parse_expr).
+; Result in rax = looked-up value (0 if not found).
+codegen_emit_dict_get:
+    ; mov rsi, rax  →  48 89 C6
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC6
+    call emit_b
+    ; mov rdi, rbx  →  48 89 DF
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xDF
+    call emit_b
+    ; call rt_dict_get  →  E8 <rel32>  (rt_dict_get = actual_dict_va + RT_DICT_NEW_SIZE)
+    mov al, 0xE8
+    call emit_b
+    mov rax, [actual_dict_va]
+    add rax, RT_DICT_NEW_SIZE
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ret
+
+; ── codegen_emit_dict_set: emit mov rdx,rax; mov rsi,rbx; mov rdi,[var]; call ─
+; rdi = var_idx.  At runtime: rbx=key (from pop), rax=value (from parse_expr).
+codegen_emit_dict_set:
+    push rdi
+    ; mov rdx, rax  →  48 89 C2
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xC2
+    call emit_b
+    ; mov rsi, rbx  →  48 89 DE
+    mov al, 0x48
+    call emit_b
+    mov al, 0x89
+    call emit_b
+    mov al, 0xDE
+    call emit_b
+    ; mov rdi, [var_addr]  →  48 8B 3C 25 <addr32>
+    mov al, 0x48
+    call emit_b
+    mov al, 0x8B
+    call emit_b
+    mov al, 0x3C
+    call emit_b
+    mov al, 0x25
+    call emit_b
+    pop rdi
+    call get_var_va
+    call emit_d
+    ; call rt_dict_set  →  E8 <rel32>  (rt_dict_set = actual_dict_va + 512 + 512)
+    mov al, 0xE8
+    call emit_b
+    mov rax, [actual_dict_va]
+    add rax, RT_DICT_NEW_SIZE + RT_DICT_GET_SIZE
+    mov rdx, [out_idx]
+    add rdx, 4
+    add rdx, LOAD_BASE
+    sub rax, rdx
+    call emit_d
+    ret
+
 ; (replaces 40 sequential call emit_b)
 clock_ms_blob:
     db 0x48, 0x83, 0xEC, 0x10          ; sub rsp, 16
