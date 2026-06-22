@@ -313,14 +313,18 @@ loop_else       ::= "else" ":" <NEWLINE>
 ## 10. Protocols (Functions)
 
 ```ebnf
-prot_def        ::= { decorator } "prot" <IDENT> "(" param_list ")"
+prot_def        ::= [ decorator ] "prot" <IDENT> "(" param_list ")"
                     [ "->" return_type ] ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 
-decorator       ::= "#" decorator_name <NEWLINE>
+decorator       ::= "#" decorator_item <NEWLINE>
+                  | "#" "[" decorator_item { "," decorator_item } "]" <NEWLINE>
+
+decorator_item  ::= decorator_name [ "(" arg_list ")" ]
 
 decorator_name  ::= "memo" | "pure" | "total" | "inline" | "noinline"
                   | "hot" | "cold" | "safe" | "unsafe"
+                  | <IDENT>
 
 param_list      ::= [ param { "," param } ]
 
@@ -421,11 +425,15 @@ Fields: `.tag` (`str`), `.msg` (`str`).
 **Usage:**
 
 ```ebnf
-decorator       ::= "#" <IDENT> [ "(" arg_list ")" ] <NEWLINE>
+decorator       ::= "#" decorator_item <NEWLINE>
+                  | "#" "[" decorator_item { "," decorator_item } "]" <NEWLINE>
+
+decorator_item  ::= <IDENT> [ "." <IDENT> ] [ "(" arg_list ")" ]
 ```
 
-A built-in or user-defined decorator name follows `#`. User-defined
-decorators from a module use `#module.name(args)` syntax.
+A single decorator uses `#name` or `#name(args)`.
+Multiple decorators on one line use `#[a, b, c]` or `#[a(args), b]`.
+Module-scoped decorator: `#module.name(args)` or inside `#[mod.name(args), ...]`.
 
 ### 10.3 Module System
 

@@ -859,28 +859,30 @@ caller-allocated stack buffer.
 
 ### 9.4 Decorators
 
-Decorators annotate a protocol with compiler directives. They use `#` and
-stack one per line directly above `prot`. Rex supports both built-in
-decorators and user-defined custom decorators.
+Decorators annotate a protocol with compiler directives. A single decorator
+is written `#name` directly above `prot`. Multiple decorators on one line
+use `#[a, b, c]`. Rex supports both built-in and user-defined decorators.
 
 #### Built-in decorators
 
+A single decorator uses `#name`. Multiple decorators on one line use `#[a, b, c]`:
+
 ```rex
-#memo
-#pure
+// single
+#unsafe
+prot exit(int code):
+    $(60, code)
+
+// multiple — #[...] groups them on one line
+#[memo, pure]
 prot fib(int n) -> int:
     if n <= 1:
         return n
     return @fib(n-1) + @fib(n-2)
 
-#hot
-#inline
+#[hot, inline]
 prot dot(int a, int b) -> int:
     return a * b
-
-#unsafe
-prot exit(int code):
-    $(60, code)
 ```
 
 | Decorator   | Category    | Effect                                                      |
@@ -895,7 +897,7 @@ prot exit(int code):
 | `#safe`     | Safety      | Compiler verifies: no raw syscalls or pointer arithmetic    |
 | `#unsafe`   | Safety      | Allows `$` syscalls and direct memory operations            |
 
-Decorators compose freely. Order does not matter.
+Decorators inside `#[...]` compose freely. Order does not matter.
 
 #### User-defined decorators
 
@@ -935,24 +937,38 @@ decorator guarded(str label):
         output("done {label}")
 ```
 
-Usage:
+Usage — single and grouped:
 
 ```rex
+// single decorator
 #trace
 prot greet():
     output("Hello")
 
+// single with argument
 #log("compute")
 prot compute(int x) -> int:
     return x * 2
 
+// multiple decorators on one line
+#[hot, inline, log("dot")]
+prot dot(int a, int b) -> int:
+    return a * b
+
+// repeat wrap
 #repeat(3)
 prot announce():
     output("Rex!")
 
+// guarded error hook
 #guarded("network")
 prot fetch():
     raise "IOError: connection refused"
+
+// mixed built-in and user-defined
+#[unsafe, guarded("exit")]
+prot force_exit(int code):
+    $(60, code)
 ```
 
 **Decorator rules:**

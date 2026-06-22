@@ -479,22 +479,29 @@ caller-allocated stack buffer.
 
 ### Decorators
 
+Single decorator: `#name`. Multiple on one line: `#[a, b, c]`.
+
 ```rex
-#memo
-#pure
+// single
+#unsafe
+prot exit(int code):
+    $(60, code)
+
+// multiple — bracket syntax
+#[memo, pure]
 prot fib(int n) -> int:
     if n <= 1:
         return n
     return @fib(n-1) + @fib(n-2)
 
-#hot
-#inline
+#[hot, inline]
 prot dot(int a, int b) -> int:
     return a * b
 
-#unsafe
-prot exit(int code):
-    $(60, code)
+// mixed built-in + user-defined + argument
+#[hot, log("render")]
+prot render(str template) -> str:
+    return template
 ```
 
 | Decorator   | Effect                                                       |
@@ -509,7 +516,7 @@ prot exit(int code):
 | `#safe`     | Verifies: no raw syscalls or pointer arithmetic inside       |
 | `#unsafe`   | Allows `$` syscalls and direct memory ops                    |
 
-Decorators stack one per line and compose freely.
+Order inside `#[...]` does not matter. Built-in and user-defined decorators mix freely.
 
 ### Custom decorators
 
