@@ -6,3 +6,4 @@
 - [Rex self-hosting plan](rex-selfhosting-plan.md) — bootstrap sequence, layer architecture (Rex→RexC→RIC→native), and portability model agreed in design session.
 - [RexC & RIC instruction set spec](rex-rexc-spec.md) — full bytecode format, core/memory/IO opcodes (0x00–0x7F), and RIC SIMD layer (0x80–0xFF) with vector types and platform mappings.
 - [RexC backend build layout](rexc-backend-build.md) — rxc/ directory, Makefile tab fix, include path conventions, duplicate label pitfall.
+- [Rex docs second-pass decisions](rex-docs-v2.md) — all confirmed design decisions now reflected in design.md, grammar.md, syn.md; key rules for future consistency.

@@ -75,28 +75,75 @@ must be stated explicitly.
 
 ## 2. Data Types
 
-| Type         | Example                   | Notes                                                      |
-|--------------|---------------------------|------------------------------------------------------------|
-| `int`        | `int a = 5`               | 64-bit signed integer (two's complement)                   |
-| `float`      | `float b = 1.5`           | 64-bit IEEE 754 double                                     |
-| `bool`       | `bool f = true`           | Signed ternary: `true(1)`, `neutral(0)`, `false(-1)`       |
-| `str`        | `str s = "Rex"`           | Heap UTF-8; `[cap:8][len:8][data]` header layout          |
-| `char`       | `char c = 'R'`            | Single UTF-8 byte                                          |
-| `byte`       | `byte b = 0xFF`           | Raw unsigned 8-bit value (0–255)                           |
-| `seq[T]`     | `seq[int] nums`           | Heap-allocated typed dynamic sequence                      |
-| `arr[T, N]`  | `arr[int, 8] buf`         | Stack-allocated fixed-size array; `N` is compile-time      |
-| `dict[T]`    | `dict[int] d`             | SipHash-2-4 map; keys always `str`                         |
-| `tup[T...]`  | `tup[int, str] t`         | Stack, heterogeneous, immutable; positional access         |
+### Primitive types
+
+| Type        | Default storage | Example              | Notes                                        |
+|-------------|----------------|----------------------|----------------------------------------------|
+| `int`       | 64-bit signed  | `int a = 5`          | Sized: `int[8]`–`int[1024]`; compiler picks ≤256 |
+| `int[N]`    | N-bit signed   | `int[8] a = 127`     | N ∈ {8,16,32,64,128,256,512,1024}            |
+| `float`     | 64-bit IEEE 754| `float b = 1.5`      | Sized: `float[32]` / `float[64]` / `float[128]` |
+| `bool`      | 8-bit signed   | `bool f = true`      | Always 8-bit; `true(1)` `neutral(0)` `false(-1)` |
+| `char`      | 8-bit (default)| `char c = 'R'`       | `char[8]`=ASCII, `char[16]`=UTF-16, `char[32]`=codepoint |
+| `byte`      | 8-bit unsigned | `byte b = 0xFF`      | Always 8-bit; literal: `0xFF` or `"A"` (single char) |
+| `str`       | Heap pointer   | `str s = "Rex"`      | UTF-8; `str[N]` = max N-byte stack buffer    |
+
+### Collection types
+
+| Type         | Example               | Notes                                         |
+|--------------|-----------------------|-----------------------------------------------|
+| `seq[T]`     | `seq[int] nums`       | Heap-allocated growable sequence              |
+| `seq[T, N]`  | `seq[int, 64] buf`    | Pre-allocated with initial capacity N         |
+| `arr[T, N]`  | `arr[int, 8] buf`     | Stack-allocated fixed array; N compile-time   |
+| `arr[N]`     | `arr[512] = [1,2,3]`  | Element type inferred from initializer        |
+| `dict[T]`    | `dict[int] d`         | SipHash-2-4 map; keys always `str`            |
+| `dict[T, N]` | `dict[int, 128] d`    | Initial bucket count hint N                   |
+| `tup[T...]`  | `tup[int, str] t`     | Heterogeneous tuple; positional; immutable    |
+
+### User-defined types
+
+| Declaration         | Example                       | Notes                         |
+|---------------------|-------------------------------|-------------------------------|
+| `struct Name:`      | `struct Point: float x, float y` | Named-field value type     |
+| `enum Name:`        | `enum Dir: north, south`      | Typed integer constants        |
+| `type Alias = T`    | `type Meters = float`         | Structural alias               |
 
 ### Numeric literals
 
 ```rex
 int a = 255
-int b = 0xFF        // hex
-int c = 0b11111111  // binary
-int d = 0o377       // octal
+int b = 0xFF            // hex
+int c = 0b11111111      // binary
+int d = 0o377           // octal
 float f = 3.14
-float g = 1.0e-4    // scientific notation
+float g = 1.0e-4        // scientific notation
+
+// Underscore separator
+int million = 1_000_000
+int addr    = 0xFF_00_AA_BB
+float big   = 9_999.999_9
+```
+
+### Byte literals — two forms
+
+```rex
+byte a = 0xFF        // hex value
+byte b = "A"         // single-char string → ASCII byte value
+byte c = 65          // decimal
+```
+
+### Multiline strings and docstrings
+
+```rex
+str text = """
+Line one
+Line two
+"""
+
+"""
+This docstring describes the next protocol.
+"""
+prot greet():
+    output("Hello")
 ```
 
 ---
@@ -171,9 +218,19 @@ output(c.to_int())      // -1
 | `.is_false()`    | `bool`  | `true` only if stored value is −1              |
 | `.is_neutral()`  | `bool`  | `true` only if stored value is 0               |
 | `.is_decided()`  | `bool`  | `true` if not neutral                          |
-| `.flip()`        | `bool`  | Negate: `true`↔`false`, `neutral` unchanged    |
 | `.to_int()`      | `int`   | `true`→1, `neutral`→0, `false`→−1             |
 | `.to_str()`      | `str`   | `"true"`, `"neutral"`, or `"false"`            |
+
+**`flip`** — boolean toggle only:
+
+```rex
+bool b = true
+flip b          // b → false   ✓
+flip b          // b → true    ✓
+
+int x = 5
+flip x          // raise "TypeError: flip requires bool, got int"
+```
 
 ---
 
@@ -651,34 +708,81 @@ else:
 
 `neutral` in a condition is falsy. Only `true` is truthy.
 
-### `when` / `is`
+### `switch` / `is` — value dispatch
 
 ```rex
 int code = 2
 
-when code:
+switch code:
     is 1:
         output("one")
-    is 2:
-        output("two")
+    is 2..5:
+        output("two through four")
+    is 5:
+        output("five")
     else:
         output("other")
 ```
 
-Works on `int`, `str`, `float`, `bool`, and `char` literals. `_` is the
-wildcard pattern (must be last).
+Ranges are **exclusive** on the right: `2..5` matches 2, 3, 4.
+Multiple patterns per case — comma-separated. `else` must be last.
 
 ```rex
 str status = "ok"
 
-when status:
+switch status:
     is "ok":
         output("all good")
-    is "err":
-        output("error")
+    is "warn", "error":
+        output("problem: {status}")
     else:
-        output("unknown status")
+        output("unknown")
+
+switch direction:
+    is Direction.north, Direction.south:
+        output("vertical")
+    is Direction.east, Direction.west:
+        output("horizontal")
 ```
+
+Works on `int`, `float`, `str`, `bool`, `char`, enum values. Dense integer
+ranges compile to O(1) jump tables. No implicit fallthrough.
+
+### `when` — state monitor
+
+`when expr` returns a `bool` tri-state based on whether the condition **changed**:
+
+| Returns  | Meaning                                               |
+|----------|-------------------------------------------------------|
+| `true`   | Condition just became true (was false/neutral before) |
+| `false`  | Condition just became false (was true before)         |
+| `neutral`| Condition state has not changed since last check      |
+
+```rex
+int x = 0
+bool chg = when x > 0      // false (currently false, first eval)
+
+:x = 5
+:chg = when x > 0          // true  (was false, now true → changed)
+:chg = when x > 0          // neutral (was true, still true → no change)
+
+// Reactive pattern in a loop
+while running:
+    if when x > 100:
+        output("x crossed 100: {x}")
+```
+
+### Inline `if` expression
+
+```rex
+int x = if a > 0: 1 else: -1
+
+str label = if score >= 90: "A" elif score >= 80: "B" else: "C"
+
+output(if n == 0: "zero" else: "nonzero")
+```
+
+All branches must return the same type. `else` is required.
 
 ### `pass`
 
@@ -810,8 +914,8 @@ seq[seq[int]] matrix
 ```rex
 :nums.push(6)
 int last = nums.pop()
-output(nums.len())
-output(nums.cap())
+output(len(nums))
+output(cap(nums))
 output(nums.is_empty())
 :nums.clear()
 :nums.reserve(100)
@@ -928,7 +1032,7 @@ Sorting and functional methods return `seq[T]`.
 ```rex
 arr[int, 5] a = [4, 2, 7, 1, 9]
 
-output(a.len())          // 5 (compile-time constant)
+output(len(a))           // 5 (compile-time constant)
 output(a.first())        // 4
 output(a.contains(7))    // true
 output(a.min())          // 1
@@ -954,7 +1058,7 @@ int v = scores["alice"]             // read; error if key absent
 scores.has("carol")                 // bool
 scores.get_or("dave", 0)            // default if missing; no insert
 scores.get_or_set("dave", 50)       // insert default if absent, return value
-scores.len()
+len(scores)
 scores.is_empty()
 ```
 
@@ -1017,7 +1121,7 @@ str b
 ### Methods
 
 ```rex
-pair.len()          // 2
+len(pair)           // 2
 pair.to_str()       // "(42, "hello")"
 pair.copy()         // stack copy
 
@@ -1055,7 +1159,7 @@ bool found = "ell" in s // substring test
 ### Methods — inspection
 
 ```rex
-s.len()             // byte count
+len(s)              // byte count
 s.char_count()      // UTF-8 code point count
 s.is_empty()        // bool
 ```
@@ -1254,11 +1358,39 @@ with open("config.txt", "r") as f:
 
 ## 16. I/O — Console
 
-```rex
-output(x)           // print x + newline (type-dispatched)
+### `output()` — Python-style print
 
-str name = input("Enter your name: ")
-str fmt_val = fmt("score: {score:.1f}")
+```rex
+output()                              // blank line
+output("hello")                       // hello
+output(1, 2, 3)                       // 1 2 3
+output("a", "b", "c", sep="-")       // a-b-c
+output("loading", end="...")          // loading... (no newline)
+output("x =", 42, sep="")            // x =42
+```
+
+- Default `sep = " "`, default `end = "\n"`
+- Multiple args of any type accepted; each stringified
+- `sep` and `end` are always keyword arguments
+
+### `input()` — read from stdin
+
+```rex
+str name = input("Enter name: ")
+int n = int(input("Number: "))
+
+// EOF / Ctrl+D raises EOFError
+try:
+    str line = input("> ")
+except "EOFError":
+    output("bye")
+```
+
+### `fmt()` — format without printing
+
+```rex
+str label = fmt("score: {score:.1f}")
+str hex   = fmt("0x{addr:X}")
 ```
 
 ---
@@ -1436,7 +1568,197 @@ output(typeof x)    // prints compile-time type tag as int
 
 ---
 
-## 22. Example Programs
+## 22. Structs
+
+Named-field value types. Fields immutable by default; `:.field =` to mutate.
+
+```rex
+struct Point:
+    float x
+    float y
+
+struct Person:
+    str name
+    int age
+    bool active
+
+struct Rect:
+    Point top_left
+    Point bottom_right
+```
+
+**Construct, access, mutate:**
+
+```rex
+Point p = Point{x: 1.0, y: 2.0}
+Person alice = Person{name: "Alice", age: 30, active: true}
+
+output(p.x)              // 1.0
+output(alice.name)       // "Alice"
+
+:p.x = 3.0              // : required for mutation
+:alice.age = alice.age + 1
+
+// Nested
+Rect r = Rect{top_left: Point{x: 0.0, y: 0.0}, bottom_right: Point{x: 10.0, y: 5.0}}
+output(r.top_left.x)
+```
+
+---
+
+## 23. Enums
+
+Typed integer constants grouped under a name.
+
+```rex
+enum Direction: north, south, east, west
+
+enum Status:
+    ok    = 0
+    warn  = 1
+    error = 2
+    fatal = 3
+
+enum Bit: off = 0, on = 1
+```
+
+```rex
+Direction d = Direction.north
+output(d)               // "north"
+output(int(d))          // 0
+
+switch d:
+    is Direction.north, Direction.south:
+        output("vertical")
+    is Direction.east, Direction.west:
+        output("horizontal")
+```
+
+---
+
+## 24. Type Aliases
+
+```rex
+type Meters    = float
+type Name      = str
+type Matrix    = arr[float, 16]
+type IntSeq    = seq[int]
+type SmallInt  = int[16]
+
+Meters dist = 10.5
+Name user = "Rex"
+float d2 = dist         // OK — same underlying type
+```
+
+---
+
+## 25. Generics
+
+Type-parameterised protocols. Types resolved at call site (monomorphised).
+
+```rex
+prot map[T, U](seq[T] s, fn(T) -> U f) -> seq[U]:
+    seq[U] result = []
+    each item in s:
+        result.push(f(item))
+    return result
+
+prot first[T](seq[T] s) -> T:
+    if len(s) == 0:
+        raise "ValueError: empty sequence"
+    return s[0]
+```
+
+```rex
+seq[int] nums = [1, 2, 3]
+seq[str] strs = @map(nums, fn(int x) -> str: str(x))  // T=int, U=str inferred
+int n = @first(nums)                                   // T=int inferred
+```
+
+---
+
+## 26. Null
+
+Any reference type can hold `null`. Value types (`int`, `float`, `bool`, `char`, `byte`) cannot.
+
+```rex
+str name = null
+seq[int] items = null
+
+if name is null:
+    output("unset")
+else:
+    output("name: {name}")
+
+// Accessing null raises NullError
+output(name)            // raise "NullError: dereferenced null str"
+```
+
+**Null-safe operators:**
+
+```rex
+str n = null
+str safe = n ?? "default"         // "default" if n is null
+str up = n?.to_upper() ?? ""      // null-safe method call; "" if n is null
+int length = if n is null: 0 else: len(n)   // safe len with null check
+```
+
+---
+
+## 27. Constants
+
+```rex
+const MAX    = 1024
+const PI     = 3.14159265358979
+const PREFIX = "rex_"
+const MASK   = 0xFF_00_FF_00
+const DOUBLE = MAX * 2        // expressions allowed if all operands are const
+
+// Use anywhere a literal is valid
+arr[int, MAX] buf
+for i in 0..MAX:
+    output(buf[i])
+```
+
+---
+
+## 28. Assert and Unreachable
+
+```rex
+assert(x > 0)                        // raise "AssertionError: assertion failed"
+assert(x > 0, "x must be positive")  // raise "AssertionError: x must be positive"
+
+unreachable()                         // raise "UnreachableError: reached unreachable code"
+```
+
+In `#blast` protocols both are stripped — use only when provably safe.
+
+---
+
+## 29. Variadic Protocols
+
+The last parameter may accept variable arguments using `...`:
+
+```rex
+prot log(str level, str... msgs):
+    each m in msgs:
+        output("[{level}] {m}")
+
+prot sum(int... nums) -> int:
+    int total = 0
+    each n in nums:
+        :total = total + n
+    return total
+
+@log("INFO", "started", "ready")
+output(@sum(1, 2, 3, 4, 5))    // 15
+```
+
+Inside the body the variadic param is `seq[T]`. Only the last param may be variadic.
+
+---
+
+## 30. Example Programs
 
 ### Hello World
 
@@ -1524,6 +1846,6 @@ with open("data.bin", "rb") as f:
     int size = f.size()
     seq[byte] buf = f.read_bytes(size)
 
-    for i in 0..buf.len():
+    for i in 0..len(buf):
         output("{i:04d}: {buf[i].to_hex()}")
 ```

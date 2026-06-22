@@ -51,6 +51,26 @@ The `arr` size argument (`<INT_LIT>`) must be a positive compile-time constant.
 
 ```ebnf
 declaration     ::= type_expr [ ":" ] <IDENT> [ "=" expr ] <NEWLINE>
+                  | struct_def
+                  | enum_def
+                  | type_alias
+                  | const_decl
+                  | escape_decl
+
+struct_def      ::= "struct" <IDENT> ":" <NEWLINE>
+                    <INDENT> { type_expr <IDENT> <NEWLINE> } <DEDENT>
+
+enum_def        ::= "enum" <IDENT> ":" <NEWLINE>
+                    <INDENT> { enum_variant_def <NEWLINE> } <DEDENT>
+                  | "enum" <IDENT> ":" enum_variant_def { "," enum_variant_def } <NEWLINE>
+
+enum_variant_def ::= <IDENT> [ "=" <INT_LIT> ]
+
+type_alias      ::= "type" <IDENT> "=" type_expr <NEWLINE>
+
+const_decl      ::= "const" <IDENT> "=" expr <NEWLINE>
+
+escape_decl     ::= "escape" "\\" <IDENT> "=" <STR_LIT> <NEWLINE>
 ```
 
 - Without `":"`: variable is **immutable**. The initial `= expr` value is
@@ -63,6 +83,16 @@ int count = 0           // immutable
 :int total = 0          // mutable, inline init
 seq[str] names          // mutable, no init value
 bool :flag = true       // alternative — ":" may precede or follow type_expr
+
+struct Point:
+    float x
+    float y
+
+enum Dir: north, south, east, west
+
+type Meters = float
+
+const MAX = 1024
 ```
 
 Both forms `type_expr ":" <IDENT>` and `":" type_expr <IDENT>` are accepted
@@ -78,8 +108,17 @@ assignment      ::= ":" lvalue "=" expr <NEWLINE>
 lvalue          ::= <IDENT>
                   | <IDENT> "[" expr "]"
                   | <IDENT> "." <INT_LIT>
+                  | <IDENT> "." <IDENT>
+                  | lvalue "." <IDENT>
 
 multi_assign    ::= ":" lvalue { "," ":" lvalue } "=" expr <NEWLINE>
+```
+
+The `<IDENT> "." <IDENT>` and `lvalue "." <IDENT>` forms allow mutation of struct
+fields and nested struct fields:
+```rex
+:p.x = 3.0
+:rect.top_left.x = 0.0
 ```
 
 The `:` sigil is required at every mutation site. Assigning to an immutable
@@ -101,7 +140,7 @@ statement       ::= declaration
                   | multi_assign
                   | output_stmt
                   | if_stmt
-                  | when_stmt
+                  | switch_stmt
                   | for_stmt
                   | while_stmt
                   | each_stmt
@@ -118,8 +157,17 @@ statement       ::= declaration
                   | flip_stmt
                   | use_stmt
                   | blast_stmt
-                  | pipe_stmt
                   | with_stmt
+                  | try_stmt
+                  | assert_stmt
+                  | unreachable_stmt
+                  | docstring
+
+assert_stmt     ::= "assert" "(" expr [ "," <STR_LIT> ] ")" <NEWLINE>
+
+unreachable_stmt ::= "unreachable" "(" ")" <NEWLINE>
+
+docstring       ::= '"""' { <any_char> } '"""' <NEWLINE>
 ```
 
 Every statement occupies one or more lines. Block bodies are delimited by
@@ -205,36 +253,78 @@ elif_clause     ::= "elif" expr ":" <NEWLINE>
 
 else_clause     ::= "else" ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
+
+if_expr         ::= "if" expr ":" expr
+                    { "elif" expr ":" expr }
+                    "else" ":" expr
 ```
 
 The condition expression must be of type `bool`. A `bool` with value `neutral`
 is treated as **falsy** (neither branch is taken if an `elif`/`else` matches).
 Truthy: only `true` (`1`). Falsy: `false` (`-1`) and `neutral` (`0`).
 
+**Inline `if` expression** — `if_expr` produces a value and may appear anywhere
+an expression is expected. All branches must return the same type. `else` is required.
+
+```rex
+int x = if a > 0: 1 else: -1
+str s = if score >= 90: "A" elif score >= 80: "B" else: "C"
+output(if n == 0: "zero" else: "nonzero")
+```
+
 ---
 
-## 8. `when` / `is`
+## 8. `switch` / `is` and `when`
+
+### 8.1 `switch` / `is` — Value Dispatch
 
 ```ebnf
-when_stmt       ::= "when" expr ":" <NEWLINE>
-                    <INDENT> { is_clause } [ when_else ] <DEDENT>
+switch_stmt     ::= "switch" expr ":" <NEWLINE>
+                    <INDENT> { is_clause } [ switch_else ] <DEDENT>
 
-is_clause       ::= "is" when_pattern ":" <NEWLINE>
+is_clause       ::= "is" switch_pattern { "," switch_pattern } ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 
-when_pattern    ::= <INT_LIT>
+switch_pattern  ::= <INT_LIT>
                   | <STR_LIT>
                   | <FLOAT_LIT>
                   | bool_lit
+                  | <CHAR_LIT>
+                  | enum_variant
+                  | range_pattern
                   | "_"
 
-when_else       ::= "else" ":" <NEWLINE>
+enum_variant    ::= <IDENT> "." <IDENT>
+
+range_pattern   ::= <INT_LIT> ".." <INT_LIT>
+
+switch_else     ::= "else" ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 ```
 
-`when` evaluates the subject expression once and dispatches by value.
-The `_` pattern is the wildcard (matches anything); it must be the last clause.
-Patterns must be literals or `_` — no expressions or ranges.
+`switch` evaluates the subject expression once and dispatches by value.
+Ranges are **exclusive** on the right: `1..5` matches 1, 2, 3, 4.
+Multiple patterns per `is` line are comma-separated — any one matching triggers the case.
+`else` is the default/fallthrough case and must be last.
+Dense integer ranges compile to O(1) jump tables.
+No implicit fallthrough between cases.
+
+### 8.2 `when` — State Monitor
+
+```ebnf
+when_expr       ::= "when" expr
+```
+
+`when expr` is an **expression** (not a statement) that evaluates `expr` and
+compares its truth value to the **previous** evaluation at the same call site.
+Returns `bool` (tri-state):
+
+- `true` — condition just became true (was false/neutral before)
+- `false` — condition just became false (was true before)
+- `neutral` — condition state has not changed since last check
+
+First evaluation behaves as if previous state was `neutral`.
+Each unique source-location `when` expression is an independent monitor tracked by the compiler.
 
 ---
 
@@ -794,6 +884,27 @@ hardware_expr   ::= "rand"
                   | "carry"
                   | "overflow"
                   | "hash" expr
+
+scope_expr      ::= "scope" "(" expr ")"
+
+len_expr        ::= "len" "(" expr ")"
+
+cap_expr        ::= "cap" "(" expr ")"
+
+abs_expr        ::= "abs" "(" expr ")"
+
+when_expr       ::= "when" expr
+
+null_safe_expr  ::= expr "?." <IDENT> [ "(" { expr { "," expr } } ")" ]
+                  | expr "??" expr
+
+if_expr         ::= "if" expr ":" expr
+                    { "elif" expr ":" expr }
+                    "else" ":" expr
+
+struct_init     ::= <IDENT> "{" field_init { "," field_init } "}"
+
+field_init      ::= <IDENT> ":" expr
 ```
 
 `typeof` returns the compile-time type token as an `int` constant.
@@ -802,6 +913,14 @@ hardware_expr   ::= "rand"
 `carry` and `overflow` read the CPU flag bits after the most recent arithmetic
 operation — both return `bool` (`true` or `false`, never `neutral`).
 `hash expr` computes a SipHash-2-4 digest of the memory region `expr` refers to.
+`scope(x)` returns `"global"`, `"local"`, or `"block"` for the variable `x`.
+`len(x)` returns element count or byte length. `cap(x)` returns allocated capacity.
+`abs(x)` returns the absolute value of numeric `x`.
+`when expr` — see §8.2 (state monitor expression).
+`x?.method()` — null-safe method call; returns `null` if `x` is `null`.
+`x ?? default` — returns `x` if not null, else `default`. Right-associative.
+`if_expr` — inline conditional expression; all branches must share the same type; `else` required.
+`struct_init` — struct construction literal: `Point{x: 1.0, y: 2.0}`.
 
 ---
 
@@ -809,9 +928,11 @@ operation — both return `bool` (`true` or `false`, never `neutral`).
 
 ```ebnf
 <INT_LIT>       ::= <DECIMAL>
-                  | "0x" <HEX_DIGIT> { <HEX_DIGIT> }
-                  | "0b" <BIN_DIGIT> { <BIN_DIGIT> }
-                  | "0o" <OCT_DIGIT> { <OCT_DIGIT> }
+                  | "0x" <HEX_DIGIT> { [ "_" ] <HEX_DIGIT> }
+                  | "0b" <BIN_DIGIT> { [ "_" ] <BIN_DIGIT> }
+                  | "0o" <OCT_DIGIT> { [ "_" ] <OCT_DIGIT> }
+
+<DECIMAL>       ::= <DIGIT> { [ "_" ] <DIGIT> }
 
 <FLOAT_LIT>     ::= <DECIMAL> "." <DECIMAL> [ ( "e" | "E" ) [ "+" | "-" ] <DECIMAL> ]
 
@@ -822,11 +943,18 @@ str_char        ::= <UTF8_CHAR_EXCEPT_BRACE_AND_QUOTE>
                   | "{{" | "}}"
                   | escape_seq
 
-escape_seq      ::= "\\" ( "n" | "t" | "r" | "\\" | '"' | "0" | "x" <HEX_DIGIT> <HEX_DIGIT> )
+escape_seq      ::= "\\" ( "n" | "t" | "r" | "\\" | '"' | "'" | "0"
+                          | "a" | "b" | "f" | "v" | "e"
+                          | "x" <HEX_DIGIT> <HEX_DIGIT>
+                          | "u" <HEX_DIGIT> <HEX_DIGIT> <HEX_DIGIT> <HEX_DIGIT>
+                          | "U" <HEX_DIGIT> <HEX_DIGIT> <HEX_DIGIT> <HEX_DIGIT>
+                              <HEX_DIGIT> <HEX_DIGIT> <HEX_DIGIT> <HEX_DIGIT>
+                          | "e{" <IDENT> "}" )
 
 <CHAR_LIT>      ::= "'" ( <UTF8_CHAR> | escape_seq ) "'"
 
-<DECIMAL>       ::= <DIGIT> { <DIGIT> }
+<MULTILINE_STR> ::= '"""' { <any_char> } '"""'
+
 <DIGIT>         ::= "0" … "9"
 <HEX_DIGIT>     ::= "0" … "9" | "a" … "f" | "A" … "F"
 <BIN_DIGIT>     ::= "0" | "1"
@@ -856,20 +984,21 @@ Keywords are reserved and cannot be used as identifiers.
 
 | Category    | Keywords                                                                                                    |
 |-------------|-------------------------------------------------------------------------------------------------------------|
-| Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup` `file` `error`                          |
+| Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup` `file` `error` `struct` `enum` `type`   |
 | Literals    | `true` `neutral` `false` `null`                                                                             |
 | Statements  | `output` `input` `fmt`                                                                                      |
-|             | `if` `elif` `else` `when` `is` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`                    |
-|             | `return` `swap` `flip` `prot` `use` `module`                                                               |
+|             | `if` `elif` `else` `switch` `is` `when` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`           |
+|             | `return` `swap` `flip` `prot` `use` `module` `blast`                                                       |
 |             | `with` `open` `as`                                                                                          |
 |             | `try` `except` `finally` `raise`                                                                            |
 |             | `decorator` `before` `after` `wrap` `on_error`                                                              |
+|             | `const` `assert` `unreachable` `escape`                                                                     |
 | Operators   | `and` `or` `not`                                                                                            |
-| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn` `file_exists`                                               |
+| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn` `file_exists` `scope` `len` `cap` `abs`                     |
 | Special     | `__body__` `__error__`                                                                                      |
 | Memory      | `mm` `gc` `arena` `pool` `stack` `heap` `static` `sweep` `ref` `gen` `inc` `region`                        |
-| Decorators  | `memo` `pure` `total` `inline` `noinline` `hot` `cold` `safe` `unsafe`                                     |
-| Future      | `blast` `pipe` `match` `assert` `unreachable` `move` `own` `free` `align` `const` `volatile`               |
+| Decorators  | `memo` `pure` `total` `inline` `noinline` `hot` `cold` `safe` `unsafe` `blast`                             |
+| Future      | `pipe` `match` `move` `own` `free` `align` `volatile`                                                      |
 
 ---
 

@@ -62,7 +62,41 @@ int y = 0           // will be mutated (compiler sees :y below)
 swap x y            // swap — self-evidently a mutation, no : needed
 ```
 
-### 3.2 Declaration Forms
+### 3.2 Scope Rules
+
+Rex has three scope levels:
+
+| Scope | Where declared | Prefix | Importable? |
+|-------|---------------|--------|-------------|
+| **Global** | Top-level, outside any protocol | none or `_` | `_`-prefixed = no |
+| **Local** | Inside a protocol body | none or `_` | never |
+| **Block** | Inside any block (if/for/while body) with `__` prefix | `__` | never |
+
+```rex
+int counter = 0             // global — visible everywhere
+int _private = 0            // global — not importable by other modules
+
+prot run():
+    int steps = 0           // local to run()
+    int _helper = 0         // local to run(), private naming convention
+
+    for i in 0..10:
+        int __temp = i * 2  // block-scoped — destroyed at end of for body
+        :steps = steps + __temp
+    // __temp no longer exists here
+```
+
+**`scope(var)` built-in** — returns the scope of a variable as `str`:
+- `"global"` — declared at top level
+- `"local"` — declared inside a protocol
+- `"block"` — declared with `__` prefix
+
+```rex
+output(scope(counter))      // "global"
+output(scope(steps))        // "local"
+```
+
+### 3.3 Declaration Forms
 
 ```rex
 // Immutable with value (true compile-time constant — may be inlined/folded)
@@ -104,23 +138,41 @@ Rules:
 
 ### 4.1 Primitive Types
 
-| Type    | Example              | Storage         | Notes                                       |
-|---------|----------------------|-----------------|---------------------------------------------|
-| `int`   | `int a = 5`          | 64-bit signed   | Decimal, hex `0xFF`, binary `0b1010`, octal `0o17` |
-| `float` | `float b = 1.5`      | 64-bit IEEE 754 | SSE2 registers                              |
-| `bool`  | `bool f = true`      | −1 / 0 / 1 signed | Tri-state: `true` (1), `neutral` (0), `false` (−1) |
-| `str`   | `str s = "Rex"`      | Heap pointer    | UTF-8; header `[cap][len][data]`            |
-| `char`  | `char c = 'R'`       | 8-bit unsigned  | Single UTF-8 byte; single-quoted literal    |
-| `byte`  | `byte b = 0xFF`      | 8-bit unsigned  | Raw binary; `output` prints numeric value  |
+| Type         | Example              | Default storage | Notes                                       |
+|--------------|----------------------|-----------------|---------------------------------------------|
+| `int`        | `int a = 5`          | 64-bit signed   | Unsized: compiler may choose ≤256-bit; user: `int[N]` |
+| `int[N]`     | `int[8] a = 127`     | N-bit signed    | N ∈ {8,16,32,64,128,256,512,1024}          |
+| `float`      | `float b = 1.5`      | 64-bit IEEE 754 | Unsized: compiler chooses; user: `float[N]` |
+| `float[N]`   | `float[32] b = 1.5`  | N-bit float     | N ∈ {32,64,128}                             |
+| `bool`       | `bool f = true`      | 8-bit signed    | Always 8-bit; tri-state: `true(1)`, `neutral(0)`, `false(−1)` |
+| `char`       | `char c = 'R'`       | 8-bit (default) | Sized: `char[8]`=ASCII, `char[16]`=UTF-16, `char[32]`=codepoint |
+| `byte`       | `byte b = 0xFF`      | 8-bit unsigned  | Always 8-bit; literal: `0xFF` or `"A"` (single-char string) |
+| `str`        | `str s = "Rex"`      | Heap pointer    | UTF-8; `str[N]` = max N-byte stack/inline buffer |
+
+**Sizing rules:**
+- Without `[N]`: compiler picks the smallest fitting size up to 256 bits.
+- With `[N]`: exact bit width; N must be a power of 2; user maximum is 1024.
+- `bool` and `byte` are always 8-bit and do not accept size parameters.
+- `str[N]` uses a stack-allocated buffer of N bytes; overflowing N falls back to heap.
+
+**Byte literals** — two equivalent forms:
+```rex
+byte a = 0xFF        // hex value
+byte b = "A"         // single-character string → its ASCII/UTF-8 byte value
+byte c = 65          // decimal
+```
 
 ### 4.2 Collection Types
 
-| Type         | Example              | Notes                                           |
-|--------------|----------------------|-------------------------------------------------|
-| `seq[T]`     | `seq[int] nums`      | Heap-allocated growable sequence; typed element |
-| `arr[T, N]`  | `arr[int, 8] buf`    | Stack-allocated fixed array; N is compile-time  |
-| `dict[T]`    | `dict[int] d`        | SipHash-2-4 map; keys always `str`              |
-| `tup[T...]`  | `tup[int, str] t`    | Fixed heterogeneous tuple; positional; immutable by default |
+| Type           | Example                  | Notes                                           |
+|----------------|--------------------------|-------------------------------------------------|
+| `seq[T]`       | `seq[int] nums`          | Heap-allocated growable sequence                |
+| `seq[T, N]`    | `seq[int, 64] buf`       | Pre-allocated with initial capacity N           |
+| `arr[T, N]`    | `arr[int, 8] buf`        | Stack-allocated fixed array; N is compile-time  |
+| `arr[N]`       | `arr[512] = [1,2,3]`     | Element type inferred from initializer          |
+| `dict[T]`      | `dict[int] d`            | SipHash-2-4 map; keys always `str`              |
+| `dict[T, N]`   | `dict[int, 128] d`       | Initial bucket count hint N                     |
+| `tup[T...]`    | `tup[int, str] t`        | Fixed heterogeneous tuple; positional; immutable by default |
 
 ### 4.3 `bool` — Signed Ternary Logic
 
@@ -192,13 +244,21 @@ bool b3 = bool(-3)      // any negative → false
 ### 4.4 Numeric Literals
 
 ```rex
-int a = 255         // decimal
-int b = 0xFF        // hex
-int c = 0b11111111  // binary
-int d = 0o377       // octal
+int a = 255             // decimal
+int b = 0xFF            // hex
+int c = 0b11111111      // binary
+int d = 0o377           // octal
 float f = 3.14
-float g = 1.0e-4    // scientific notation
+float g = 1.0e-4        // scientific notation
+
+// Underscore separator — any position except leading/trailing
+int million = 1_000_000
+int addr    = 0xFF_00_AA_BB
+int bits    = 0b1111_0000_1111_0000
+float big   = 9_999.999_9
 ```
+
+Underscores are stripped by the lexer; they carry no semantic meaning.
 
 ---
 
@@ -499,6 +559,281 @@ output(x.to_char())          // char with code 255
 
 ---
 
+## 4.12 Structs
+
+Named-field record types. Fields are **immutable by default**; use `:` sigil to mutate.
+Structs are **value types** — assigned by copy, stack-allocated unless explicitly heap-placed.
+
+```rex
+struct Point:
+    float x
+    float y
+
+struct Person:
+    str name
+    int age
+    bool active
+
+struct Rect:
+    Point top_left
+    Point bottom_right
+```
+
+**Construction** — all fields must be provided:
+
+```rex
+Point p = Point{x: 1.0, y: 2.0}
+Person alice = Person{name: "Alice", age: 30, active: true}
+```
+
+**Field access and mutation:**
+
+```rex
+output(p.x)              // 1.0
+output(alice.name)       // "Alice"
+
+:p.x = 3.0              // mutation — : required
+:alice.age = alice.age + 1
+```
+
+**Nested structs:**
+
+```rex
+Rect r = Rect{top_left: Point{x: 0.0, y: 0.0}, bottom_right: Point{x: 10.0, y: 5.0}}
+output(r.top_left.x)    // 0.0
+```
+
+**Rules:**
+- A struct can hold any type including other structs, `seq`, `str`, etc.
+- Fields cannot be functions — use protocols that take the struct as a parameter.
+- `null` can be assigned to any struct variable (see §4.16).
+- Structs are compared by value: `a == b` if all fields are equal.
+
+---
+
+## 4.13 Enums
+
+Typed integer constants grouped under a name. Default values start at 0 and increment.
+
+```rex
+enum Direction: north, south, east, west
+
+enum Status:
+    ok    = 0
+    warn  = 1
+    error = 2
+    fatal = 3
+
+enum Bit: off = 0, on = 1
+```
+
+**Access** — `EnumType.variant`:
+
+```rex
+Direction d = Direction.north
+Status s = Status.ok
+
+output(d)               // "north"
+output(int(s))          // 0
+```
+
+**In `switch`:**
+
+```rex
+switch d:
+    is Direction.north, Direction.south:
+        output("vertical")
+    is Direction.east, Direction.west:
+        output("horizontal")
+```
+
+**Rules:**
+- Enum values are `int` sub-types; can be cast to/from `int`
+- Explicit `= N` sets a value; subsequent values increment from N+1
+- Enums are always fully resolved at compile time
+- Two enum values of different types cannot be compared without a cast
+
+---
+
+## 4.14 Type Aliases
+
+Structural aliases — the underlying type is identical; no new type is created.
+
+```rex
+type Meters     = float
+type Name       = str
+type Matrix     = arr[float, 16]
+type IntSeq     = seq[int]
+type SmallInt   = int[16]
+```
+
+**Usage:**
+
+```rex
+Meters dist = 10.5
+Name user = "Rex"
+Matrix m = [1.0, 0.0, 0.0, ...]
+
+// Alias and original are fully interchangeable
+float d2 = dist         // OK — same underlying type
+```
+
+**Rules:**
+- A type alias can alias any type including sized types, structs, enums, collections
+- Aliases are resolved at compile time; no runtime overhead
+- Recursive aliases are a compile-time error
+
+---
+
+## 4.15 Generics
+
+Protocols can be parameterised by type using `[T, U, ...]` after the protocol name.
+Type parameters are resolved at each call site (monomorphisation).
+
+```rex
+prot map[T, U](seq[T] s, fn(T) -> U f) -> seq[U]:
+    seq[U] result = []
+    each item in s:
+        result.push(f(item))
+    return result
+
+prot first[T](seq[T] s) -> T:
+    if len(s) == 0:
+        raise "ValueError: empty sequence"
+    return s[0]
+
+prot zip[A, B](seq[A] a, seq[B] b) -> seq[tup[A, B]]:
+    int n = if len(a) < len(b): len(a) else: len(b)
+    seq[tup[A, B]] result = []
+    for i in 0..n:
+        result.push((a[i], b[i]))
+    return result
+```
+
+**Calling generic protocols:**
+
+```rex
+seq[int] nums = [1, 2, 3, 4]
+seq[str] strs = @map(nums, fn(int x) -> str: str(x))   // T=int, U=str inferred
+
+int first_num = @first(nums)                             // T=int inferred
+```
+
+**Rules:**
+- Type parameters are inferred from arguments — no explicit `[T]` at call sites
+- Up to 8 type parameters per protocol
+- Type parameters may appear in the parameter list, return type, and body
+- No constraints on type parameters (duck-typed at compile time)
+- User-defined decorators cannot be generic
+
+---
+
+## 4.16 Null
+
+Any **reference type** can hold `null`. Value types cannot.
+
+| Null-capable | Not null-capable |
+|-------------|-----------------|
+| `str`, `seq[T]`, `dict[T]`, `tup[T...]`, any `struct` | `int`, `float`, `bool`, `char`, `byte` |
+
+```rex
+str name = null
+seq[int] items = null
+
+// Check before use
+if name is null:
+    output("name is unset")
+else:
+    output("name: {name}")
+
+// Accessing null raises at runtime
+output(name)            // raise "NullError: dereferenced null str"
+```
+
+**Null propagation with `?` operator:**
+
+```rex
+str n = null
+str safe = n ?? "default"              // "default" if n is null
+str up   = n?.to_upper() ?? ""        // null-safe method call
+int length = if n is null: 0 else: len(n)  // safe len — len() is a function
+```
+
+- `x?.method()` — returns `null` if `x` is null instead of raising
+- `x ?? default` — returns `default` if `x` is null
+- `len(x)` is a built-in function, not a method; use `if x is null: 0 else: len(x)` for null-safe length
+
+**Rules:**
+- Null is not a type — it is a value assignable to any reference type
+- `null is null` is always `true`
+- `null == null` is `true`; `null == x` where x is non-null is `false`
+- The compiler warns (pass 3) when a null-capable variable is used without a null check
+
+---
+
+## 4.17 Constants
+
+`const` declares a compile-time constant — folded at emit, no runtime storage:
+
+```rex
+const MAX      = 1024
+const PI       = 3.14159265358979
+const PREFIX   = "rex_"
+const MASK     = 0xFF_00_FF_00
+```
+
+- The type is inferred from the value
+- `const` cannot be assigned to with `:`
+- Can be used anywhere a literal is valid: array sizes, loop bounds, switch cases
+- Expressions are allowed if all operands are themselves constants: `const DOUBLE_MAX = MAX * 2`
+
+---
+
+## 4.18 Assert and Unreachable
+
+```rex
+assert(x > 0)                       // raise "AssertionError: assertion failed at ..."
+assert(x > 0, "x must be positive") // raise "AssertionError: x must be positive"
+
+unreachable()                        // raise "UnreachableError: reached unreachable code"
+```
+
+`assert` and `unreachable` are compile-time hints as well as runtime checks.
+The compiler may use `unreachable()` to prove dead code and elide it.
+In `#blast` protocols, both are removed — use only when provably safe.
+
+---
+
+## 4.19 Variadic Protocols
+
+The last parameter of a protocol may be variadic using `...`:
+
+```rex
+prot log(str level, str... msgs):
+    each m in msgs:
+        output("[{level}] {m}")
+
+prot sum(int... nums) -> int:
+    int total = 0
+    each n in nums:
+        :total = total + n
+    return total
+```
+
+Inside the protocol, the variadic parameter is a `seq[T]`.
+
+```rex
+@log("INFO", "started", "ready", "listening")
+@sum(1, 2, 3, 4, 5)              // 15
+```
+
+**Rules:**
+- Only the last parameter may be variadic
+- A protocol cannot be both generic and variadic
+- `...` cannot be combined with `fn` literals
+
+---
+
 ## 5. Operators
 
 ### 5.1 Precedence (lowest to highest)
@@ -591,12 +926,31 @@ a + b -> @process()         // @process(a + b)
 ### 5.9 Hardware Features
 
 ```rex
-bool c = carry              // CPU carry flag after last arithmetic op → true or false
-bool ov = overflow          // CPU overflow flag → true or false
+bool c = carry              // CPU carry flag — valid after + - * ++ -- and shifts
+bool ov = overflow          // CPU overflow flag — valid after + - * ++ --
 int n = rand                // hardware entropy integer via rdrand
-bool b = true
-flip b                      // b = not b  (true→false, false→true, neutral→neutral)
 int h = hash s              // SipHash-2-4 of memory region s
+```
+
+**`carry`** is set by the CPU after: `+`, `-`, `*`, `++`, `--`, `<<`, `>>`.
+Undefined after: logical ops, bitwise-only ops, comparisons.
+
+**`overflow`** is set after: `+`, `-`, `*`, `++`, `--`.
+Undefined after all other operations.
+
+**`flip`** — boolean toggle. `flip b` is equivalent to `b = not b`:
+
+```rex
+bool b = true
+flip b              // b → false
+flip b              // b → true
+```
+
+`flip` raises `"TypeError: flip requires bool"` if the operand is not `bool`:
+
+```rex
+int x = 5
+flip x              // raise "TypeError: flip requires bool, got int"
 ```
 
 ### 5.10 Syscall Intercept
@@ -653,36 +1007,100 @@ else:
 Any number of `elif` clauses. `else` is optional. Conditions accept full
 expressions. Blocks are indentation-delimited.
 
-### 7.2 `when` / `is`
+### 7.2 `switch` / `is`
 
-Switch-like routing. Each `is` case matches the `when` expression linearly.
-Dense integer ranges compile to O(1) jump tables.
+Value dispatch — replaces the old `when`/`is`. Each `is` case matches the
+`switch` subject linearly; dense integer ranges compile to O(1) jump tables.
+Ranges are **exclusive** on the right (`1..5` matches 1, 2, 3, 4).
 
 ```rex
-when code:
+int code = 2
+
+switch code:
     is 1:
         output("one")
-    is 2:
-        output("two")
+    is 2..5:
+        output("two through four")
+    is 5:
+        output("five")
     else:
         output("other")
 ```
 
-### 7.3 `match`
-
-Structural pattern matching on types:
+Works on `int`, `float`, `str`, `bool`, `char`, enum values.
+`else` is the fallthrough/default case (must be last).
+No implicit fallthrough between cases — each case exits at its `<DEDENT>`.
 
 ```rex
-match x:
-    int:
-        output("integer")
-    float:
-        output("float")
-    str:
-        output("string")
+str status = "ok"
+
+switch status:
+    is "ok":
+        output("good")
+    is "warn":
+        output("warning")
+    else:
+        output("unknown: {status}")
+
+switch direction:
+    is Direction.north, Direction.south:
+        output("vertical")
+    is Direction.east, Direction.west:
+        output("horizontal")
 ```
 
-### 7.4 `pass`
+Multiple patterns per case: comma-separated on the `is` line.
+
+### 7.3 `when` — State Monitor
+
+`when` evaluates an expression and compares it to its **previous** evaluation.
+Returns a `bool` (tri-state):
+
+| Return | Meaning |
+|--------|---------|
+| `true` | Condition just became true (was `neutral`/false before) |
+| `false` | Condition just became false (was true before) |
+| `neutral` | Condition state has not changed since last check |
+
+```rex
+int x = 0
+
+// First evaluation — previous state is neutral, so:
+bool chg = when x > 0      // neutral → currently false → returns false
+
+:x = 5
+:chg = when x > 0          // was false, now true → returns true
+
+:chg = when x > 0          // was true, still true → returns neutral (no change)
+
+// Common pattern — trigger only on state transition
+while running:
+    if when x > 100:
+        output("x crossed 100")
+```
+
+`when` stores its last-seen truth value per call site (tracked by the compiler).
+Each unique `when expr` expression is an independent monitor.
+
+### 7.4 Inline `if` Expression
+
+`if` can appear as an expression on the right side of an assignment:
+
+```rex
+int x = if a > 0: 1 else: -1
+
+str label = if score >= 90: "A" elif score >= 80: "B" else: "C"
+
+output(if x == 0: "zero" else: "nonzero")
+```
+
+Rules:
+- All branches must return the same type.
+- `elif` chains are allowed.
+- `else` is required (all paths must produce a value).
+- The inline form cannot contain block statements — only single expressions.
+
+### 7.5 `pass`
 
 Zero-byte placeholder for an empty block (required; blocks cannot be empty):
 
@@ -897,7 +1315,44 @@ prot dot(int a, int b) -> int:
 | `#safe`     | Safety      | Compiler verifies: no raw syscalls or pointer arithmetic    |
 | `#unsafe`   | Safety      | Allows `$` syscalls and direct memory operations            |
 
-Decorators inside `#[...]` compose freely. Order does not matter.
+**Decorator ordering — right to left.** Inside `#[a, b, c]`, `c` is applied first (innermost),
+then `b`, then `a` (outermost). Execution order for `before:` and `after:` hooks:
+
+```
+a.before → b.before → c.before → body → c.after → b.after → a.after
+```
+
+```rex
+#[log("outer"), trace, memo]   // memo innermost, log outermost
+prot compute(int x) -> int:
+    return x * x
+// execution: log.before → trace.before → memo.before (check cache)
+//            → body (if cache miss)
+//            → memo.after (store result) → trace.after → log.after
+```
+
+**`#blast` decorator** — runs the protocol at the absolute hardware limit:
+- Auto-vectorizes all inner loops using SIMD (SSE2 / AVX2)
+- Maximum inlining; no bounds checks; no null checks
+- Cannot contain `try/except` or `raise`
+- The body must be provably terminating (`#total` implied)
+
+```rex
+#blast
+prot dot_product(seq[float] a, seq[float] b) -> float:
+    float acc = 0.0
+    for i in 0..len(a):
+        :acc = acc + a[i] * b[i]
+    return acc
+```
+
+`blast:` as a block statement applies the same hints to a single block:
+
+```rex
+blast:
+    for i in 0..1024:
+        :result[i] = a[i] * b[i]
+```
 
 #### User-defined decorators
 
@@ -1119,11 +1574,11 @@ except void operations that are explicitly mutating by design (marked **mut**).
 
 ### 10.1 Core — Size and Capacity
 
-| Method          | Returns | Notes                                                      |
-|-----------------|---------|------------------------------------------------------------|
-| `.len()`        | `int`   | Number of elements currently stored                        |
-| `.cap()`        | `int`   | Allocated capacity (elements before realloc)               |
-| `.is_empty()`   | `bool`  | `true` if `len()` == 0                                     |
+| Function / Method    | Returns | Notes                                                 |
+|----------------------|---------|-------------------------------------------------------|
+| `len(s)`             | `int`   | Number of elements currently stored                   |
+| `cap(s)`             | `int`   | Allocated capacity (elements before realloc)          |
+| `.is_empty()`        | `bool`  | `true` if `len(s)` == 0                               |
 | `.clear()` **mut** | `void` | Set length to 0; capacity unchanged                      |
 | `.reserve(n)` **mut** | `void` | Ensure capacity for at least `n` elements          |
 | `.shrink()` **mut** | `void` | Reduce capacity to exactly `len()`                    |
@@ -1299,7 +1754,7 @@ arr[byte, 16] key = [0] * 16           // zero-fill
 | `:a[i] = v`      | `void`  | Write at index `i`; in-place, no realloc                   |
 | `.first()`       | `T`     | First element                                              |
 | `.last()`        | `T`     | Last element                                               |
-| `.len()`         | `int`   | Always returns `N` (compile-time constant)                 |
+| `len(a)`         | `int`   | Always returns `N` (compile-time constant)                 |
 | `.is_empty()`    | `bool`  | Always `false` for `N > 0`                                 |
 
 ### 11.2 Search
@@ -1366,7 +1821,7 @@ Only valid for `arr[int, N]` and `arr[float, N]`.
 ```rex
 arr[int, 5] a = [4, 2, 7, 1, 9]
 
-output(a.len())          // 5
+output(len(a))           // 5
 output(a.first())        // 4
 output(a.last())         // 9
 output(a.contains(7))    // true
@@ -1411,7 +1866,7 @@ dict[str] config = {"host": "localhost", "port": "8080"}
 | `.get_or_set(key, default)`| `T`     | Inserts `default` if absent, then returns stored value      |
 | `.has(key)`                | `bool`  | `true` if key exists                                        |
 | `.is_empty()`              | `bool`  | `true` if no entries                                        |
-| `.len()`                   | `int`   | Number of key-value pairs                                   |
+| `len(d)`                   | `int`   | Number of key-value pairs                                   |
 
 Missing-key access via `d[key]` or `.get()` is a **runtime error**. Always
 guard with `.has()` or use `.get_or()`.
@@ -1475,7 +1930,7 @@ output(scores.has("carol"))            // true
 // Mutation
 :scores["dave"] = 88
 scores.remove("bob")
-output(scores.len())                   // 3
+output(len(scores))                    // 3
 
 // Keys / values
 seq[str] ks = scores.keys()           // ["alice", "carol", "dave"] (insertion order)
@@ -1515,8 +1970,8 @@ Reassignment uses the `:` sigil: `:s = s.upper()`.
 
 | Method            | Returns | Notes                                                   |
 |-------------------|---------|---------------------------------------------------------|
-| `.len()`          | `int`   | Byte count (UTF-8; may differ from character count)     |
-| `.is_empty()`     | `bool`  | `true` if `len()` == 0                                  |
+| `len(s)`          | `int`   | Byte count (UTF-8; may differ from character count)     |
+| `.is_empty()`     | `bool`  | `true` if `len(s)` == 0                                 |
 | `.char_count()`   | `int`   | Number of UTF-8 code points (≤ `len()`)                 |
 
 ### 13.3 Case and Whitespace
@@ -1607,7 +2062,82 @@ Reassignment uses the `:` sigil: `:s = s.upper()`.
 | `.is_upper()`        | `bool`  | All alphabetic characters are uppercase                 |
 | `.is_lower()`        | `bool`  | All alphabetic characters are lowercase                 |
 
-### 13.11 String Interpolation
+### 13.11 Escape Sequences
+
+| Sequence        | Byte(s)          | Meaning                              |
+|-----------------|------------------|--------------------------------------|
+| `\n`            | 0x0A             | Newline (LF)                         |
+| `\t`            | 0x09             | Horizontal tab                       |
+| `\r`            | 0x0D             | Carriage return                      |
+| `\\`            | 0x5C             | Literal backslash                    |
+| `\"`            | 0x22             | Literal double quote (in `"` strings)|
+| `\'`            | 0x27             | Literal single quote (in `'` chars)  |
+| `\0`            | 0x00             | Null byte                            |
+| `\a`            | 0x07             | Bell / alert                         |
+| `\b`            | 0x08             | Backspace                            |
+| `\f`            | 0x0C             | Form feed                            |
+| `\v`            | 0x0B             | Vertical tab                         |
+| `\e`            | 0x1B             | Escape (ESC, for ANSI sequences)     |
+| `\xNN`          | 0xNN             | Hex byte value (exactly 2 hex digits)|
+| `\uNNNN`        | U+NNNN (UTF-8)   | Unicode code point (4 hex digits)    |
+| `\UNNNNNNNN`    | U+NNNNNNNN (UTF-8)| Unicode code point (8 hex digits)  |
+| `\e{name}`      | user-defined     | Named user escape (see below)        |
+
+**User-defined escape sequences** — registered with the `escape` declaration:
+
+```rex
+escape \heart     = "♥"
+escape \star      = "★"
+escape \crlf      = "\r\n"
+escape \red       = "\e[31m"
+escape \reset     = "\e[0m"
+
+output("I \heart Rex")                     // I ♥ Rex
+output("\red Warning \reset — check log")  // ANSI-coloured output
+```
+
+`escape` declarations are file-scoped and evaluated at compile time.
+The name must follow `\` and consist of letters only.
+
+### 13.12 Multiline Strings and Docstrings
+
+Triple-quoted `"""..."""` preserves all whitespace and newlines literally:
+
+```rex
+str poem = """
+Roses are red,
+Violets are blue,
+Rex is fast,
+And zero-dep too.
+"""
+
+output(poem)    // prints all four lines with surrounding blank lines
+```
+
+**Docstrings** — a `"""..."""` that is not assigned to a variable is a **docstring**.
+It annotates the protocol or module that immediately follows it:
+
+```rex
+"""
+Computes the nth Fibonacci number iteratively.
+Parameters: n — non-negative integer
+Returns: int
+"""
+prot fib(int n) -> int:
+    if n <= 1: return n
+    int a = 0
+    int b = 1
+    repeat n - 1:
+        int __c = a + b
+        :a = b
+        :b = __c
+    return b
+```
+
+Docstrings are stored in the binary's debug metadata section and are accessible
+at compile time via the `#doc` built-in attribute.
+
+### 13.13 String Interpolation
 
 All Rex string literals support `{expr}` interpolation — no prefix needed:
 
@@ -1643,7 +2173,7 @@ output(s.replace("Rex", "World"))  // "  Hello, World!  "
 output(s.split(", "))             // ["  Hello", "Rex!  "]
 output(s.words())                  // ["Hello,", "Rex!"]
 output(s.trim().reverse())         // "!xeR ,olleH"
-output(s.trim().chars().len())     // 13
+output(len(s.trim().chars()))      // 13
 
 str greeting = "hi"
 output(greeting.pad_left(10, '.'))  // "........hi"
@@ -1682,7 +2212,7 @@ str s = pair.1          // "hello"
 | Syntax / Method     | Returns | Notes                                                        |
 |---------------------|---------|--------------------------------------------------------------|
 | `t.0`, `t.1`, …    | `T_i`   | Field access by zero-based index; type known at compile time |
-| `.len()`            | `int`   | Always the arity declared in the type (compile-time constant)|
+| `len(t)`            | `int`   | Always the arity declared in the type (compile-time constant)|
 | `.copy()`           | same    | Stack copy of the tuple                                      |
 
 ### 14.2 Conversion
@@ -1742,7 +2272,7 @@ tup[int, float, str] t = (10, 3.14, "Rex")
 output(t.0)                    // 10
 output(t.1)                    // 3.14
 output(t.2)                    // "Rex"
-output(t.len())                // 3
+output(len(t))                 // 3
 output(t.to_str())             // "(10, 3.14, "Rex")"
 
 // Destructuring
@@ -1765,31 +2295,64 @@ output(x == y)                 // true
 
 ## 15. I/O
 
-### 14.1 Output
+### 15.1 Output — `output()`
 
+`output()` works identically to Python's `print`. Writes to stdout.
+
+**Signatures:**
 ```rex
-output(x)           // print x followed by newline (type-dispatched)
+output()                              // empty line
+output(x)                             // print x then newline
+output(x, y, z)                       // print x y z separated by spaces then newline
+output(x, y, sep=", ")                // custom separator
+output(x, end="")                     // suppress trailing newline
+output(x, y, z, sep="", end="\n")    // full control
 ```
 
-`output` takes **one expression**. For multiple values on one line use string
-interpolation.
+```rex
+output("Hello, World!")               // Hello, World!
+output(1, 2, 3)                       // 1 2 3
+output("a", "b", "c", sep="-")       // a-b-c
+output("loading", end="...")          // loading... (no newline)
+output()                              // (blank line)
+output("x =", 42, sep="")            // x =42
+```
 
-### 14.2 Formatted String
+- Multiple arguments of any type are accepted — each is stringified
+- Default `sep` is `" "` (one space), default `end` is `"\n"`
+- `sep` and `end` are always keyword arguments — positional args are the values to print
+- `output()` with no value args prints only `end` (default: empty line)
+
+### 15.2 Formatted String — `fmt()`
 
 ```rex
 str label = fmt("score: {score:.1f} / 100")
 str hex = fmt("0x{addr:X}")
 ```
 
-`fmt` returns a `str` instead of printing.
+`fmt` returns a `str` instead of printing. Identical interpolation rules to string literals.
 
-### 14.3 Input
+### 15.3 Input — `input()`
 
 ```rex
 str name = input("Enter your name: ")
 output("Hello, {name}!")
 int age = int(input("Enter your age: "))
 ```
+
+`input(prompt)` prints the prompt (no trailing newline), reads one line from stdin, and
+returns it **without** the trailing newline.
+
+**EOF / Ctrl+D raises an error:**
+```rex
+try:
+    str line = input("Enter: ")
+    output("got: {line}")
+except "EOFError":
+    output("no input — stdin closed")
+```
+
+`input()` raises `"EOFError: stdin closed"` when it receives EOF (Ctrl+D on Linux/macOS).
 
 ### 15.4 File I/O — `with open`
 
@@ -2074,20 +2637,69 @@ prot run():
     output("running")
 ```
 
-### 17.6 Circular Imports
+### 17.6 Module-Level Statements (Init Code)
+
+A module may contain top-level statements outside of any protocol.
+These run **once**, in declaration order, the first time the module is `use`d:
+
+```rex
+// config.rex
+int MAX_RETRIES = 3
+str HOST = "localhost"
+int PORT = 8080
+
+output("config module loaded")    // runs at first `use config`
+
+prot connect() -> bool:
+    return PORT > 0
+```
+
+Rules:
+- Init statements run once; subsequent `use` does not re-run them.
+- Init order across modules follows `use` order in the importing file.
+- Init statements cannot `raise` — errors are compile-time errors.
+
+### 17.7 Memory Context and Modules
+
+By default, a module's `use mm` / `use gc` context is **scoped to the module**:
+
+```rex
+// heavy.rex
+use mm arena:
+    seq[int] cache = [1, 2, 3]   // allocated from module-local arena
+```
+
+To share a memory context globally across all modules:
+
+```rex
+use global mm arena              // module-local BUT flagged as global
+```
+
+Any module that uses `use global mm arena` shares the same arena with all
+other modules that also declared `use global mm arena`.
+A memory context without `global` is private to the module that declared it.
+
+### 17.8 Circular Imports
 
 Circular imports are a **compile-time error**. Pass 2 (Symbol Collection)
 detects cycles and reports all modules involved.
 
-```rex
-use math:               // import stdlib math module
-    float r = sqrt(2.0)
-
-use io:                 // import stdlib io module
-    // file, stdin, stdout operations
-```
-
 Modules resolve at compile time. No runtime dynamic loading.
+
+### 17.9 Module Re-Export
+
+A module **cannot** re-export names imported from another module.
+Names brought in via `use` are available only within the importing module,
+not to that module's own importers.
+
+```rex
+// utils.rex
+use math: sqrt         // imported into utils
+
+// main.rex
+use utils              // does NOT bring in sqrt — not re-exported
+float r = sqrt(4.0)   // error: sqrt not in scope
+```
 
 ---
 
@@ -2296,28 +2908,36 @@ an `#unsafe` protocol are a **compile-time error**.
 
 ### Reserved — Types
 `int`, `float`, `bool`, `str`, `char`, `byte`, `seq`, `arr`, `dict`, `tup`
+`struct`, `enum`, `type`
 
 ### Reserved — Literals
 `true`, `neutral`, `false`, `null`
 
 ### Reserved — Statements
 `output`, `input`, `fmt`
-`if`, `elif`, `else`, `when`, `is`, `match`
+`if`, `elif`, `else`, `switch`, `is`, `when`
 `for`, `each`, `while`, `repeat`, `stop`, `skip`, `pass`
-`return`, `prot`, `use`, `swap`, `push`, `pop`
+`return`, `prot`, `use`, `swap`
+`try`, `except`, `finally`, `raise`
+`with`, `open`, `as`
+`decorator`, `before`, `after`, `wrap`, `on_error`
+`module`, `escape`, `blast`
+`const`, `assert`, `unreachable`
 
 ### Reserved — Operators (word form)
 `and`, `or`, `not`, `in`, `abs`, `len`, `cap`, `typeof`, `hash`, `flip`, `rand`
-`carry`, `overflow`
+`carry`, `overflow`, `scope`
 
 ### Reserved — Memory
 `mm`, `gc`, `arena`, `pool`, `stack`, `heap`, `static`
 `sweep`, `ref`, `gen`, `inc`, `region`
 
+### Reserved — Special
+`__body__`, `__error__`
+
 ### Reserved — Future
-`blast`, `pipe`, `own`, `move`, `free`, `align`, `const`, `volatile`
-`assert`, `unreachable`, `clz`, `ceil`, `floor`, `fract`
-`sign`, `real`, `imag`, `conj`
+`pipe`, `own`, `move`, `free`, `align`, `volatile`
+`clz`, `sign`, `real`, `imag`, `conj`, `match`
 
 ---
 
