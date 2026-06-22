@@ -1319,21 +1319,80 @@ arithmetic. `#unsafe` lifts all restrictions. Default is `#safe`.
 
 ---
 
-## 19. Module System — `use`
+## 19. Module System — `module` / `use`
 
+**Defining an inline module:**
 ```rex
-use math:
-    float r = sqrt(2.0)
-    float s = sin(pi / 2.0)
+module geometry:
+    float pi = 3.14159265358979
 
-use io:
-    seq[byte] buf = read_stdin()
+    prot area(float r) -> float:
+        return pi * r * r
 
-use sys:
-    int pid = getpid()
+    prot _validate(float r):   // _prefix = private
+        if r < 0.0:
+            raise "ValueError: negative radius"
 ```
 
-Modules resolve at compile time. No runtime dynamic loading.
+**Importing:**
+```rex
+use geometry              // qualified access only: geometry.area(5.0)
+use geometry: area        // unqualified + qualified
+use geometry: area, pi    // multiple names
+use geometry: *           // all public names
+```
+
+**Using imported names:**
+```rex
+use math: sqrt, sin, cos
+
+float h = sqrt(9.0)           // unqualified
+float s = math.sin(0.0)       // qualified always works too
+```
+
+**File modules** — any `name.rex` in the same directory is automatically `module name`:
+```rex
+// utils.rex  →  module utils (automatic)
+prot clamp(int v, int lo, int hi) -> int:
+    if v < lo: return lo
+    if v > hi: return hi
+    return v
+```
+```rex
+// main.rex
+use utils: clamp
+int n = clamp(42, 0, 10)
+```
+
+**Module-scoped decorators:**
+```rex
+// logger.rex
+decorator log(str tag):
+    before: output("→ {tag}")
+    after:  output("← {tag}")
+```
+```rex
+use logger: log
+
+#log("fetch")
+prot fetch(str url) -> str:
+    return @http_get(url)
+
+#[hot, log("render")]
+prot render(str t) -> str:
+    return t
+```
+
+**Visibility rules:**
+- `_prefix` → private to the module; not importable
+- No `_prefix` → public; importable with `use`
+- Circular imports → compile-time error (detected in pass 2)
+
+**Rules:**
+- Modules resolve at compile time; no runtime dynamic loading
+- `use name: *` imports all public names into the current scope
+- Qualified call `module.name(args)` always works after any `use` form
+- A module cannot re-export another module's names
 
 ---
 
