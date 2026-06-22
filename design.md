@@ -860,7 +860,10 @@ caller-allocated stack buffer.
 ### 9.4 Decorators
 
 Decorators annotate a protocol with compiler directives. They use `#` and
-stack one per line directly above `prot`:
+stack one per line directly above `prot`. Rex supports both built-in
+decorators and user-defined custom decorators.
+
+#### Built-in decorators
 
 ```rex
 #memo
@@ -880,11 +883,6 @@ prot exit(int code):
     $(60, code)
 ```
 
-**Why `#` and not `@`?** `@` already means "call". `#` is unambiguous and
-reads clearly as an annotation.
-
-**Built-in decorators:**
-
 | Decorator   | Category    | Effect                                                      |
 |-------------|-------------|-------------------------------------------------------------|
 | `#memo`     | Algorithmic | Cache return value keyed on input; skip recomputation       |
@@ -899,86 +897,178 @@ reads clearly as an annotation.
 
 Decorators compose freely. Order does not matter.
 
-### 9.5 Error Handling — `result[T]`
+#### User-defined decorators
 
-Rex has no exceptions. Fallible protocols return `result[T]` — a built-in
-tagged type that is either `ok(value)` or `fail("message")`.
-
-#### Construction
-
-```rex
-result[int] r = ok(42)
-result[str] s = fail("file not found")
-```
-
-#### Checking
+Custom decorators are defined with the `decorator` keyword. They inject code
+`before` the protocol body, `after` it, or replace the entire call with a
+`wrap` block. The special token `__body__()` invokes the original protocol
+body inside `wrap`.
 
 ```rex
-when r:
-    is ok(v):   output(v)
-    is fail(m): output(m)
+// Simple before/after (no parameters)
+decorator trace:
+    before:
+        output("→ entering")
+    after:
+        output("← exiting")
 
-// boolean shorthand
-if r is ok:
-    output(r.unwrap())
-if r is fail:
-    output(r.msg)
+// Parameterized decorator
+decorator log(str tag):
+    before:
+        output("→ {tag}")
+    after:
+        output("← {tag}")
+
+// Wrap — replaces the call; __body__() runs original body
+decorator repeat(int n):
+    wrap:
+        for i in 0..n:
+            __body__()
+
+// Error hook — runs if an uncaught raise exits the protocol
+decorator guarded(str label):
+    before:
+        output("starting {label}")
+    on_error:
+        output("error in {label}: {__error__.msg}")
+    after:
+        output("done {label}")
 ```
 
-#### Methods
-
-| Method / Field   | Returns  | Notes                                              |
-|------------------|----------|----------------------------------------------------|
-| `.unwrap()`      | `T`      | Return inner value; exits program if `fail`        |
-| `.or(default)`   | `T`      | Return inner value or `default` if `fail`          |
-| `.is_ok`         | `bool`   | `true` if `ok` variant                             |
-| `.is_fail`       | `bool`   | `true` if `fail` variant                           |
-| `.msg`           | `str`    | Failure message; only valid on `fail` variant      |
-
-#### Propagation — `?` operator
-
-Inside a `result[T]` protocol, appending `?` to a `result`-typed expression
-unwraps the value if `ok`, or immediately returns the `fail` to the caller:
+Usage:
 
 ```rex
-prot safe_div(int a, int b) -> result[int]:
-    if b == 0:
-        return fail("division by zero")
-    return ok(a / b)
+#trace
+prot greet():
+    output("Hello")
 
-prot compute(int x) -> result[int]:
-    int d = @safe_div(x, 2)?     // propagates fail upward
-    int e = @safe_div(d, 3)?
-    return ok(e + 1)
+#log("compute")
+prot compute(int x) -> int:
+    return x * 2
 
-// call site
-result[int] r = @compute(12)
-when r:
-    is ok(v):   output(v)
-    is fail(m): output(m)
+#repeat(3)
+prot announce():
+    output("Rex!")
+
+#guarded("network")
+prot fetch():
+    raise "IOError: connection refused"
 ```
 
-`?` is only legal inside a protocol that itself returns `result[T]`. Using
-`?` in a void or plain-type protocol is a **compile-time error**.
+**Decorator rules:**
 
-#### Chaining
+- A decorator body may contain `before:`, `after:`, `wrap:`, and `on_error:`
+  blocks. All are optional; at least one is required.
+- `wrap:` is mutually exclusive with `before:`/`after:`. A decorator may
+  not declare both `wrap:` and `before:`/`after:`.
+- `__body__()` is only legal inside `wrap:`.
+- `__error__` is a built-in `error` object only accessible inside `on_error:`.
+  It has fields `.tag` (`str`) and `.msg` (`str`).
+- Decorator parameters are typed, type-first, same as protocol parameters.
+- A decorator defined inside a module is module-scoped; prefix with the
+  module name to use it externally (`#mymod.log("x")`).
+
+### 9.5 Error Handling — `try` / `except` / `finally` / `raise`
+
+Rex uses Python-style structured error handling. Errors are tagged string
+values; there is no class hierarchy or heap-allocated exception object.
+
+#### `raise` — signal an error
 
 ```rex
-prot read_positive(str path) -> result[int]:
-    result[str] raw = @read_file(path)?
-    result[int] n   = @parse_int(raw)?
-    if n <= 0:
-        return fail("expected positive integer")
-    return ok(n)
+raise "ValueError"
+raise "IOError: file not found"
+raise "TypeError: expected int, got str"
 ```
 
-#### Error type rules
+A `raise` carries a **tag** (the text before the first `:`) and an optional
+**message** (the text after). The tag is used for matching in `except`.
 
-- `ok(expr)` — `expr` must match the declared `T` in `result[T]`.
-- `fail(expr)` — `expr` must be `str`. Only string messages are allowed.
-- `result[T]` is a first-class type: it can be stored in variables, passed
-  as arguments, returned from protocols, and stored in containers.
-- `result[result[T]]` is **not** permitted — no nested results.
+#### `try` / `except` / `finally`
+
+```rex
+try:
+    int x = @parse_int(raw)
+    output(x)
+except "ValueError" as e:
+    output("bad value — {e.msg}")
+except "IOError":
+    output("I/O problem")
+except:
+    output("unexpected error")
+finally:
+    output("always runs, whether or not an error occurred")
+```
+
+- **`except "Tag" as e`** — catches errors whose tag matches exactly.
+  `e` is an `error` object with fields `.tag` (`str`) and `.msg` (`str`).
+- **`except "Tag"`** — catches by tag without binding the error object.
+- **`except:`** (bare) — catches any uncaught error; must be the last
+  `except` clause.
+- **`finally:`** — always executes: after normal completion, after a caught
+  error, and before re-raise propagation. Cannot contain `raise`.
+- Multiple `except` clauses are checked top-to-bottom; the first match wins.
+- If no `except` matches and there is no bare `except:`, the error propagates
+  to the next enclosing `try` block. If no handler exists, the program
+  terminates printing the tag and message to the output.
+
+#### The `error` object
+
+| Field   | Type  | Value                                          |
+|---------|-------|------------------------------------------------|
+| `.tag`  | `str` | Text before the first `:` in the raise string |
+| `.msg`  | `str` | Full raise string                              |
+| `.line` | `int` | Source line number of the `raise` statement   |
+
+#### Re-raising
+
+```rex
+try:
+    @risky()
+except "IOError" as e:
+    output("logging: {e.msg}")
+    raise e.msg          // propagate upward with same message
+```
+
+#### Nested try blocks
+
+```rex
+try:
+    try:
+        raise "Inner"
+    except "Inner":
+        raise "Outer"     // propagates to outer handler
+except "Outer" as e:
+    output(e.tag)         // prints: Outer
+```
+
+#### Full example
+
+```rex
+prot safe_open(str path) -> str:
+    if not file_exists(path):
+        raise "IOError: {path} does not exist"
+    with open(path, "r") as f:
+        return f.read()
+
+try:
+    str data = @safe_open("config.txt")
+    output(data)
+except "IOError" as e:
+    output("could not open file: {e.msg}")
+finally:
+    output("done")
+```
+
+#### Implementation model (assembly)
+
+- A fixed global handler stack in a reserved memory region holds
+  `(catch_addr, finally_addr)` pairs, one per active `try` block.
+- `raise` sets two global string pointers (`[error_tag]`, `[error_msg]`),
+  then pops the handler stack and jumps to `catch_addr`.
+- `finally` code is emitted unconditionally at the end of the try/except
+  chain and also along every path that exits the `try` block.
+- An empty handler stack on `raise` terminates the program.
 
 ### 9.6 Recursion
 
@@ -1861,6 +1951,117 @@ Rex `mm pool` is **~12× faster** than glibc for homogeneous allocations.
 ---
 
 ## 17. Module System
+
+Rex modules are the unit of namespace and code organisation. A module is
+either an **inline block** inside the current file or a **file module**
+(`name.rex` in the same directory). There is no package registry; all
+resolution is local and compile-time.
+
+### 17.1 Defining a Module
+
+#### Inline module
+
+```rex
+module math:
+    prot add(int a, int b) -> int:
+        return a + b
+
+    prot sub(int a, int b) -> int:
+        return a - b
+
+    // Private — prefix _ makes it invisible outside the module
+    prot _clamp(int x, int lo, int hi) -> int:
+        if x < lo: return lo
+        if x > hi: return hi
+        return x
+```
+
+#### File module
+
+Any `.rex` file in the same directory is automatically a module. The module
+name is the filename without extension.
+
+```
+project/
+    main.rex
+    math.rex        ← module math
+    io_utils.rex    ← module io_utils
+```
+
+No declaration is needed in the file itself — the filename determines the
+module name.
+
+### 17.2 Importing with `use`
+
+```rex
+use math                // all public names qualified: math.add(...)
+use math: add           // add imported unqualified: @add(...)
+use math: add, sub      // multiple selective imports
+use math: *             // all public names, unqualified
+```
+
+Qualified call (always works after any form of `use`):
+
+```rex
+int r = math.add(3, 4)
+```
+
+Unqualified call (only after `use math: add` or `use math: *`):
+
+```rex
+int s = @add(3, 4)
+```
+
+### 17.3 Visibility Rules
+
+| Name pattern     | Visible outside module? |
+|------------------|------------------------|
+| `prot name`      | Yes (public)           |
+| `prot _name`     | No (private)           |
+| `int global_var` | Yes (public)           |
+| `int _global`    | No (private)           |
+
+There are no `pub` / `private` keywords — underscore prefix is the sole
+visibility marker.
+
+### 17.4 Standard Library Modules
+
+| Module   | Contents                                              |
+|----------|-------------------------------------------------------|
+| `io`     | File open/read/write/close; stdin; buffered I/O       |
+| `os`     | Process exit, environment variables, command-line args|
+| `math`   | Trig, sqrt, pow, log, min, max, floor, ceil           |
+| `str`    | String search, split, trim, pad, replace, encode      |
+| `rand`   | Seeded PRNG, random int/float, shuffle                |
+| `time`   | Monotonic clock, sleep, timestamps                    |
+| `mem`    | Low-level memory copy, fill, compare                  |
+
+Standard library modules are resolved at compile time. No dynamic loading.
+
+### 17.5 Module-scoped Decorators
+
+A decorator defined inside a module is scoped to that module. To use it
+externally:
+
+```rex
+// in logger.rex
+module logger:
+    decorator log(str tag):
+        before: output("→ {tag}")
+        after:  output("← {tag}")
+
+// in main.rex
+use logger: log
+
+#log("main")
+prot run():
+    output("running")
+```
+
+### 17.6 Circular Imports
+
+Circular imports are a **compile-time error**. Pass 2 (Symbol Collection)
+detects cycles and reports all modules involved.
 
 ```rex
 use math:               // import stdlib math module

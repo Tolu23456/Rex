@@ -511,50 +511,119 @@ prot exit(int code):
 
 Decorators stack one per line and compose freely.
 
-### Error handling — `result[T]`
-
-Fallible protocols return `result[T]` instead of raising exceptions.
+### Custom decorators
 
 ```rex
-// define a fallible protocol
-prot safe_div(int a, int b) -> result[int]:
-    if b == 0:
-        return fail("division by zero")
-    return ok(a / b)
+// no parameters
+decorator trace:
+    before: output("→ entering")
+    after:  output("← exiting")
 
-// call and check
-result[int] r = @safe_div(10, 2)
-when r:
-    is ok(v):   output(v)       // prints 5
-    is fail(m): output(m)
+// parameterized
+decorator log(str tag):
+    before: output("→ {tag}")
+    after:  output("← {tag}")
 
-// ? propagates failure upward
-prot compute(int x) -> result[int]:
-    int d = @safe_div(x, 0)?   // returns fail to caller immediately
-    return ok(d + 1)
+// wrap — replaces the whole call; __body__() invokes original
+decorator repeat(int n):
+    wrap:
+        for i in 0..n:
+            __body__()
 
-// unwrap with fallback
-int val = @safe_div(10, 2).or(0)    // 5  (or 0 on fail)
-int val2 = @safe_div(10, 0).or(-1)  // -1
-
-// check variant
-result[int] r2 = @safe_div(4, 2)
-if r2 is ok:
-    output(r2.unwrap())     // 2
-if r2 is fail:
-    output(r2.msg)          // failure message string
+// on_error — runs if an uncaught raise exits the protocol
+decorator guarded(str label):
+    on_error: output("error in {label}: {__error__.msg}")
+    after:    output("done {label}")
 ```
 
-| Expression            | Type    | Meaning                                       |
-|-----------------------|---------|-----------------------------------------------|
-| `ok(expr)`            | `result[T]` | Success variant wrapping `expr`           |
-| `fail("msg")`         | `result[T]` | Failure variant with message string       |
-| `r.unwrap()`          | `T`     | Value or program exit if `fail`               |
-| `r.or(default)`       | `T`     | Value or `default` if `fail`                  |
-| `r.is_ok`             | `bool`  | `true` if ok variant                          |
-| `r.is_fail`           | `bool`  | `true` if fail variant                        |
-| `r.msg`               | `str`   | Failure message (only valid on `fail`)        |
-| `expr?`               | `T`     | Propagate fail upward; unwrap if ok           |
+```rex
+#trace
+prot greet():
+    output("Hello")
+
+#log("net")
+prot fetch(str url) -> str:
+    return @http_get(url)
+
+#repeat(3)
+prot tick():
+    output("tick")
+
+#guarded("upload")
+prot upload(str path):
+    raise "IOError: disk full"
+```
+
+Decorator blocks available: `before:`, `after:`, `wrap:`, `on_error:`.
+`wrap:` is mutually exclusive with `before:`/`after:`.
+`__body__()` is only valid inside `wrap:`.
+`__error__` (fields `.tag`, `.msg`) is only valid inside `on_error:`.
+
+### Error handling — `try` / `except` / `finally` / `raise`
+
+```rex
+// raise an error
+raise "ValueError"
+raise "IOError: file not found"
+
+// basic try/except
+try:
+    int x = @parse_int(raw)
+    output(x)
+except "ValueError" as e:
+    output("bad value: {e.msg}")
+except "IOError":
+    output("I/O problem")
+except:
+    output("unexpected error")
+finally:
+    output("always runs")
+```
+
+The `error` object bound in `except "Tag" as e`:
+
+| Field   | Type  | Value                                      |
+|---------|-------|--------------------------------------------|
+| `e.tag` | `str` | Text before the first `:` in raise string  |
+| `e.msg` | `str` | Full raise string                          |
+| `e.line`| `int` | Source line of the `raise` statement       |
+
+```rex
+// re-raise
+try:
+    @risky()
+except "IOError" as e:
+    output("logged: {e.msg}")
+    raise e.msg             // propagate upward
+
+// nested try
+try:
+    try:
+        raise "Inner"
+    except "Inner":
+        raise "Outer"
+except "Outer" as e:
+    output(e.tag)           // Outer
+
+// full example with file I/O
+prot safe_open(str path) -> str:
+    if not file_exists(path):
+        raise "IOError: {path} not found"
+    with open(path, "r") as f:
+        return f.read()
+
+try:
+    str data = @safe_open("config.txt")
+    output(data)
+except "IOError" as e:
+    output("could not read config: {e.msg}")
+finally:
+    output("done")
+```
+
+`finally:` always runs. It may not contain `raise`. Bare `except:` must be
+the last clause. Unmatched errors propagate to the enclosing `try`; if no
+handler exists the program terminates with the error message.
 
 ---
 

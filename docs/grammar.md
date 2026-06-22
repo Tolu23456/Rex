@@ -344,63 +344,117 @@ Empty `param_list` declares a zero-parameter protocol.
 Multi-value return uses a parenthesised `return_type`; values come back in
 `rax`+`rdx` (2 values) or a caller-allocated stack buffer (3+).
 
-### 10.1 `result[T]` — Error Handling
+### 10.1 Error Handling — `try` / `except` / `finally` / `raise`
 
 ```ebnf
-result_type     ::= "result" "[" type_expr "]"
+try_stmt        ::= "try" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+                    { except_clause }
+                    [ bare_except ]
+                    [ finally_clause ]
 
-result_ok       ::= "ok" "(" expr ")"
+except_clause   ::= "except" <STR_LIT> [ "as" <IDENT> ] ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
 
-result_fail     ::= "fail" "(" expr ")"
+bare_except     ::= "except" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
 
-propagate_expr  ::= expr "?"
+finally_clause  ::= "finally" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+
+raise_stmt      ::= "raise" expr <NEWLINE>
 ```
 
-`result[T]` is a built-in tagged type. It has two variants:
+- At least one `except` clause or a `finally` clause must follow `try:`.
+- `bare_except` (no tag) must be the last `except` clause.
+- `finally` executes unconditionally and may not contain `raise`.
+- Multiple `except` clauses are checked top-to-bottom; the first match wins.
 
-| Variant    | Constructor   | Meaning                            |
-|------------|---------------|------------------------------------|
-| `ok`       | `ok(expr)`    | Success — carries a value of type `T` |
-| `fail`     | `fail(expr)`  | Failure — carries a `str` message  |
-
-**Methods on `result[T]`:**
-
-| Method / Field | Type   | Description                                        |
-|----------------|--------|----------------------------------------------------|
-| `.unwrap()`    | `T`    | Return inner value; exits program if `fail`        |
-| `.or(default)` | `T`    | Return inner value or `default` if `fail`          |
-| `.is_ok`       | `bool` | `true` if `ok` variant                             |
-| `.is_fail`     | `bool` | `true` if `fail` variant                           |
-| `.msg`         | `str`  | Failure message; only valid on `fail`              |
-
-**`?` propagation operator:**
-
-Inside a protocol returning `result[T]`, the postfix `?` operator applied to
-a `result`-typed expression:
-- If the result is `ok` — evaluates to the unwrapped value of type `T`.
-- If the result is `fail` — immediately returns the `fail` to the caller.
-
-`?` on a non-`result` expression is a compile-time error. Using `?` inside a
-void or non-`result` protocol is a compile-time error.
-
-**Checking variants:**
+**`raise` expression:** any `str` expression. The text before the first `:`
+is the **error tag**; everything including and after `:` is the **message**.
 
 ```ebnf
-is_ok_expr      ::= expr "is" "ok"
-is_fail_expr    ::= expr "is" "fail"
-when_result     ::= "when" expr ":" <NEWLINE>
-                    <INDENT>
-                    "is" "ok" "(" <IDENT> ")" ":" <NEWLINE>
-                        <INDENT> { statement } <DEDENT>
-                    "is" "fail" "(" <IDENT> ")" ":" <NEWLINE>
-                        <INDENT> { statement } <DEDENT>
-                    <DEDENT>
+raise_stmt      ::= "raise" expr <NEWLINE>
+                  | "raise" <STR_LIT> <NEWLINE>
 ```
 
-**Type rules:**
-- `ok(expr)` — `expr` must be type `T` matching the declared `result[T]`.
-- `fail(expr)` — `expr` must be `str`.
-- `result[result[T]]` — **compile-time error** (no nesting).
+**The `error` object** (bound via `as <IDENT>` in `except`):
+
+| Field    | Type  | Value                                          |
+|----------|-------|------------------------------------------------|
+| `.tag`   | `str` | Text before first `:` in the raise string      |
+| `.msg`   | `str` | Full raise string                              |
+| `.line`  | `int` | Source line number of the `raise` statement   |
+
+### 10.2 User-defined Decorators
+
+```ebnf
+decorator_def   ::= "decorator" <IDENT> [ "(" param_list ")" ] ":" <NEWLINE>
+                    <INDENT> { decorator_block } <DEDENT>
+
+decorator_block ::= before_block
+                  | after_block
+                  | wrap_block
+                  | on_error_block
+
+before_block    ::= "before" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+
+after_block     ::= "after" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+
+wrap_block      ::= "wrap" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+
+on_error_block  ::= "on_error" ":" <NEWLINE>
+                    <INDENT> { statement } <DEDENT>
+```
+
+`__body__()` — special call token, legal only inside `wrap:`.
+Invokes the original protocol body in place.
+
+`__error__` — special object, legal only inside `on_error:`.
+Fields: `.tag` (`str`), `.msg` (`str`).
+
+**Mutual exclusion:** `wrap:` may not appear alongside `before:` or `after:`.
+
+**Usage:**
+
+```ebnf
+decorator       ::= "#" <IDENT> [ "(" arg_list ")" ] <NEWLINE>
+```
+
+A built-in or user-defined decorator name follows `#`. User-defined
+decorators from a module use `#module.name(args)` syntax.
+
+### 10.3 Module System
+
+```ebnf
+module_def      ::= "module" <IDENT> ":" <NEWLINE>
+                    <INDENT> { top_level_item } <DEDENT>
+
+top_level_item  ::= prot_def
+                  | decorator_def
+                  | declaration
+
+use_stmt        ::= "use" module_ref [ ":" import_list ] <NEWLINE>
+
+module_ref      ::= <IDENT> { "." <IDENT> }
+
+import_list     ::= import_item { "," import_item }
+                  | "*"
+
+import_item     ::= <IDENT>
+```
+
+**Visibility:** names starting with `_` are private to the module.
+All other names are public and importable.
+
+**Qualified access:** after any `use mod`, `mod.name(args)` is always valid.
+
+**Unqualified access:** only after `use mod: name` or `use mod: *`.
+
+**Circular imports:** compile-time error, detected in pass 2.
 
 ---
 
@@ -794,14 +848,17 @@ Keywords are reserved and cannot be used as identifiers.
 
 | Category    | Keywords                                                                                                    |
 |-------------|-------------------------------------------------------------------------------------------------------------|
-| Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup` `result` `file`                         |
+| Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup` `file` `error`                          |
 | Literals    | `true` `neutral` `false` `null`                                                                             |
 | Statements  | `output` `input` `fmt`                                                                                      |
 |             | `if` `elif` `else` `when` `is` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`                    |
-|             | `return` `swap` `flip` `prot` `use`                                                                         |
+|             | `return` `swap` `flip` `prot` `use` `module`                                                               |
 |             | `with` `open` `as`                                                                                          |
+|             | `try` `except` `finally` `raise`                                                                            |
+|             | `decorator` `before` `after` `wrap` `on_error`                                                              |
 | Operators   | `and` `or` `not`                                                                                            |
-| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn` `file_exists` `ok` `fail`                                   |
+| Expressions | `typeof` `rand` `carry` `overflow` `hash` `fn` `file_exists`                                               |
+| Special     | `__body__` `__error__`                                                                                      |
 | Memory      | `mm` `gc` `arena` `pool` `stack` `heap` `static` `sweep` `ref` `gen` `inc` `region`                        |
 | Decorators  | `memo` `pure` `total` `inline` `noinline` `hot` `cold` `safe` `unsafe`                                     |
 | Future      | `blast` `pipe` `match` `assert` `unreachable` `move` `own` `free` `align` `const` `volatile`               |
@@ -964,9 +1021,21 @@ the EBNF alone:
     the full `proto_table` and `var_table` headers before any IR is emitted.
     Calling a protocol defined later in the file is legal. Mutual recursion
     requires no pre-declaration stubs.
-12. **`result[T]` propagation (`?`)**: The `?` operator is only legal inside a
-    protocol whose declared return type is `result[T]`. Using `?` in a void or
-    plain-type protocol is a compile-time error.
-13. **`result` nesting**: `result[result[T]]` is a compile-time error.
-14. **`ok` / `fail` type**: `ok(expr)` requires `expr` to match `T` in the
-    surrounding `result[T]` context. `fail(expr)` requires `expr` to be `str`.
+12. **`try`/`except` structure**: At least one `except` clause or a `finally`
+    clause must follow `try:`. `bare_except` (no tag) must be the last clause.
+    `finally:` may not contain `raise`.
+13. **`raise` type**: The expression following `raise` must be `str`.
+14. **`__body__()` scope**: Only legal inside a `wrap:` block of a
+    `decorator` definition. Use elsewhere is a compile-time error.
+15. **`__error__` scope**: Only legal inside an `on_error:` block of a
+    `decorator` definition. Use elsewhere is a compile-time error.
+16. **`wrap` exclusivity**: A `decorator` body may not contain both `wrap:`
+    and `before:`/`after:`.
+17. **Module visibility**: Names starting with `_` inside a `module` block
+    are private; all others are public. A private name accessed outside
+    its module is a compile-time error.
+18. **Circular imports**: `use` chains that form a cycle are a compile-time
+    error detected in pass 2.
+19. **`decorator` application**: A decorator must be defined (or imported)
+    before it is applied with `#`. Applying an undefined decorator name is
+    a compile-time error.
