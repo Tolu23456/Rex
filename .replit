@@ -1,4 +1,4 @@
-modules = ["bash"]
+modules = ["lua-5.2", "bash"]
 [agent]
 expertMode = true
 
