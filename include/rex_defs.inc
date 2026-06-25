@@ -30,10 +30,13 @@
 %define RT_SIP_OFFSET       2485
 %define RT_ALC_OFFSET       3509
 %define RT_PRQ_OFFSET       7605
-%define CODE_START          8629
+%define RT_STR_OFFSET       8629
+%define RT_STR_BOOL_OFFSET  (RT_STR_OFFSET + 160)  ; rt_str_bool_blob fixed at byte 160
+%define RT_INP_OFFSET       8885
+%define CODE_START          9397
 
-; JMP rel32 value = CODE_START - (RT_JMP_OFFSET + 5) = 8629 - 181 = 8448
-%define RT_TOTAL_SIZE       8448
+; JMP rel32 = CODE_START - (RT_JMP_OFFSET + 5) = 9397 - 181 = 9216
+%define RT_TOTAL_SIZE       9216
 
 ; Runtime blob sizes
 %define RT_PRI_SIZE         512
@@ -44,6 +47,8 @@
 %define RT_SIP_SIZE         1024
 %define RT_ALC_SIZE         4096
 %define RT_PRQ_SIZE         1024
+%define RT_STR_SIZE         256
+%define RT_INP_SIZE         512
 
 ; Dict entry points inside rt_prq_blob
 %define RT_DICT_NEW_OFFSET  7606
@@ -52,6 +57,22 @@
 
 ; Memo cache pointer array (just above var storage)
 %define MEMO_PTR_BASE       0x445000
+
+; ----------------------------------------------------------------
+; Static runtime scratch areas (within mapped region)
+; Between var table end (0x444000) and memo cache (0x445000):
+;   str ring buffer: 8 slots × 32 bytes = 256 bytes at 0x444000
+;   str ring index : 1 byte at 0x444100
+;   input line buf : 4096 bytes at 0x444200 - 0x445200
+; Extended by MEM_EXTRA to cover all scratch areas.
+; ----------------------------------------------------------------
+%define STR_RING_BASE       0x444000   ; 256 bytes (8 × 32-byte slots)
+%define STR_RING_IDX        0x444100   ; 1 byte: ring slot index (mod 8)
+%define INPUT_BUF_BASE      0x446000   ; 4096-byte input line buffer
+%define INPUT_BUF_MAX       4095       ; max bytes to read
+
+; Extra bytes added to p_memsz beyond p_filesz to cover scratch areas
+%define MEM_EXTRA           0x48000
 
 ; ----------------------------------------------------------------
 ; Output buffer size
@@ -216,6 +237,21 @@
 ; String / char literals (tok_int holds VA of string data in code stream)
 %define TOK_STR_LIT         96
 %define TOK_CHAR_LIT        97
+
+; Switch statement (design.md §7.2 — value dispatch, replaces old when/is)
+%define TOK_SWITCH          100
+
+; Raise / try / except / finally (design.md §9.5)
+%define TOK_RAISE           101
+%define TOK_TRY             102
+%define TOK_EXCEPT          103
+%define TOK_FINALLY         104
+
+; Flip keyword (in-place bool negation)
+%define TOK_FLIP            105
+
+; Legacy: unknown (random bool via rdrand) — kept for dead-code path in parse_factor
+%define TOK_UNKNOWN         99
 
 ; ----------------------------------------------------------------
 ; ELF constants

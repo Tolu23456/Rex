@@ -84,6 +84,9 @@ kwds:
     db  2, "or",          TOK_OR
     db  3, "not",         TOK_NOT
     db  3, "bin",         TOK_BIN
+    db  6, "switch",      TOK_SWITCH
+    db  5, "raise",       TOK_RAISE
+    db  4, "flip",        TOK_FLIP
     db  0                               ; sentinel: len=0 → end of table
 
 section .text
@@ -121,7 +124,7 @@ lex_next:
     dec     qword [pending_dedents]
     mov     dword [cur_tok], TOK_DEDENT
     mov     qword [cur_tok_val], 0
-    movzx   eax, dword [cur_tok]
+    mov     eax, [cur_tok]
     pop     r13
     pop     r12
     pop     rbx
@@ -181,7 +184,7 @@ lex_next:
     mov     dword [cur_tok], TOK_NEWLINE
     mov     qword [cur_tok_val], 0
     mov     byte  [last_was_newline], 1
-    movzx   eax, dword [cur_tok]
+    mov     eax, [cur_tok]
     pop     r13
     pop     r12
     pop     rbx
@@ -250,7 +253,7 @@ lex_next:
     dec     qword [indent_sp]
     mov     dword [cur_tok], TOK_DEDENT
     mov     qword [cur_tok_val], 0
-    movzx   eax, dword [cur_tok]
+    mov     eax, [cur_tok]
     pop     r13
     pop     r12
     pop     rbx
@@ -259,14 +262,14 @@ lex_next:
 .real_eof:
     mov     dword [cur_tok], TOK_EOF
     mov     qword [cur_tok_val], 0
-    movzx   eax, dword [cur_tok]
+    mov     eax, [cur_tok]
     pop     r13
     pop     r12
     pop     rbx
     ret
 
 .done:
-    movzx   eax, dword [cur_tok]
+    mov     eax, [cur_tok]
     pop     r13
     pop     r12
     pop     rbx
@@ -358,7 +361,7 @@ lex_next:
 .do_emit_dedent:
     mov     dword [cur_tok], TOK_DEDENT
     mov     qword [cur_tok_val], 0
-    movzx   eax, dword [cur_tok]
+    mov     eax, [cur_tok]
     pop     r13
     pop     r12
     pop     rbx
@@ -372,7 +375,7 @@ lex_next:
     mov     byte [at_line_start], 0
     mov     dword [cur_tok], TOK_INDENT
     mov     qword [cur_tok_val], 0
-    movzx   eax, dword [cur_tok]
+    mov     eax, [cur_tok]
     pop     r13
     pop     r12
     pop     rbx
@@ -843,7 +846,7 @@ scan_string:
     jne     .triple_char
     cmp     dl, '"'
     jne     .triple_char
-    cmp     sl, '"'
+    cmp     sil, '"'
     jne     .triple_char
     add     r12, 3
     jmp     .str_done
@@ -866,7 +869,7 @@ scan_string:
     jz      .str_done
     cmp     al, '"'
     je      .str_end
-    cmp     al, '\\'
+    cmp     al, 0x5C            ; backslash
     jne     .str_char
     ; escape sequence
     inc     r12
@@ -875,7 +878,7 @@ scan_string:
     je      .esc_n
     cmp     al, 't'
     je      .esc_t
-    cmp     al, '\\'
+    cmp     al, 0x5C            ; backslash
     je      .esc_bs
     cmp     al, '"'
     je      .esc_quote
@@ -887,7 +890,7 @@ scan_string:
     mov     al, 0x09
     jmp     .str_char
 .esc_bs:
-    mov     al, '\\'
+    mov     al, 0x5C            ; backslash
     jmp     .str_char
 .esc_quote:
     mov     al, '"'
@@ -926,7 +929,7 @@ scan_char_lit:
     mov     r8, [src_pos]
     inc     r8                  ; skip opening '
     movzx   eax, byte [rbx + r8]
-    cmp     al, '\\'
+    cmp     al, 0x5C            ; backslash
     jne     .char_plain
     inc     r8
     movzx   eax, byte [rbx + r8]
@@ -947,7 +950,7 @@ scan_char_lit:
     inc     r8
 .char_no_skip_close:
     mov     [src_pos], r8
-    movzx   eax, eax
+    movzx   eax, al
     mov     qword [cur_tok_val], rax
     mov     dword [cur_tok], TOK_CHAR_LIT
     pop     rbx

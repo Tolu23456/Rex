@@ -6,7 +6,7 @@ bits 64
 %include "rex_defs.inc"
 
 ; ---- exports ----
-global emit_b, emit_d, emit_q, emit_blob
+global emit_b, emit_d, emit_q, emit_blob, emit_blob_v2
 global var_add, var_find, get_var_va
 global proto_add, proto_find
 global codegen_init, codegen_finish
@@ -68,10 +68,16 @@ global codegen_emit_clock_ms
 global codegen_emit_mov_rax_imm32
 global codegen_emit_mov_rdi_var
 global codegen_get_out_idx
+global codegen_emit_call_rt_str, codegen_emit_call_rt_str_bool
+global codegen_emit_call_rt_inp
+global codegen_emit_int_to_bool
+global codegen_emit_trunc_byte
+global codegen_emit_xor_rdi_rdi
 
 ; ---- externs ----
 extern rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
 extern rt_prc_data, rt_sip_data, rt_alc_data, rt_prq_data
+extern rt_str_data, rt_inp_data
 
 ; ============================================================
 ; BSS — compiler state
@@ -1103,16 +1109,12 @@ codegen_emit_call_rt_err:
 ; rdi = type code
 codegen_output_rax:
     push    rdi
-    mov     rdi, [cur_type]
     movzx   edi, byte [cur_type]
-    call    .dispatch
+    call    codegen_output_typed        ; rdi = type already loaded
     pop     rdi
     ret
 
 codegen_output_typed:
-    ; rdi = type (already set by caller)
-    ; fall through
-.dispatch:
     push    rdi
     call    codegen_emit_mov_rdi_rax    ; emit: mov rdi, rax
     pop     rdi
@@ -1809,15 +1811,23 @@ codegen_emit_call_prot:
 ; ============================================================
 ; Sequence operations
 ; ============================================================
+; Data tables used by codegen_emit_seq_alloc (placed before function to keep
+; them in the same local-label scope)
+seq_alloc_code:
+    db 0xbf, 0x50, 0x00, 0x00, 0x00   ; mov edi, 80
+seq_setup_code:
+    db 0x48, 0xc7, 0x00, 0x08, 0x00, 0x00, 0x00        ; mov qword [rax], 8
+    db 0x48, 0xc7, 0x40, 0x08, 0x00, 0x00, 0x00, 0x00  ; mov qword [rax+8], 0
+
 codegen_emit_seq_alloc:   ; rdi = var_va
     push    rbx
     push    r12
     mov     r12, rdi
 
-    ; emit: mov edi, 80; call rt_alc; setup header; store ptr
+    ; emit: mov edi, 80 (request 80-byte block for sequence header+data)
     push    rsi
     push    rcx
-    lea     rsi, [rel .alloc_code]
+    lea     rsi, [rel seq_alloc_code]
     mov     edx, 5
     call    emit_blob_v2
     pop     rcx
@@ -1826,10 +1836,10 @@ codegen_emit_seq_alloc:   ; rdi = var_va
     ; call rt_alc
     call    codegen_emit_call_rt_pri_via_alc
 
-    ; setup: mov qword [rax], 8; mov qword [rax+8], 0; mov [var_va], rax
+    ; setup: mov qword [rax], 8; mov qword [rax+8], 0
     push    rsi
     push    rcx
-    lea     rsi, [rel .setup_code]
+    lea     rsi, [rel seq_setup_code]
     mov     edx, 15
     call    emit_blob_v2
     pop     rcx
@@ -1846,12 +1856,6 @@ codegen_emit_seq_alloc:   ; rdi = var_va
 codegen_emit_call_rt_pri_via_alc:
     mov     rdi, LOAD_BASE + RT_ALC_OFFSET
     jmp     emit_call_abs
-
-.alloc_code:
-    db 0xbf, 0x50, 0x00, 0x00, 0x00   ; mov edi, 80
-.setup_code:
-    db 0x48, 0xc7, 0x00, 0x08, 0x00, 0x00, 0x00   ; mov qword [rax], 8
-    db 0x48, 0xc7, 0x40, 0x08, 0x00, 0x00, 0x00, 0x00  ; mov qword [rax+8], 0
 
 codegen_emit_seq_push:  ; rdi = var_va
     ; Simplified push: load ptr, append value, inc len
@@ -2139,6 +2143,70 @@ codegen_emit_dict_get_raw:
     jmp     emit_call_abs
 
 ; ============================================================
+; str / bool / input emit helpers (design.md §3.2, §4.7, §15.3)
+; ============================================================
+
+codegen_emit_call_rt_str:
+    ; Emit: call rt_str_blob  (int64 → decimal string)
+    mov     rdi, LOAD_BASE + RT_STR_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_call_rt_str_bool:
+    ; Emit: call rt_str_bool_blob  (bool → "true"/"neutral"/"false")
+    mov     rdi, LOAD_BASE + RT_STR_BOOL_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_call_rt_inp:
+    ; Emit: call rt_inp_blob  (read line from stdin)
+    mov     rdi, LOAD_BASE + RT_INP_OFFSET
+    jmp     emit_call_abs
+
+; codegen_emit_int_to_bool: rax ∈ ℤ → rax ∈ {-1, 0, 1}
+; test rax,rax / setg cl / sets al / neg al / or al,cl / movsx rax,al
+codegen_emit_int_to_bool:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .itb_code]
+    mov     edx, 17
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.itb_code:
+    db 0x48, 0x85, 0xC0           ; test rax, rax
+    db 0x0F, 0x9F, 0xC1           ; setg cl   (1 if rax > 0)
+    db 0x0F, 0x98, 0xC0           ; sets al   (1 if rax < 0)
+    db 0xF6, 0xD8                 ; neg al    (0xFF if negative)
+    db 0x08, 0xC8                 ; or  al, cl
+    db 0x48, 0x0F, 0xBE, 0xC0    ; movsx rax, al
+
+; codegen_emit_trunc_byte: rax → zero-extend al to rax (char/byte cast)
+codegen_emit_trunc_byte:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .tb_code]
+    mov     edx, 4
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.tb_code:
+    db 0x48, 0x0F, 0xB6, 0xC0    ; movzx rax, al
+
+; codegen_emit_xor_rdi_rdi: emit xor rdi, rdi  (set rdi = 0 / null prompt)
+codegen_emit_xor_rdi_rdi:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .xdi_code]
+    mov     edx, 3
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.xdi_code:
+    db 0x48, 0x31, 0xFF           ; xor rdi, rdi
+
+; ============================================================
 ; codegen_finish: patches ELF header with final sizes
 ; rdi = output file fd
 ; ============================================================
@@ -2154,8 +2222,8 @@ codegen_finish:
     add     rax, CODE_START
     mov     [elf_filesz_patch], rax
 
-    ; patch p_memsz = p_filesz + 0x46000
-    add     rax, 0x46000
+    ; patch p_memsz = p_filesz + MEM_EXTRA (covers var storage + scratch areas)
+    add     rax, MEM_EXTRA
     mov     [elf_memsz_patch], rax
 
     pop     r14
@@ -2204,6 +2272,8 @@ codegen_write_runtime:
     write_blob rt_sip_data, RT_SIP_SIZE
     write_blob rt_alc_data, RT_ALC_SIZE
     write_blob rt_prq_data, RT_PRQ_SIZE
+    write_blob rt_str_data, RT_STR_SIZE
+    write_blob rt_inp_data, RT_INP_SIZE
 
     pop     rbx
     ret

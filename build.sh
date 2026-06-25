@@ -20,6 +20,8 @@ $NASM -f bin -I include/ -o runtime/rt_prc.bin  runtime/rt_prc.asm
 $NASM -f bin -I include/ -o runtime/rt_sip.bin  runtime/rt_sip.asm
 $NASM -f bin -I include/ -o runtime/rt_alc.bin  runtime/rt_alc.asm
 $NASM -f bin -I include/ -o runtime/rt_prq.bin  runtime/rt_prq.asm
+$NASM -f bin -I include/ -o runtime/rt_str.bin  runtime/rt_str.asm
+$NASM -f bin -I include/ -o runtime/rt_inp.bin  runtime/rt_inp.asm
 
 # Assemble compiler modules
 echo "Assembling compiler modules..."

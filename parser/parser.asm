@@ -10,7 +10,7 @@ extern lex_next, cur_tok, cur_tok_val, tok_ident
 extern var_add, var_find, get_var_va
 extern proto_add, proto_find
 extern codegen_init
-extern emit_b, emit_d, emit_q, emit_blob
+extern emit_b, emit_d, emit_q, emit_blob, emit_blob_v2
 extern codegen_emit_mov_rax_imm64, codegen_emit_mov_rax_imm32
 extern codegen_emit_mov_rax_var, codegen_emit_store_rax_to_var
 extern codegen_emit_push_rax, codegen_emit_pop_rbx
@@ -51,6 +51,11 @@ extern codegen_emit_unknown_bool, codegen_emit_rdrand_rax
 extern codegen_emit_clock_ms
 extern codegen_emit_mov_rdi_var
 extern codegen_get_out_idx
+extern codegen_emit_call_rt_str, codegen_emit_call_rt_str_bool
+extern codegen_emit_call_rt_inp
+extern codegen_emit_int_to_bool
+extern codegen_emit_trunc_byte
+extern codegen_emit_xor_rdi_rdi
 extern cur_type, prot_body_depth
 extern out_idx, var_table, var_count
 extern proto_table, proto_count
@@ -58,9 +63,12 @@ extern jump_patch_stack, jump_patch_depth
 extern end_jump_stack, end_jump_depth
 extern chain_base_stack, chain_base_depth
 extern loop_depth
+extern break_jump_stack, break_jump_depth
+extern break_base_stack, break_base_depth
 extern for_step_val
 extern cur_proto_idx
 extern fwd_ref_names, fwd_ref_patches, fwd_ref_count
+extern out_buffer
 
 ; ============================================================
 ; BSS — parser state
@@ -258,6 +266,10 @@ parse_stmt:
     cmp     eax, TOK_AT
     je      .do_call_stmt
 
+    ; switch (design.md §7.2 — value dispatch, same semantics as when/is)
+    cmp     eax, TOK_SWITCH
+    je      .do_when
+
     ; when
     cmp     eax, TOK_WHEN
     je      .do_when
@@ -426,7 +438,7 @@ parse_decl:
     push    r13
 
     ; Get type from current token
-    movzx   r12, dword [cur_tok]    ; r12 = type token
+    mov     r12d, [cur_tok]          ; r12 = type token (zero-extends to 64-bit)
     ; Convert type token to type code
     call    tok_to_type_code         ; rax = type code
     mov     byte [tmp_type], al
@@ -2542,7 +2554,131 @@ parse_factor:
     ret
 
 .pf_not_float_cast:
-    ; unknown (random bool)
+    ; ---- str(expr) cast — design.md §3.2 (B-11 fix) ---------------------
+    cmp     eax, TOK_TYPE_STR
+    jne     .pf_not_str_cast
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_str_np
+    advance
+.pf_str_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_str_nc
+    advance
+.pf_str_nc:
+    movzx   eax, byte [cur_type]
+    cmp     eax, TYPE_STR
+    je      .pf_str_identity        ; str(str) = identity
+    cmp     eax, TYPE_BOOL
+    je      .pf_str_from_bool
+    ; int / float / char / byte → decimal string
+    call    codegen_emit_mov_rdi_rax
+    call    codegen_emit_call_rt_str
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+.pf_str_from_bool:
+    call    codegen_emit_mov_rdi_rax
+    call    codegen_emit_call_rt_str_bool
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+.pf_str_identity:
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+
+.pf_not_str_cast:
+    ; ---- bool(expr) cast — design.md §4.7 --------------------------------
+    cmp     eax, TOK_TYPE_BOOL
+    jne     .pf_not_bool_cast
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_bool_np
+    advance
+.pf_bool_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_bool_nc
+    advance
+.pf_bool_nc:
+    call    codegen_emit_int_to_bool
+    mov     byte [cur_type], TYPE_BOOL
+    pop     rbx
+    ret
+
+.pf_not_bool_cast:
+    ; ---- char(expr) cast — truncate to low byte --------------------------
+    cmp     eax, TOK_TYPE_CHAR
+    jne     .pf_not_char_cast
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_char_np
+    advance
+.pf_char_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_char_nc
+    advance
+.pf_char_nc:
+    call    codegen_emit_trunc_byte
+    mov     byte [cur_type], TYPE_CHAR
+    pop     rbx
+    ret
+
+.pf_not_char_cast:
+    ; ---- byte(expr) cast — unsigned byte 0..255 --------------------------
+    cmp     eax, TOK_TYPE_BYTE
+    jne     .pf_not_byte_cast
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_byte_np
+    advance
+.pf_byte_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_byte_nc
+    advance
+.pf_byte_nc:
+    call    codegen_emit_trunc_byte
+    mov     byte [cur_type], TYPE_BYTE
+    pop     rbx
+    ret
+
+.pf_not_byte_cast:
+    ; ---- input(prompt?) — design.md §15.3 --------------------------------
+    cmp     eax, TOK_INPUT
+    jne     .pf_not_input
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_input_no_lp
+    advance
+.pf_input_no_lp:
+    ; Optional prompt argument
+    cmp     dword [cur_tok], TOK_RPAREN
+    je      .pf_input_no_arg
+    cmp     dword [cur_tok], TOK_NEWLINE
+    je      .pf_input_no_arg
+    cmp     dword [cur_tok], TOK_EOF
+    je      .pf_input_no_arg
+    call    parse_expr              ; prompt string → rax
+    call    codegen_emit_mov_rdi_rax    ; mov rdi, rax (pass prompt)
+    jmp     .pf_input_call
+.pf_input_no_arg:
+    call    codegen_emit_xor_rdi_rdi    ; xor rdi, rdi (no prompt)
+.pf_input_call:
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_input_no_rp
+    advance
+.pf_input_no_rp:
+    call    codegen_emit_call_rt_inp
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+
+.pf_not_input:
+    ; ---- unknown literal (random bool via rdrand) ------------------------
     cmp     eax, TOK_UNKNOWN
     jne     .pf_not_unknown
     advance
