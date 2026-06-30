@@ -231,7 +231,7 @@ fmt_type        ::= "d" | "f" | "e" | "g"
 |-----------|-------------|-----------------------------|
 | `int`     | `d`         | `d` `b` `o` `x` `X` `c`    |
 | `float`   | `g`         | `f` `e` `g`                 |
-| `bool`    | `s`         | `s` (emits `true`/`neutral`/`false`) |
+| `bool`    | `s`         | `s` (emits `true`/`false`)           |
 | `str`     | `s`         | `s`                         |
 | `char`    | `c`         | `c` `d` `x` `X`             |
 | `byte`    | `x`         | `d` `b` `o` `x` `X`        |
@@ -259,9 +259,8 @@ if_expr         ::= "if" expr ":" expr
                     "else" ":" expr
 ```
 
-The condition expression must be of type `bool`. A `bool` with value `neutral`
-is treated as **falsy** (neither branch is taken if an `elif`/`else` matches).
-Truthy: only `true` (`1`). Falsy: `false` (`-1`) and `neutral` (`0`).
+The condition expression must be of type `bool`.
+Truthy: `true` (`1`). Falsy: `false` (`0`).
 
 **Inline `if` expression** — `if_expr` produces a value and may appear anywhere
 an expression is expected. All branches must return the same type. `else` is required.
@@ -317,13 +316,12 @@ when_expr       ::= "when" expr
 
 `when expr` is an **expression** (not a statement) that evaluates `expr` and
 compares its truth value to the **previous** evaluation at the same call site.
-Returns `bool` (tri-state):
+Returns `bool`:
 
-- `true` — condition just became true (was false/neutral before)
+- `true` — condition just became true (was false before)
 - `false` — condition just became false (was true before)
-- `neutral` — condition state has not changed since last check
 
-First evaluation behaves as if previous state was `neutral`.
+First evaluation behaves as if previous state was `false`.
 Each unique source-location `when` expression is an independent monitor tracked by the compiler.
 
 ---
@@ -620,8 +618,7 @@ inc_dec_stmt    ::= ( "++" | "--" ) <IDENT> <NEWLINE>
 flip_stmt       ::= "flip" <IDENT> <NEWLINE>
 ```
 
-`flip` negates a `bool` variable in place (`true`↔`false`; `neutral` stays
-`neutral`). Equivalent to `:b = not b`. The variable must be declared mutable.
+`flip` negates a `bool` variable in place (`true`↔`false`). Equivalent to `:b = not b`. The variable must be declared mutable.
 
 ---
 
@@ -793,17 +790,23 @@ primary_expr    ::= <INT_LIT>
 ## 18. Bool Literals
 
 ```ebnf
-bool_lit        ::= "true" | "neutral" | "false"
+bool_lit        ::= "true" | "false"
 ```
 
-| Literal   | Stored value | Meaning                            |
-|-----------|--------------|------------------------------------|
-| `true`    | `1`          | Affirmative                        |
-| `neutral` | `0`          | Indeterminate — neither confirmed nor denied |
-| `false`   | `-1`         | Negative                           |
+| Literal | Stored value | Meaning     |
+|---------|--------------|-------------|
+| `true`  | `1`          | Affirmative |
+| `false` | `0`          | Negative    |
 
-`and` = `min(a, b)`, `or` = `max(a, b)`, `not` = `-x` over the signed ordering
-`false(−1) < neutral(0) < true(1)`.
+`and` = logical AND, `or` = logical OR, `not` = logical NOT.
+
+**Tri-state / Kleene logic** (`true`/`false`/`unknown`) is available via the
+`tristate` stdlib module and is **not** part of core `bool`:
+
+```rex
+from tristate import unknown
+bool a = unknown        // hardware entropy via rdrand
+```
 
 ---
 
@@ -871,7 +874,7 @@ cast_expr       ::= "int" "(" expr ")"
 | `str(x)`     | any primitive            | Human-readable representation                                |
 | `char(x)`    | `int`, `byte`            | Interprets as UTF-8 code point                               |
 | `byte(x)`    | `int`, `char`            | Low 8 bits                                                   |
-| `bool(x)`    | `int`                    | positive → `true`, 0 → `neutral`, negative → `false`        |
+| `bool(x)`    | `int`                    | non-zero → `true`, 0 → `false`                              |
 
 ---
 
@@ -985,7 +988,7 @@ Keywords are reserved and cannot be used as identifiers.
 | Category    | Keywords                                                                                                    |
 |-------------|-------------------------------------------------------------------------------------------------------------|
 | Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup` `file` `error` `struct` `enum` `type`   |
-| Literals    | `true` `neutral` `false` `null`                                                                             |
+| Literals    | `true` `false` `null`                                                                                       |
 | Statements  | `output` `input` `fmt`                                                                                      |
 |             | `if` `elif` `else` `switch` `is` `when` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`           |
 |             | `return` `swap` `flip` `prot` `use` `module` `blast`                                                       |
@@ -1046,10 +1049,8 @@ From lowest to highest binding:
 `and`/`or` short-circuit:
 - `and`: skips RHS if LHS is `false` (result is `false`).
 - `or`: skips RHS if LHS is `true` (result is `true`).
-- `neutral` on either side of `and`/`or` never short-circuits.
 
-`not` is numeric negation of the signed bool value: `not true` = `false`,
-`not false` = `true`, `not neutral` = `neutral`.
+`not`: `not true` = `false`, `not false` = `true`.
 
 ---
 
@@ -1059,7 +1060,7 @@ From lowest to highest binding:
 |-----------|-----|--------------------------------------|------------------------------------|
 | `int`     | 1   | 64-bit signed integer (`qword`)      | Two's complement                   |
 | `float`   | 2   | 64-bit IEEE 754 double               | `qword` (bit pattern)              |
-| `bool`    | 3   | 8-bit signed integer (`sbyte`)       | −1 / 0 / 1 only                   |
+| `bool`    | 3   | 8-bit unsigned integer (`byte`)      | 0 / 1 only                         |
 | `str`     | 5   | `qword` heap pointer                 | UTF-8; `[cap:8][len:8][data:N]`   |
 | `char`    | 8   | 8-bit unsigned integer               | Single UTF-8 byte                  |
 | `byte`    | 9   | 8-bit unsigned integer               | Raw byte; 0–255                    |

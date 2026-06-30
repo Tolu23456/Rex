@@ -25,16 +25,20 @@ description: Mutability sigil rules, type system decisions, bool Kleene logic, a
 **byte added:** Raw unsigned 8-bit value. For binary data and I/O. `output` prints numeric value.
 **complex deprecated:** Moved out of core. Will be stdlib in future release. Too niche for core; V0.1 still works but deprecated.
 
-## bool — Tri-State Kleene Logic (KEEP)
+## bool — 2-State (CHANGED from tri-state)
 
-Three values: `true` (1), `false` (0), `unknown` (rdrand hardware entropy).
-This is Kleene strong three-valued logic — mathematically principled.
+Two values only in core: `true` (1), `false` (0). Stored as `byte` (unsigned 8-bit).
+`bool(x)`: non-zero → `true`, 0 → `false`.
 
-**and:** false dominates — `false and anything = false`
-**or:** true dominates — `true or anything = true`
-**not unknown = unknown**
+**Why changed:** tri-state was too surprising as a default. Standard bool should behave like every other language. Hardware entropy (`rdrand`) and Kleene logic are niche — they belong in a module.
 
-**Why kept:** `unknown` maps directly to `rdrand` hardware instruction. It's Rex's most distinctive type feature, useful for randomized algorithms, non-deterministic testing, probabilistic branching. Already implemented.
+**Tri-state / Kleene logic** is now in the `tristate` stdlib module:
+```rex
+from tristate import unknown
+bool a = unknown   // rdrand hardware entropy
+```
+`unknown` = indeterminate third value. Kleene rules:
+- `false and unknown = false`, `true or unknown = true`, `not unknown = unknown`
 
 ## Protocols
 
@@ -119,4 +123,4 @@ Rex uses **implicit context allocator** via `use mm:` blocks.
 `import math` — whole module. `from math import sqrt` — specific identifier.
 `from math import sqrt as sq` — aliased import. Module-qualified: `@math.sqrt(x)`.
 Module = one `.rex` file. Top-level prots are public. No explicit export keyword.
-Planned stdlib: `math`, `str_utils`, `io`, `os`, `complex`, `net`, `json`.
+Planned stdlib: `math`, `str_utils`, `io`, `os`, `complex`, `net`, `json`, `tristate`.
