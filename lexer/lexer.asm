@@ -667,13 +667,15 @@ scan_ident:
     xor     ecx, ecx
 
 .ident_loop:
-    movzx   eax, byte [rbx + r12]
-    call    is_id_char
-    test    al, al
+    movzx   eax, byte [rbx + r12]  ; load current char into al
+    push    rax                     ; save original char
+    call    is_id_char              ; returns 0 or 1 in al (clobbers al)
+    test    al, al                  ; test return value
+    pop     rax                     ; restore original char (does not affect flags)
     jz      .ident_done
     cmp     ecx, 63
     jge     .ident_no_copy
-    mov     [tok_ident + rcx], al
+    mov     [tok_ident + rcx], al   ; store original char, not the 0/1 return value
 .ident_no_copy:
     inc     r12
     inc     rcx
