@@ -44,31 +44,40 @@ section .text
 
 _start:
     ; Stack at entry: [rsp]=argc, [rsp+8]=argv[0], [rsp+16]=argv[1], ...
-    mov     rax, [rsp]              ; argc
-    cmp     rax, 2
+    mov     r12, [rsp]              ; r12 = argc (preserved across calls)
+    cmp     r12, 2
     jl      .usage_exit
 
     ; argv[1] = source file
     mov     rdi, [rsp + 16]
     lea     rsi, [src_path]
     call    strcpy_to
-    
+
     ; Default output: "output"
     lea     rdi, [default_out]
     lea     rsi, [output_path]
     call    strcpy_to
 
-    ; Check for -o flag
-    cmp     rax, 4
+    ; If argc >= 3 and argv[2] is not "-o", treat argv[2] as output path (positional)
+    cmp     r12, 3
     jl      .got_args
     mov     rdi, [rsp + 24]         ; argv[2]
     cmp     byte [rdi], '-'
-    jne     .got_args
+    jne     .positional_out         ; not a flag → positional output path
+
+    ; argv[2] starts with '-' — check for -o flag
     cmp     byte [rdi + 1], 'o'
     jne     .got_args
+    cmp     r12, 4
+    jl      .got_args
     mov     rdi, [rsp + 32]         ; argv[3] = output path
     lea     rsi, [output_path]
     call    strcpy_to
+    jmp     .got_args
+
+.positional_out:
+    lea     rsi, [output_path]
+    call    strcpy_to               ; rdi already = argv[2]
 
 .got_args:
     ; Initialize compiler

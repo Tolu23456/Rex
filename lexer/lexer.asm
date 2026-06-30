@@ -233,8 +233,6 @@ lex_next:
 
 .not_id:
     ; ---- string literal ----
-    cmp     byte [src_buf + 0], '"'
-    jne     .not_str
     call    peek_char
     cmp     al, '"'
     jne     .not_str
@@ -242,13 +240,6 @@ lex_next:
     jmp     .done
 
 .not_str:
-    call    peek_char
-    cmp     al, '"'
-    jne     .not_str2
-    call    scan_string
-    jmp     .done
-
-.not_str2:
     ; ---- char literal ----
     cmp     al, 0x27            ; single quote
     jne     .not_char
@@ -317,7 +308,7 @@ lex_next:
     cmp     al, 0x0d
     je      .blank_line
     test    al, al
-    jz      .blank_line
+    jz      .emit_eof       ; EOF at line start → emit EOF/DEDENTs, do not loop
     cmp     al, '/'
     jne     .not_blank_comment
     movzx   ecx, byte [rbx + r12 + 1]
@@ -418,7 +409,7 @@ lex_next:
 
 .blank_eof:
     mov     [src_pos], r12
-    jmp     .scan
+    jmp     .emit_eof       ; EOF inside blank line → emit EOF/DEDENTs, do not loop
 
 ; ============================================================
 ; scan_number — scan integer or float literal
@@ -1244,22 +1235,24 @@ is_id_start:
 
 ; is_id_char — returns 1 if al is valid identifier char (letter, digit, underscore)
 is_id_char:
-    call    is_id_start
+    push    rbx
+    mov     bl, al          ; save original char before is_id_start clobbers al
+    call    is_id_start     ; al = 1 if letter/underscore, 0 otherwise
     test    al, al
     jnz     .yes_ic
-    push    rbx
-    ; check digit
-    mov     bl, al
-    ; Wait, al was overwritten by is_id_start. Need to re-read.
-    ; This is a design flaw. Let me use a different register.
+    ; not a letter/underscore — check if digit
+    cmp     bl, '0'
+    jb      .no_ic
+    cmp     bl, '9'
+    ja      .no_ic
+.yes_ic:
+    mov     eax, 1
     pop     rbx
     ret
-.yes_ic:
+.no_ic:
+    xor     eax, eax
+    pop     rbx
     ret
-
-; Actually let me rewrite is_id_char properly
-; It needs to check if the original char is an id char
-; The issue is that is_id_start modifies al. Let me use a simpler approach:
 
 ; is_hex_digit — returns 1 in al if passed char (rbx low byte) is hex
 is_hex_digit:

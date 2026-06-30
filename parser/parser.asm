@@ -140,8 +140,11 @@ parse_program:
     push    r12
     push    r13
 
-    ; Emit the protocol section jump (will be patched at end)
+    ; Emit the protocol section jump placeholder, then immediately patch it
+    ; to a no-op (rel32=0) so execution falls through into main code.
+    ; Protocol bodies are emitted inline and reached via call rel32.
     call    codegen_begin_protos
+    call    codegen_end_protos
 
     ; Skip leading newlines
 .skip_nl:
@@ -166,9 +169,6 @@ parse_program:
 .done:
     ; Emit exit(0)
     call    codegen_emit_exit0
-
-    ; Patch protocol section skip jump
-    call    codegen_end_protos
 
     ; Resolve forward references (protocols called before defined)
     call    resolve_fwd_refs
@@ -1352,103 +1352,73 @@ parse_prot:
     pop     rbx
     ret
 
-; emit_arg_pops: pops args from stack into registers (rdi, rsi, rdx, rcx, r8, r9)
-; Then stores each to its var's VA
+; emit_arg_pops: load args from caller stack and store to var storage
+; Caller pushed args in order (arg0 first, argN-1 last), then called prot.
+; At protocol entry: [rsp+0]=ret_addr, [rsp+8]=argN-1, ..., [rsp+N*8]=arg0
+; So param i (0-indexed) lives at [rsp + (N-i)*8]
 emit_arg_pops:
     push    rbx
     push    r12
     push    r13
+    push    rdx
 
-    ; Get param count for current proto
+    ; Get param count
     mov     rax, [cur_proto_idx]
     imul    rax, PROTO_ENTRY_SIZE
     lea     rax, [proto_table + rax]
-
     movzx   r13, byte [rax + PROTO_PARAMCNT_OFF]
     test    r13, r13
     jz      .ea_done
 
-    ; Pop registers and store to vars
-    ; Args were pushed in REVERSE order, so pop in forward order
-    ; pop rdi (pop 5F)
-    push    rbx
+    xor     r12, r12                ; i = 0
 
-    xor     r12, r12                ; param index
 .ea_loop:
     cmp     r12, r13
-    jge     .ea_done_inner
+    jge     .ea_done
 
-    ; Get var index for this param
+    ; Get var VA for param i
     mov     rax, [cur_proto_idx]
     imul    rax, PROTO_ENTRY_SIZE
     lea     rax, [proto_table + rax]
     movzx   rbx, byte [rax + PROTO_PARAMS_OFF + r12]
-
-    ; Get var VA
-    push    r12
     mov     rdi, rbx
-    call    get_var_va
-    pop     r12
+    call    get_var_va              ; rax = var_va
+    mov     rbx, rax               ; rbx = var_va (preserved across emit_b/emit_d)
 
-    ; Emit: pop reg (according to param position)
-    push    rax                     ; save var VA
-    cmp     r12, 0
-    je      .ea_pop0
-    cmp     r12, 1
-    je      .ea_pop1
-    cmp     r12, 2
-    je      .ea_pop2
-    cmp     r12, 3
-    je      .ea_pop3
-    ; params 4,5: just skip
-    add     rsp, 8
-    jmp     .ea_next
+    ; Stack offset for param i: (N - i) * 8
+    mov     rdx, r13
+    sub     rdx, r12
+    shl     rdx, 3                 ; ≤ 48, safe as imm8
 
-.ea_pop0:
-    ; pop rdi (5F), then store to var
-    push    rax
-    mov     al, 0x5f
+    ; Emit: mov rax, [rsp + offset]  (48 8B 44 24 imm8)
+    mov     al, 0x48
     call    emit_b
-    pop     rax
-    mov     rdi, rax
-    call    codegen_emit_store_rax_to_var   ; Hmm, needs to store rdi not rax
-    ; Actually I emitted `pop rdi` which puts the arg in rdi
-    ; Then I need: mov [var_va], rdi (48 89 3C 25 addr32)
-    ; Let me emit that directly
-    add     rsp, 8                  ; pop the saved var VA
-    jmp     .ea_next
-
-.ea_pop1:
-    push    rax
-    mov     al, 0x5e                ; pop rsi
+    mov     al, 0x8b
     call    emit_b
-    pop     rax
-    add     rsp, 8
-    jmp     .ea_next
-
-.ea_pop2:
-    push    rax
-    mov     al, 0x5a                ; pop rdx
+    mov     al, 0x44
     call    emit_b
-    pop     rax
-    add     rsp, 8
-    jmp     .ea_next
-
-.ea_pop3:
-    push    rax
-    mov     al, 0x59                ; pop rcx
+    mov     al, 0x24
     call    emit_b
-    pop     rax
-    add     rsp, 8
+    mov     al, dl                 ; offset byte
+    call    emit_b
 
-.ea_next:
+    ; Emit: mov [var_va], rax  (48 89 04 25 addr32)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, ebx               ; var_va as addr32
+    call    emit_d
+
     inc     r12
     jmp     .ea_loop
 
-.ea_done_inner:
-    pop     rbx                     ; restore rbx from .ea_loop push
-
 .ea_done:
+    pop     rdx
     pop     r13
     pop     r12
     pop     rbx

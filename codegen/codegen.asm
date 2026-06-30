@@ -1812,16 +1812,7 @@ codegen_emit_prot_start:
     ; save param count
     mov     [rbx + PROTO_PARAMCNT_OFF], sil
 
-    ; emit: push r12  (41 54) if params > 0
-    test    rsi, rsi
-    jz      .no_r12
-    push    rax
-    mov     al, 0x41
-    call    emit_b
-    mov     al, 0x54
-    call    emit_b
-    pop     rax
-.no_r12:
+    ; args are loaded via mov rax,[rsp+offset] in emit_arg_pops — no callee-save push needed
     pop     rdx
     pop     rcx
     pop     rbx
@@ -1839,30 +1830,43 @@ codegen_emit_prot_end:
     ret
 
 ; codegen_emit_call_prot(rdi=proto_idx)
-; Emits: call rel32_to_proto_body
+; Emits: call rel32_to_proto_body + add rsp, N*8 (stack cleanup)
 codegen_emit_call_prot:
     push    rax
     push    rbx
     push    rcx
+    push    rdx
     mov     rbx, rdi
 
-    ; get proto body start out_idx
+    ; get proto entry
     imul    rcx, rbx, PROTO_ENTRY_SIZE
     lea     rcx, [proto_table + rcx]
     mov     rbx, [rcx + PROTO_OUTIDX_OFF]
+    movzx   rdx, byte [rcx + PROTO_PARAMCNT_OFF]   ; save param count for cleanup
 
     ; emit: call rel32
-    ; rel32 = (CODE_START + proto_start) - (CODE_START + out_idx + 5)
-    ;       = proto_start - out_idx - 5
-    push    rax
     mov     al, 0xe8
     call    emit_b
     mov     rax, rbx
     sub     rax, [out_idx]
     sub     rax, 4
     call    emit_d
-    pop     rax
 
+    ; emit: add rsp, N*8  (48 83 C4 imm8) if N > 0
+    test    rdx, rdx
+    jz      .no_cleanup
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xc4
+    call    emit_b
+    shl     edx, 3              ; N * 8
+    mov     al, dl
+    call    emit_b
+.no_cleanup:
+
+    pop     rdx
     pop     rcx
     pop     rbx
     pop     rax
@@ -2605,6 +2609,7 @@ codegen_write_runtime:
     write_blob rt_prq_data, RT_PRQ_SIZE
     write_blob rt_str_data, RT_STR_SIZE
     write_blob rt_inp_data, RT_INP_SIZE
+    write_blob rt_str_cat_data, RT_STR_CAT_SIZE
 
     pop     rbx
     ret
