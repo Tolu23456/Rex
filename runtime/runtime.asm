@@ -6,7 +6,7 @@ bits 64
 
 global rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
 global rt_prc_data, rt_sip_data, rt_alc_data, rt_prq_data
-global rt_str_data, rt_inp_data
+global rt_str_data, rt_inp_data, rt_str_cat_data
 
 section .data
 
@@ -69,3 +69,9 @@ rt_inp_data:
 rt_inp_end:
 global rt_inp_size
 rt_inp_size: dq rt_inp_end - rt_inp_data
+
+rt_str_cat_data:
+    incbin "runtime/rt_str_cat.bin"
+rt_str_cat_end:
+global rt_str_cat_size
+rt_str_cat_size: dq rt_str_cat_end - rt_str_cat_data

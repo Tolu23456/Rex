@@ -33,10 +33,11 @@
 %define RT_STR_OFFSET       8629
 %define RT_STR_BOOL_OFFSET  (RT_STR_OFFSET + 160)  ; rt_str_bool_blob fixed at byte 160
 %define RT_INP_OFFSET       8885
-%define CODE_START          9397
+%define RT_STR_CAT_OFFSET   9397      ; string concat blob (NEW)
+%define CODE_START          9909      ; 9397 + 512
 
-; JMP rel32 = CODE_START - (RT_JMP_OFFSET + 5) = 9397 - 181 = 9216
-%define RT_TOTAL_SIZE       9216
+; JMP rel32 = CODE_START - (RT_JMP_OFFSET + 5) = 9909 - 181 = 9728
+%define RT_TOTAL_SIZE       9728
 
 ; Runtime blob sizes
 %define RT_PRI_SIZE         512
@@ -49,6 +50,7 @@
 %define RT_PRQ_SIZE         1024
 %define RT_STR_SIZE         256
 %define RT_INP_SIZE         512
+%define RT_STR_CAT_SIZE     512       ; string concat blob (NEW)
 
 ; Dict entry points inside rt_prq_blob
 %define RT_DICT_NEW_OFFSET  7606
@@ -252,6 +254,24 @@
 
 ; Legacy: unknown (random bool via rdrand) — kept for dead-code path in parse_factor
 %define TOK_UNKNOWN         99
+
+; ----------------------------------------------------------------
+; Stage-9 built-in keywords
+; ----------------------------------------------------------------
+%define TOK_SIGN            106   ; sign(x) → -1 / 0 / 1
+%define TOK_CLZ             107   ; clz(x) → count leading zeros
+%define TOK_CEIL            108   ; ceil(x) → SSE roundsd mode 2
+%define TOK_FLOOR           109   ; floor(x) → SSE roundsd mode 1
+%define TOK_FRACT           110   ; fract(x) → x - floor(x)
+%define TOK_REAL            111   ; real(c) → low qword of complex
+%define TOK_IMAG            112   ; imag(c) → high qword of complex
+%define TOK_CONJ            113   ; conj(c) → negate imag part
+%define TOK_RAND            114   ; rand() → 64-bit rdrand
+%define TOK_CARRY           115   ; carry → CF flag (0 or 1)
+%define TOK_OVERFLOW        116   ; overflow → OF flag (0 or 1)
+%define TOK_HASH_KW         118   ; hash(x) → simple hash of x
+%define TOK_MATCH           119   ; match (structured when, jump-table opt)
+%define TOK_DOLLAR          120   ; $ → direct syscall
 
 ; ----------------------------------------------------------------
 ; ELF constants

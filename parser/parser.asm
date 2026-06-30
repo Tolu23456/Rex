@@ -33,7 +33,7 @@ extern codegen_output_typed, codegen_output_rax
 extern codegen_emit_for_start, codegen_emit_for_end
 extern codegen_emit_for_start_dyn
 extern codegen_emit_while_start, codegen_emit_while_end
-extern codegen_emit_break, codegen_patch_breaks
+extern codegen_emit_break, codegen_emit_break_n, codegen_patch_breaks
 extern codegen_push_cont, codegen_pop_cont, codegen_emit_skip
 extern codegen_emit_exit0, codegen_emit_exit1
 extern codegen_emit_str_rax
@@ -56,6 +56,16 @@ extern codegen_emit_call_rt_inp
 extern codegen_emit_int_to_bool
 extern codegen_emit_trunc_byte
 extern codegen_emit_xor_rdi_rdi
+; Stage-9 built-in emitters
+extern codegen_emit_sign_rax, codegen_emit_clz_rax
+extern codegen_emit_ceil_rax, codegen_emit_floor_rax, codegen_emit_fract_rax
+extern codegen_emit_rdrand64, codegen_emit_hash_rax
+extern codegen_emit_carry_rax, codegen_emit_overflow_rax
+extern codegen_emit_call_rt_str_cat
+extern codegen_emit_seq_subscript, codegen_emit_seq_in
+extern codegen_emit_mov_rdi_rbx, codegen_emit_mov_rsi_rax
+extern codegen_emit_neg_var
+extern break_jump_depths
 extern cur_type, prot_body_depth
 extern out_idx, var_table, var_count
 extern proto_table, proto_count
@@ -274,6 +284,14 @@ parse_stmt:
     cmp     eax, TOK_WHEN
     je      .do_when
 
+    ; match (structural when — jump-table optimised for dense int ranges)
+    cmp     eax, TOK_MATCH
+    je      .do_when
+
+    ; flip (in-place bool negation)
+    cmp     eax, TOK_FLIP
+    je      .do_flip
+
     ; use
     cmp     eax, TOK_USE
     je      .do_use
@@ -408,6 +426,12 @@ parse_stmt:
     pop     r12
     pop     rbx
     jmp     parse_when
+
+.do_flip:
+    pop     r13
+    pop     r12
+    pop     rbx
+    jmp     parse_flip
 
 .do_use:
     ; use mm pool/arena/gc ...  — skip for now
@@ -1464,12 +1488,53 @@ parse_return:
 ; parse_stop / parse_skip
 ; ============================================================
 parse_stop:
-    advance
+    advance                          ; consume 'stop'
+    ; B-6: optional N for multi-level break (stop N)
+    cmp     dword [cur_tok], TOK_INT_LIT
+    jne     .stop_default
+    mov     rdi, [cur_tok_val]       ; N
+    advance                          ; consume N
+    cmp     rdi, 1
+    jle     .stop_default            ; stop 1 = normal break
+    call    codegen_emit_break_n     ; emit break with depth=N
+    jmp     .stop_check_nl
+.stop_default:
     call    codegen_emit_break
+.stop_check_nl:
     cmp     dword [cur_tok], TOK_NEWLINE
     jne     .stop_done
     advance
 .stop_done:
+    ret
+
+; ============================================================
+; parse_flip — "flip varname"  (B-5: in-place bool negation)
+; ============================================================
+parse_flip:
+    push    rbx
+
+    advance                          ; consume 'flip'
+
+    cmp     dword [cur_tok], TOK_IDENT
+    jne     .flip_done
+    lea     rdi, [tok_ident]
+    call    var_find
+    cmp     rax, -1
+    je      .flip_done
+    mov     rbx, rax
+    mov     rdi, rbx
+    call    get_var_va
+    ; emit: neg qword [var_va]
+    mov     rdi, rax
+    call    codegen_emit_neg_var
+    advance
+
+.flip_done:
+    cmp     dword [cur_tok], TOK_NEWLINE
+    jne     .flip_ret
+    advance
+.flip_ret:
+    pop     rbx
     ret
 
 parse_skip:
@@ -2069,6 +2134,9 @@ parse_comparison:
     je      .do_cmp
     cmp     eax, TOK_GE
     je      .do_cmp
+    ; Stage 4: 'in' operator for seq membership
+    cmp     eax, TOK_IN
+    je      .do_in
     jmp     .cmp_done
 
 .do_cmp:
@@ -2085,6 +2153,31 @@ parse_comparison:
     mov     rdi, r12
     call    codegen_emit_cmp_setcc
     mov     byte [cur_type], TYPE_BOOL
+    jmp     .cmp_done
+
+.do_in:
+    ; 'in' operator: value 'in' seq_var → -1 (found) or 0 (not found)
+    ; LHS (search value) is in rax
+    call    codegen_emit_push_rax    ; save search value on runtime stack
+    advance                          ; consume 'in'
+    ; Expect identifier (seq variable)
+    cmp     dword [cur_tok], TOK_IDENT
+    jne     .in_fail
+    lea     rdi, [tok_ident]
+    call    var_find
+    cmp     rax, -1
+    je      .in_fail
+    mov     rdi, rax                 ; var index
+    call    get_var_va               ; rax = var_va
+    mov     rdi, rax
+    call    codegen_emit_seq_in      ; emits load + linear search loop
+    mov     byte [cur_type], TYPE_BOOL
+    advance
+    jmp     .cmp_done
+.in_fail:
+    call    codegen_emit_pop_rbx     ; pop the pushed search value
+    mov     byte [cur_type], TYPE_BOOL
+    jmp     .cmp_done
 
 .cmp_done:
     pop     r12
@@ -2118,6 +2211,9 @@ parse_additive:
     advance
     call    parse_term
     call    codegen_emit_pop_rbx
+    ; B-11: string concatenation
+    cmp     byte [cur_type], TYPE_STR
+    je      .str_cat
     ; check if float operation
     cmp     byte [cur_type], TYPE_FLOAT
     je      .fadd
@@ -2126,6 +2222,14 @@ parse_additive:
 .fadd:
     mov     rdi, 0x58               ; addsd opcode
     call    codegen_emit_float_op
+    jmp     .add_loop
+.str_cat:
+    ; rax = RHS string ptr, rbx = LHS string ptr
+    ; Emit: mov rdi, rbx; mov rsi, rax; call rt_str_cat
+    call    codegen_emit_mov_rdi_rbx
+    call    codegen_emit_mov_rsi_rax
+    call    codegen_emit_call_rt_str_cat
+    mov     byte [cur_type], TYPE_STR
     jmp     .add_loop
 
 .do_sub:
@@ -2313,7 +2417,26 @@ parse_factor:
     call    get_var_va
     mov     rdi, rax
     call    codegen_emit_mov_rax_var
+    advance                          ; consume identifier
+
+    ; B-15: check for seq subscript [i]
+    cmp     dword [cur_tok], TOK_LBRACKET
+    jne     .pf_ident_done
+    cmp     cl, TYPE_SEQ             ; cl = var type (saved above)
+    jne     .pf_ident_done
+
+    ; Seq subscript: rax = seq ptr (already loaded)
+    call    codegen_emit_push_rax    ; save seq ptr on runtime stack
+    advance                          ; consume '['
+    call    parse_expr               ; index → rax
+    cmp     dword [cur_tok], TOK_RBRACKET
+    jne     .pf_subscript_no_rb
     advance
+.pf_subscript_no_rb:
+    call    codegen_emit_seq_subscript   ; pop+bounds-check+load
+    mov     byte [cur_type], TYPE_INT    ; element type (generic int)
+
+.pf_ident_done:
     pop     rbx
     ret
 
@@ -2698,6 +2821,158 @@ parse_factor:
     ret
 
 .pf_not_clock:
+    ; ---- sign(x) → {-1, 0, 1} ------------------------------------------------
+    cmp     eax, TOK_SIGN
+    jne     .pf_not_sign
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_sign_np
+    advance
+.pf_sign_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_sign_nc
+    advance
+.pf_sign_nc:
+    call    codegen_emit_sign_rax
+    mov     byte [cur_type], TYPE_INT
+    pop     rbx
+    ret
+
+.pf_not_sign:
+    ; ---- clz(x) → count leading zeros ----------------------------------------
+    cmp     eax, TOK_CLZ
+    jne     .pf_not_clz
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_clz_np
+    advance
+.pf_clz_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_clz_nc
+    advance
+.pf_clz_nc:
+    call    codegen_emit_clz_rax
+    mov     byte [cur_type], TYPE_INT
+    pop     rbx
+    ret
+
+.pf_not_clz:
+    ; ---- ceil(x) → ceiling (float) -------------------------------------------
+    cmp     eax, TOK_CEIL
+    jne     .pf_not_ceil
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_ceil_np
+    advance
+.pf_ceil_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_ceil_nc
+    advance
+.pf_ceil_nc:
+    call    codegen_emit_ceil_rax
+    mov     byte [cur_type], TYPE_FLOAT
+    pop     rbx
+    ret
+
+.pf_not_ceil:
+    ; ---- floor(x) → floor (float) --------------------------------------------
+    cmp     eax, TOK_FLOOR
+    jne     .pf_not_floor
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_floor_np
+    advance
+.pf_floor_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_floor_nc
+    advance
+.pf_floor_nc:
+    call    codegen_emit_floor_rax
+    mov     byte [cur_type], TYPE_FLOAT
+    pop     rbx
+    ret
+
+.pf_not_floor:
+    ; ---- fract(x) → fractional part (float) ----------------------------------
+    cmp     eax, TOK_FRACT
+    jne     .pf_not_fract
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_fract_np
+    advance
+.pf_fract_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_fract_nc
+    advance
+.pf_fract_nc:
+    call    codegen_emit_fract_rax
+    mov     byte [cur_type], TYPE_FLOAT
+    pop     rbx
+    ret
+
+.pf_not_fract:
+    ; ---- rand() → 64-bit hardware random -------------------------------------
+    cmp     eax, TOK_RAND
+    jne     .pf_not_rand
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_rand_np
+    advance
+.pf_rand_np:
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_rand_nc
+    advance
+.pf_rand_nc:
+    call    codegen_emit_rdrand64
+    mov     byte [cur_type], TYPE_INT
+    pop     rbx
+    ret
+
+.pf_not_rand:
+    ; ---- hash(x) → multiplicative hash of x ----------------------------------
+    cmp     eax, TOK_HASH_KW
+    jne     .pf_not_hash
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_hash_np
+    advance
+.pf_hash_np:
+    call    parse_expr
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_hash_nc
+    advance
+.pf_hash_nc:
+    call    codegen_emit_hash_rax
+    mov     byte [cur_type], TYPE_INT
+    pop     rbx
+    ret
+
+.pf_not_hash:
+    ; ---- carry → CF flag (0 or 1) after last arithmetic ----------------------
+    cmp     eax, TOK_CARRY
+    jne     .pf_not_carry
+    advance
+    call    codegen_emit_carry_rax
+    mov     byte [cur_type], TYPE_BOOL
+    pop     rbx
+    ret
+
+.pf_not_carry:
+    ; ---- overflow → OF flag (0 or 1) after last arithmetic ------------------
+    cmp     eax, TOK_OVERFLOW
+    jne     .pf_not_overflow
+    advance
+    call    codegen_emit_overflow_rax
+    mov     byte [cur_type], TYPE_BOOL
+    pop     rbx
+    ret
+
+.pf_not_overflow:
     ; typeof
     cmp     eax, TOK_TYPEOF
     jne     .pf_not_typeof

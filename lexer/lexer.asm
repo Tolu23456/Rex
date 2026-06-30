@@ -87,6 +87,20 @@ kwds:
     db  6, "switch",      TOK_SWITCH
     db  5, "raise",       TOK_RAISE
     db  4, "flip",        TOK_FLIP
+    ; Stage-9 built-in keywords
+    db  4, "sign",        TOK_SIGN
+    db  3, "clz",         TOK_CLZ
+    db  4, "ceil",        TOK_CEIL
+    db  5, "floor",       TOK_FLOOR
+    db  5, "fract",       TOK_FRACT
+    db  4, "real",        TOK_REAL
+    db  4, "imag",        TOK_IMAG
+    db  4, "conj",        TOK_CONJ
+    db  4, "rand",        TOK_RAND
+    db  5, "carry",       TOK_CARRY
+    db  8, "overflow",    TOK_OVERFLOW
+    db  4, "hash",        TOK_HASH_KW
+    db  5, "match",       TOK_MATCH
     db  0                               ; sentinel: len=0 → end of table
 
 section .text

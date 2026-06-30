@@ -73,11 +73,21 @@ global codegen_emit_call_rt_inp
 global codegen_emit_int_to_bool
 global codegen_emit_trunc_byte
 global codegen_emit_xor_rdi_rdi
+; Stage-9 / bug-fix emitters
+global codegen_emit_sign_rax, codegen_emit_clz_rax
+global codegen_emit_ceil_rax, codegen_emit_floor_rax, codegen_emit_fract_rax
+global codegen_emit_rdrand64, codegen_emit_hash_rax
+global codegen_emit_carry_rax, codegen_emit_overflow_rax
+global codegen_emit_call_rt_str_cat
+global codegen_emit_seq_subscript, codegen_emit_seq_in
+global codegen_emit_break_n
+global break_jump_depths
+global codegen_emit_mov_rdi_rbx, codegen_emit_mov_rsi_rax, codegen_emit_neg_var
 
 ; ---- externs ----
 extern rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
 extern rt_prc_data, rt_sip_data, rt_alc_data, rt_prq_data
-extern rt_str_data, rt_inp_data
+extern rt_str_data, rt_inp_data, rt_str_cat_data
 
 ; ============================================================
 ; BSS — compiler state
@@ -112,6 +122,7 @@ chain_base_depth:   resq 1
 ; loop patch stacks
 break_jump_stack:   resq LOOP_STACK_MAX         ; stop jmp targets
 break_jump_depth:   resq 1
+break_jump_depths:  resq LOOP_STACK_MAX         ; stop N depth per entry (1=current)
 break_base_stack:   resq LOOP_STACK_MAX         ; per-loop break group bases
 break_base_depth:   resq 1
 cont_base_stack:    resq LOOP_STACK_MAX         ; continue-to addresses
@@ -1460,14 +1471,15 @@ codegen_pop_cont:
     ret
 
 codegen_emit_break:
-    ; emit: jmp placeholder; push offset onto break_jump_stack
+    ; emit: jmp placeholder; push offset onto break_jump_stack with depth=1
     push    rax
     mov     al, 0xe9
     call    emit_b
     mov     rax, [out_idx]          ; patch offset
     push    rbx
     mov     rbx, [break_jump_depth]
-    mov     [break_jump_stack + rbx*8], rax
+    mov     [break_jump_stack  + rbx*8], rax
+    mov     qword [break_jump_depths + rbx*8], 1   ; depth=1 (patch at nearest loop)
     inc     qword [break_jump_depth]
     xor     eax, eax
     call    emit_d
@@ -1475,24 +1487,72 @@ codegen_emit_break:
     pop     rax
     ret
 
+; codegen_emit_break_n(rdi=N): emit jmp placeholder with depth=N
+; Used by `stop N` — only the Nth outer loop will patch this entry
+codegen_emit_break_n:
+    push    rax
+    push    rbx
+    push    rdi
+    mov     rbx, rdi                ; N
+    mov     al, 0xe9
+    call    emit_b
+    mov     rax, [out_idx]
+    push    rcx
+    mov     rcx, [break_jump_depth]
+    mov     [break_jump_stack  + rcx*8], rax
+    mov     [break_jump_depths + rcx*8], rbx   ; depth=N
+    inc     qword [break_jump_depth]
+    pop     rcx
+    xor     eax, eax
+    call    emit_d
+    pop     rdi
+    pop     rbx
+    pop     rax
+    ret
+
 codegen_patch_breaks:
-    ; patch all break jumps for current loop (from break_base to depth)
+    ; patch break jumps for current loop:
+    ;   depth==1 entries → patch to current position
+    ;   depth >1 entries → decrement depth (will be patched by outer loop)
+    ;   compact the stack afterwards
     push    rbx
     push    rcx
+    push    rdx
+    push    r12
     mov     rbx, [break_base_depth]
-    dec     rbx                         ; index of top entry
+    dec     rbx
     mov     rcx, [break_base_stack + rbx*8]  ; base for this loop
     dec     qword [break_base_depth]
-    mov     rbx, [break_jump_depth]
-.patch_lp:
-    cmp     rbx, rcx
-    jle     .pb_done
-    dec     rbx
-    mov     rdi, [break_jump_stack + rbx*8]
+    mov     rdx, [break_jump_depth]           ; top of break stack
+    ; r12 = write cursor (compaction pointer starting at base)
+    mov     r12, rcx
+.pb_lp:
+    cmp     rcx, rdx
+    jge     .pb_done
+    ; check depth of entry at rcx
+    mov     rax, [break_jump_depths + rcx*8]
+    cmp     rax, 1
+    jne     .pb_outer
+    ; depth==1: patch it to current position
+    push    rdi
+    mov     rdi, [break_jump_stack + rcx*8]
     call    codegen_patch_jump
-    jmp     .patch_lp
+    pop     rdi
+    jmp     .pb_next
+.pb_outer:
+    ; depth>1: decrement and keep (copy to write cursor)
+    dec     rax
+    mov     [break_jump_depths + r12*8], rax
+    mov     rax, [break_jump_stack + rcx*8]
+    mov     [break_jump_stack  + r12*8], rax
+    inc     r12
+.pb_next:
+    inc     rcx
+    jmp     .pb_lp
 .pb_done:
-    mov     [break_jump_depth], rbx
+    mov     [break_jump_depth], r12   ; compacted depth
+    pop     r12
+    pop     rdx
     pop     rcx
     pop     rbx
     ret
@@ -2205,6 +2265,277 @@ codegen_emit_xor_rdi_rdi:
     ret
 .xdi_code:
     db 0x48, 0x31, 0xFF           ; xor rdi, rdi
+
+; ============================================================
+; Stage-9 emitters
+; ============================================================
+
+; codegen_emit_sign_rax: sign(rax) → rax ∈ {-1, 0, 1}
+; test rax,rax; setg cl; sets al; sub cl,al; movsx rax,cl
+codegen_emit_sign_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .sign_bytes]
+    mov     edx, 14
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.sign_bytes:
+    db 0x48, 0x85, 0xC0           ; test rax, rax
+    db 0x0F, 0x9F, 0xC1           ; setg cl   (1 if rax > 0)
+    db 0x0F, 0x98, 0xC0           ; sets al   (1 if rax < 0)
+    db 0x28, 0xC1                 ; sub cl, al
+    db 0x48, 0x0F, 0xBE, 0xC1    ; movsx rax, cl
+
+; codegen_emit_clz_rax: lzcnt rax, rax → count leading zeros
+codegen_emit_clz_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .clz_bytes]
+    mov     edx, 5
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.clz_bytes:
+    db 0xF3, 0x48, 0x0F, 0xBD, 0xC0  ; lzcnt rax, rax
+
+; codegen_emit_ceil_rax: ceil(rax-as-float)
+; movq xmm0,rax; roundsd xmm0,xmm0,2; movq rax,xmm0
+codegen_emit_ceil_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .ceil_bytes]
+    mov     edx, 16
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.ceil_bytes:
+    db 0x66, 0x48, 0x0F, 0x6E, 0xC0           ; movq xmm0, rax
+    db 0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x02     ; roundsd xmm0,xmm0,2 (ceil)
+    db 0x66, 0x48, 0x0F, 0x7E, 0xC0           ; movq rax, xmm0
+
+; codegen_emit_floor_rax: floor(rax-as-float)
+codegen_emit_floor_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .floor_bytes]
+    mov     edx, 16
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.floor_bytes:
+    db 0x66, 0x48, 0x0F, 0x6E, 0xC0           ; movq xmm0, rax
+    db 0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x01     ; roundsd xmm0,xmm0,1 (floor)
+    db 0x66, 0x48, 0x0F, 0x7E, 0xC0           ; movq rax, xmm0
+
+; codegen_emit_fract_rax: fract(rax-as-float) = x - floor(x)
+codegen_emit_fract_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .fract_bytes]
+    mov     edx, 24
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.fract_bytes:
+    db 0x66, 0x48, 0x0F, 0x6E, 0xC0           ; movq xmm0, rax
+    db 0x66, 0x0F, 0x28, 0xC8                  ; movapd xmm1, xmm0
+    db 0x66, 0x0F, 0x3A, 0x0B, 0xC9, 0x01     ; roundsd xmm1,xmm1,1 (floor)
+    db 0x66, 0x0F, 0x5C, 0xC1                  ; subsd xmm0, xmm1
+    db 0x66, 0x48, 0x0F, 0x7E, 0xC0           ; movq rax, xmm0
+
+; codegen_emit_rdrand64: rdrand rax (64-bit hardware random)
+codegen_emit_rdrand64:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .rand_bytes]
+    mov     edx, 4
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.rand_bytes:
+    db 0x48, 0x0F, 0xC7, 0xF0                  ; rdrand rax
+
+; codegen_emit_hash_rax: 64-bit multiplicative hash of rax
+; Uses a single LCG step: rax = rax * K
+codegen_emit_hash_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .hash_bytes]
+    mov     edx, 14
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.hash_bytes:
+    db 0x48, 0xB9                              ; mov rcx, imm64
+    db 0x2D, 0x7F, 0x95, 0x4C, 0x2D, 0xF4, 0x51, 0x58  ; 0x5851F42D4C957F2D
+    db 0x48, 0x0F, 0xAF, 0xC1                 ; imul rax, rcx
+
+; codegen_emit_carry_rax: setc al; movzx rax, al → CF flag as 0/1
+codegen_emit_carry_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .carry_bytes]
+    mov     edx, 7
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.carry_bytes:
+    db 0x0F, 0x92, 0xC0                        ; setc al
+    db 0x48, 0x0F, 0xB6, 0xC0                 ; movzx rax, al
+
+; codegen_emit_overflow_rax: seto al; movzx rax, al → OF flag as 0/1
+codegen_emit_overflow_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .ovf_bytes]
+    mov     edx, 7
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.ovf_bytes:
+    db 0x0F, 0x90, 0xC0                        ; seto al
+    db 0x48, 0x0F, 0xB6, 0xC0                 ; movzx rax, al
+
+; codegen_emit_mov_rdi_rbx: emit mov rdi, rbx  (48 89 DF)
+codegen_emit_mov_rdi_rbx:
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xDF
+    call    emit_b
+    pop     rax
+    ret
+
+; codegen_emit_mov_rsi_rax: emit mov rsi, rax  (48 89 C6)
+codegen_emit_mov_rsi_rax:
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xC6
+    call    emit_b
+    pop     rax
+    ret
+
+; codegen_emit_neg_var(rdi=var_va): emit neg qword [var_va]  (48 F7 1C 25 <va>)
+codegen_emit_neg_var:
+    push    rax
+    push    rdi
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xF7
+    call    emit_b
+    mov     al, 0x1C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    pop     rdi
+    mov     eax, edi
+    call    emit_d
+    pop     rax
+    ret
+
+; codegen_emit_call_rt_str_cat: call rt_str_cat blob
+; Caller must set rdi=ptr1, rsi=ptr2 before this
+codegen_emit_call_rt_str_cat:
+    mov     rdi, LOAD_BASE + RT_STR_CAT_OFFSET
+    jmp     emit_call_abs
+
+; codegen_emit_seq_subscript: emit bounds-checked seq element load
+; Protocol (caller must do before calling this):
+;   1. push rax  (seq ptr from earlier variable load)
+;   2. parse index expr → rax = index
+;   3. call this function → emits pop+check+load
+codegen_emit_seq_subscript:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .ssub_bytes]
+    mov     edx, 19
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.ssub_bytes:
+    db 0x48, 0x89, 0xC1          ; mov rcx, rax  (index)
+    db 0x5B                      ; pop rbx        (seq ptr)
+    db 0x48, 0x3B, 0x4B, 0x08   ; cmp rcx, [rbx+8] (bounds)
+    db 0x73, 0x07                ; jae .oob (+7 from next=offset 11 → target=18)
+    db 0x48, 0x8B, 0x44, 0xCB, 0x10  ; mov rax, [rbx+rcx*8+16]
+    db 0xEB, 0x02                ; jmp .done (+2)
+    db 0x31, 0xC0                ; .oob: xor eax, eax
+    ; .done: (falls through — next instruction)
+
+; codegen_emit_seq_in(rdi=seq_var_va): linear search → rax = 1 (found) / -1 (not found)
+; Protocol:
+;   1. parser evaluates search value → rax
+;   2. parser calls codegen_emit_push_rax  (saves value)
+;   3. parser calls codegen_emit_seq_in(rdi=seq_var_va)
+codegen_emit_seq_in:
+    push    rbx
+    push    rsi
+    push    rcx
+    push    rdi
+    ; emit: mov rbx, [var_va]
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x1C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    pop     rax
+    push    rdi                     ; var_va as 32-bit address
+    pop     rdi
+    push    rdi
+    mov     eax, edi
+    call    emit_d
+    pop     rdi
+    ; emit loop body
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .sin_code]
+    mov     edx, 43
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    pop     rdi
+    pop     rcx
+    pop     rsi
+    pop     rbx
+    ret
+.sin_code:
+    db 0x48, 0x8B, 0x4B, 0x08    ; mov rcx, [rbx+8]  (len)
+    db 0x31, 0xD2                 ; xor edx, edx       (index=0)
+    db 0x58                       ; pop rax             (search value)
+    ; .search: (offset 7)
+    db 0x48, 0x85, 0xC9          ; test rcx, rcx
+    db 0x74, 18                  ; jz .notfound: next=12, target=30, rel8=18
+    db 0x48, 0x3B, 0x44, 0xD3, 0x10  ; cmp rax, [rbx+rdx*8+16]
+    db 0x74, 0x08                ; je .found: next=19, target=27, rel8=8
+    db 0x48, 0xFF, 0xC2          ; inc rdx
+    db 0x48, 0xFF, 0xC9          ; dec rcx
+    db 0xEB, 0xEC                ; jmp .search: next=27, target=7, rel8=-20=0xEC
+    ; .found: (offset 27)
+    db 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00  ; mov rax, 1
+    db 0xEB, 0x07                ; jmp .done: next=36, target=43, rel8=7
+    ; .notfound: (offset 36)
+    db 0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF  ; mov rax, -1
+    ; .done: (offset 43)
 
 ; ============================================================
 ; codegen_finish: patches ELF header with final sizes
