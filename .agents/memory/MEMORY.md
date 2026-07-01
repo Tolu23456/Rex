@@ -7,6 +7,6 @@
 - [RexC & RIC instruction set spec](rex-rexc-spec.md) — full bytecode format, core/memory/IO opcodes (0x00–0x7F), and RIC SIMD layer (0x80–0xFF) with vector types and platform mappings.
 - [RexC backend build layout](rexc-backend-build.md) — rxc/ directory, Makefile tab fix, include path conventions, duplicate label pitfall.
 - [Rex docs second-pass decisions](rex-docs-v2.md) — all confirmed design decisions now reflected in design.md, grammar.md, syn.md; key rules for future consistency.
-- [O-G RMW fusion](og-rmw.md) — in-place accumulation peephole in codegen_emit_store_rax_to_var; encoding rules, interaction with O-A pin and Pattern A-reg, and the `:x=0` vs `int x=0` footgun.
+- [O-G RMW fusion](og-rmw.md) — RMW peephole (all 5 ops), triangular+anti-sum fold (ADD/SUB closed form), og_op_code BSS field, XOR opcode=0x31 not 0x33.
 - [O-H and Loop Rolling](loop-rolling.md) — static+runtime triangular fold, constant-mul ladder; BSS layout, fe_rolling_done_dyn vs fe_rolling_done split, jmp guard before .roll_tri_runtime.
 - [Rex triangular sum fold activation](fold-activation.md) — the 20-byte r15-accum peephole is the critical bridge; without it the fold never fires; for :i parser fix; Rex now beats C -O3.

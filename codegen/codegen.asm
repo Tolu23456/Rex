@@ -179,8 +179,9 @@ leave_patch_cnt:    resq 1                      ; number of epilogue patches
 for_from_val:         resq 1    ; from_imm saved by codegen_emit_for_start
 for_to_val:           resq 1    ; to_imm saved by codegen_emit_for_start
 for_body_start_idx:   resq 1    ; out_idx at end of for_start preamble (= body start)
-og_fired_in_body:     resb 1    ; 1 when O-G ADD/r15 RMW fired in current loop body
+og_fired_in_body:     resb 1    ; 1 when O-G ADD/SUB/r15 RMW fired in current loop body
 og_rw_addr32:         resd 1    ; 32-bit VA of O-G RMW target
+og_op_code:           resb 1    ; operator of O-G fold (0x01=ADD, 0x29=SUB, etc.)
 oh_mul_fired_in_body: resb 1    ; 1 when constant imul body detected in current loop
 oh_mul_addr32:        resd 1    ; 32-bit VA of constant-mul target
 oh_mul_const:         resq 1    ; multiplier constant A (64-bit, sign-extended)
@@ -281,6 +282,7 @@ codegen_init:
     mov     qword [for_to_val],        0
     mov     qword [for_body_start_idx],0
     mov     byte  [og_fired_in_body],  0
+    mov     byte  [og_op_code],        0
     mov     byte  [oh_mul_fired_in_body], 0
     mov     qword [oh_mul_const],      0
     ret
@@ -1294,32 +1296,45 @@ codegen_emit_store_rax_to_var:
     cmp     byte [emit_tail + rax], 0xD3
     jne     .og_check_11
 
-    ; Check tail[-3..-1] = 48 01 D8  (add rax, rbx)
+    ; Check tail[-3] = 48 (REX.W prefix for rax/rbx op)
     mov     rax, rcx
     sub     rax, 3
     and     rax, 31
     cmp     byte [emit_tail + rax], 0x48
     jne     .og_check_11
 
+    ; Save opcode from tail[-2] and validate: add/sub/or/and/xor rax,rbx
     mov     rax, rcx
     sub     rax, 2
     and     rax, 31
-    cmp     byte [emit_tail + rax], 0x01
-    jne     .og_check_11
+    movzx   r9d, byte [emit_tail + rax]   ; r9b = opcode
+    cmp     r9b, 0x01   ; add rax, rbx
+    je      .og20_op_ok
+    cmp     r9b, 0x29   ; sub rax, rbx
+    je      .og20_op_ok
+    cmp     r9b, 0x09   ; or  rax, rbx
+    je      .og20_op_ok
+    cmp     r9b, 0x21   ; and rax, rbx
+    je      .og20_op_ok
+    cmp     r9b, 0x31   ; xor rax, rbx
+    je      .og20_op_ok
+    jmp     .og_check_11
+.og20_op_ok:
 
+    ; Check tail[-1] = D8 (ModRM rax,rbx — shared by all five opcodes)
     mov     rax, rcx
     sub     rax, 1
     and     rax, 31
     cmp     byte [emit_tail + rax], 0xD8
     jne     .og_check_11
 
-    ; Matched: roll back 20 bytes, emit  add [addr32], r15
-    ; Encoding: 4C 01 3C 25 addr32  (8 bytes)
+    ; Matched: roll back 20 bytes, emit  OP [addr32], r15
+    ; Encoding: 4C [opcode] 3C 25 addr32  (8 bytes)
     sub     qword [out_idx], 20
     sub     qword [emit_tail_len], 20
     mov     al, 0x4C
     call    emit_b
-    mov     al, 0x01
+    mov     al, r9b         ; opcode (add/sub/or/and/xor)
     call    emit_b
     mov     al, 0x3C
     call    emit_b
@@ -1327,8 +1342,9 @@ codegen_emit_store_rax_to_var:
     call    emit_b
     mov     eax, r12d
     call    emit_d
-    ; Signal to for_end: O-G RMW fired, body = 8 bytes, enabling triangular sum fold
+    ; Signal to for_end: O-G RMW fired, body = 8 bytes
     mov     byte [og_fired_in_body], 1
+    mov     byte [og_op_code], r9b
     mov     dword [og_rw_addr32], r12d
     jmp     .peephole_done
 
@@ -1413,12 +1429,16 @@ codegen_emit_store_rax_to_var:
     jmp     .og_sub14_check
 
 .og_r15_ok:
-    ; Track ADD r15 RMW for loop rolling (triangular sum fold)
+    ; Track ADD/SUB r15 RMW for loop rolling (triangular/anti-sum fold)
     cmp     byte [loop_pin_active], 0
     je      .og_r15_emit
-    cmp     r9b, 0x01               ; only ADD triggers triangular sum
+    cmp     r9b, 0x01               ; ADD triggers triangular sum fold
+    je      .og_r15_fold_signal
+    cmp     r9b, 0x29               ; SUB triggers anti-sum fold
     jne     .og_r15_emit
+.og_r15_fold_signal:
     mov     byte [og_fired_in_body], 1
+    mov     byte [og_op_code], r9b
     mov     dword [og_rw_addr32], r12d
 .og_r15_emit:
     ; Roll back 11 bytes (load + 3-byte op), emit OP [abs32], r15
@@ -3994,6 +4014,7 @@ codegen_emit_for_start:
     mov     byte [for_to_is_var], 0     ; static bounds (compile-time to)
     ; clear rolling flags (fresh body)
     mov     byte [og_fired_in_body],  0
+    mov     byte [og_op_code],        0
     mov     byte [oh_mul_fired_in_body], 0
 
     ; emit: jmp .check  (skip increment on first iteration)
@@ -4100,8 +4121,8 @@ codegen_emit_for_end:
     cmp     byte [loop_pin_active], 0
     je      .fe_normal_backjump
 
-    ; ---- Triangular sum: total += i  →  total += N*(from+to-1)/2 ----
-    ; Fires when: O-G ADD+r15 is the sole body (8 bytes)
+    ; ---- Triangular/anti-sum fold: total OP= i  →  total OP= ±N*(from+to-1)/2 ----
+    ; Fires when: O-G ADD or SUB +r15 is the sole body (8 bytes)
     cmp     byte [og_fired_in_body], 0
     je      .fe_check_oh_mul
 
@@ -4109,6 +4130,13 @@ codegen_emit_for_end:
     sub     rax, [for_body_start_idx]
     cmp     rax, 8
     jne     .fe_check_oh_mul        ; body has more than just the 8-byte RMW
+
+    ; Only ADD and SUB have a closed-form fold; OR/AND/XOR do not
+    cmp     byte [og_op_code], 0x01     ; ADD
+    je      .tri_fold_op_ok
+    cmp     byte [og_op_code], 0x29     ; SUB
+    jne     .fe_check_oh_mul
+.tri_fold_op_ok:
 
     ; Branch on static vs runtime 'to' bound
     cmp     byte [for_to_is_var], 0
@@ -4210,10 +4238,17 @@ codegen_emit_for_end:
     call    emit_b
     mov     al, 0xF8
     call    emit_b
-    ; Emit: add [og_rw_addr32], rax  =  48 01 04 25 addr (8 bytes)  ← .done target
+    ; Emit: ADD or SUB [og_rw_addr32], rax  (8 bytes)  ← .done target
+    ; ADD: 48 01 04 25 addr    SUB: 48 29 04 25 addr
     mov     al, 0x48
     call    emit_b
-    mov     al, 0x01
+    cmp     byte [og_op_code], 0x01
+    je      .rt_op_add
+    mov     al, 0x29            ; sub [addr], rax
+    jmp     .rt_op_emit
+.rt_op_add:
+    mov     al, 0x01            ; add [addr], rax
+.rt_op_emit:
     call    emit_b
     mov     al, 0x04
     call    emit_b
@@ -4225,7 +4260,8 @@ codegen_emit_for_end:
     jmp     .fe_rolling_done_dyn
 
 .roll_tri_large:
-    ; movabs rax, delta (48 B8 imm64, 10 bytes) + add [addr32], rax (48 01 04 25 addr32, 8 bytes)
+    ; movabs rax, delta (10 bytes) + ADD/SUB [addr32], rax (8 bytes)
+    ; ADD: 48 01 04 25 addr    SUB: 48 29 04 25 addr
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -4235,7 +4271,13 @@ codegen_emit_for_end:
     call    emit_q
     mov     al, 0x48
     call    emit_b
-    mov     al, 0x01
+    cmp     byte [og_op_code], 0x01
+    je      .tri_large_add
+    mov     al, 0x29            ; sub [addr32], rax
+    jmp     .tri_large_op
+.tri_large_add:
+    mov     al, 0x01            ; add [addr32], rax
+.tri_large_op:
     call    emit_b
     mov     al, 0x04
     call    emit_b
@@ -4247,13 +4289,21 @@ codegen_emit_for_end:
     jmp     .fe_rolling_done
 
 .roll_tri_small:
-    ; add qword [addr32], imm32  =  48 81 04 25 addr32 imm32  (12 bytes)
+    ; ADD/SUB qword [addr32], imm32  (12 bytes)
+    ; ADD: 48 81 04 25 addr imm32  (/0 = ADD)
+    ; SUB: 48 81 2C 25 addr imm32  (/5 = SUB)
     push    rax
     mov     al, 0x48
     call    emit_b
     mov     al, 0x81
     call    emit_b
-    mov     al, 0x04
+    cmp     byte [og_op_code], 0x01
+    je      .tri_small_add
+    mov     al, 0x2C            ; /5 = SUB qword [addr32], imm32
+    jmp     .tri_small_modrm
+.tri_small_add:
+    mov     al, 0x04            ; /0 = ADD qword [addr32], imm32
+.tri_small_modrm:
     call    emit_b
     mov     al, 0x25
     call    emit_b
@@ -4431,6 +4481,7 @@ codegen_emit_for_end:
     mov     qword [loop_pin_var_va], -1
     mov     qword [reg_cache_var], -1
     mov     byte [og_fired_in_body], 0
+    mov     byte [og_op_code], 0
     mov     byte [oh_mul_fired_in_body], 0
     mov     byte [for_to_is_var], 0
 
@@ -4494,6 +4545,7 @@ codegen_emit_for_end:
 .for_end_no_flush:
     ; clear rolling flags for next loop
     mov     byte [og_fired_in_body], 0
+    mov     byte [og_op_code], 0
     mov     byte [oh_mul_fired_in_body], 0
     mov     byte [for_to_is_var], 0
     ; reset step
@@ -4547,6 +4599,7 @@ codegen_emit_for_start_dyn:
     mov     byte [for_to_is_var], 1
     mov     [for_to_var_va], r14
     mov     byte [og_fired_in_body], 0
+    mov     byte [og_op_code], 0
     mov     byte [oh_mul_fired_in_body], 0
 
     ; emit: jmp .check  (skip increment on first iteration)
