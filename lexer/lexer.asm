@@ -993,9 +993,6 @@ scan_operator:
     ; Single-char tokens
     cmp     al, ':'
     je      .emit_tok
-    mov     dword [cur_tok], TOK_COLON
-    cmp     al, ':'
-    je      .single
     cmp     al, '('
     jne     .c1
     mov     dword [cur_tok], TOK_LPAREN

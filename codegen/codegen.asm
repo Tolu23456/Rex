@@ -172,7 +172,7 @@ loop_pin_var_va:    resq 1                      ; var VA pinned in r15
 
 ; O-F: FLC patch lists (sub rsp and epilogue add rsp)
 frame_size_patch_pos: resq 1                    ; out_idx of imm32 in sub rsp, N
-leave_patch_list:   resq 16                     ; up to 16 epilogue patch positions
+leave_patch_list:   resq 32                     ; up to 32 epilogue patch positions
 leave_patch_cnt:    resq 1                      ; number of epilogue patches
 
 ; Loop rolling / O-H state (saved at for_start, consumed at for_end)
@@ -576,6 +576,8 @@ emit_b:
     push    rcx
     push    rdi
     mov     rcx, [out_idx]
+    cmp     rcx, OUT_BUF_SIZE - 1
+    jge     .emit_b_ov
     mov     [out_buffer + rcx], al
     inc     rcx
     mov     [out_idx], rcx
@@ -587,6 +589,15 @@ emit_b:
     pop     rdi
     pop     rcx
     ret
+.emit_b_ov:
+    mov     rax, SYS_write
+    mov     rdi, 2
+    lea     rsi, [err_buf_ov]
+    mov     rdx, 28
+    syscall
+    mov     rax, SYS_exit
+    mov     rdi, 1
+    syscall
 
 emit_d:
     ; eax = dword to emit (little-endian)
@@ -595,6 +606,8 @@ emit_d:
     push    rdi
     push    rax
     mov     rcx, [out_idx]
+    cmp     rcx, OUT_BUF_SIZE - 4
+    ja      .emit_d_ov
     mov     [out_buffer + rcx], eax
     add     rcx, 4
     mov     [out_idx], rcx
@@ -630,6 +643,15 @@ emit_d:
     pop     rdx
     pop     rcx
     ret
+.emit_d_ov:
+    mov     rax, SYS_write
+    mov     rdi, 2
+    lea     rsi, [err_buf_ov]
+    mov     rdx, 28
+    syscall
+    mov     rax, SYS_exit
+    mov     rdi, 1
+    syscall
 
 emit_q:
     ; rax = qword to emit
@@ -638,6 +660,8 @@ emit_q:
     push    rdi
     push    rax
     mov     rcx, [out_idx]
+    cmp     rcx, OUT_BUF_SIZE - 8
+    ja      .emit_q_ov
     mov     [out_buffer + rcx], rax
     add     rcx, 8
     mov     [out_idx], rcx
@@ -689,6 +713,15 @@ emit_q:
     pop     rdx
     pop     rcx
     ret
+.emit_q_ov:
+    mov     rax, SYS_write
+    mov     rdi, 2
+    lea     rsi, [err_buf_ov]
+    mov     rdx, 28
+    syscall
+    mov     rax, SYS_exit
+    mov     rdi, 1
+    syscall
 
 emit_blob:
     ; rsi = source pointer, rcx = byte count
@@ -5581,7 +5614,7 @@ codegen_emit_leave_placeholder:
     ; Save out_idx (position of imm32) to leave_patch_list
     mov     rax, [out_idx]
     mov     rbx, [leave_patch_cnt]
-    cmp     rbx, 15
+    cmp     rbx, 31
     jge     .lp_skip
     mov     [leave_patch_list + rbx*8], rax
     inc     qword [leave_patch_cnt]

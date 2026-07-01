@@ -206,6 +206,8 @@ strcpy_to:
     push    rcx
     xor     ecx, ecx
 .loop:
+    cmp     ecx, 255
+    jge     .done
     movzx   eax, byte [rdi + rcx]
     mov     [rsi + rcx], al
     test    al, al
@@ -213,5 +215,6 @@ strcpy_to:
     inc     ecx
     jmp     .loop
 .done:
+    mov     byte [rsi + rcx], 0
     pop     rcx
     ret
