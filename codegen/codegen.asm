@@ -184,6 +184,8 @@ og_rw_addr32:         resd 1    ; 32-bit VA of O-G RMW target
 oh_mul_fired_in_body: resb 1    ; 1 when constant imul body detected in current loop
 oh_mul_addr32:        resd 1    ; 32-bit VA of constant-mul target
 oh_mul_const:         resq 1    ; multiplier constant A (64-bit, sign-extended)
+for_to_is_var:        resb 1    ; 1 when for-loop 'to' is a variable (runtime fold)
+for_to_var_va:        resq 1    ; VA of the 'to' variable (when for_to_is_var=1)
 
 ; ============================================================
 ; DATA — ELF header template (176 bytes) + runtime JMP (5 bytes)
@@ -392,7 +394,7 @@ codegen_peephole_r10:
     cmp     byte [emit_tail + rax], 0xD3
     jne     .r10_check_e
 
-    ; Pattern F matched: rollback 6, emit mov rbx,rax + 3 NOPs
+    ; Pattern F matched: rollback 6, emit mov rbx,rax (3 bytes — no NOPs)
     sub     qword [out_idx], 6
     sub     qword [emit_tail_len], 6
     mov     al, 0x48
@@ -400,10 +402,6 @@ codegen_peephole_r10:
     mov     al, 0x89
     call    emit_b
     mov     al, 0xc3
-    call    emit_b
-    mov     al, 0x90
-    call    emit_b
-    call    emit_b
     call    emit_b
     jmp     .r10_done
 
@@ -469,7 +467,7 @@ codegen_peephole_r10:
     mov     rdi, [out_idx]
     mov     edi, dword [out_buffer + rdi - 7]
 
-    ; rollback 14 bytes, emit: mov rbx,rax + mov rax,[abs32] + 3 NOPs
+    ; rollback 14 bytes, emit: mov rbx,rax(3) + mov rax,[abs32](8) = 11 bytes (no NOPs)
     sub     qword [out_idx], 14
     sub     qword [emit_tail_len], 14
     mov     al, 0x48
@@ -488,10 +486,6 @@ codegen_peephole_r10:
     call    emit_b
     mov     eax, edi
     call    emit_d
-    mov     al, 0x90
-    call    emit_b
-    call    emit_b
-    call    emit_b
 
 .r10_done:
     pop     rdi
@@ -3997,6 +3991,7 @@ codegen_emit_for_start:
     ; save loop bounds for rolling / O-H folding
     mov     [for_from_val], r13         ; from_imm
     mov     [for_to_val],   r14         ; to_imm
+    mov     byte [for_to_is_var], 0     ; static bounds (compile-time to)
     ; clear rolling flags (fresh body)
     mov     byte [og_fired_in_body],  0
     mov     byte [oh_mul_fired_in_body], 0
@@ -4115,7 +4110,11 @@ codegen_emit_for_end:
     cmp     rax, 8
     jne     .fe_check_oh_mul        ; body has more than just the 8-byte RMW
 
-    ; Compute delta = N*(from+to-1)/2  where N = to-from
+    ; Branch on static vs runtime 'to' bound
+    cmp     byte [for_to_is_var], 0
+    jne     .roll_tri_runtime
+
+    ; STATIC: Compute delta = N*(from+to-1)/2  where N = to-from  (compile time)
     mov     r10, [for_to_val]
     mov     r11, [for_from_val]
     sub     r10, r11                ; r10 = N
@@ -4142,6 +4141,88 @@ codegen_emit_for_end:
     jz      .roll_tri_small
     cmp     rax, -1
     je      .roll_tri_small
+    jmp     .roll_tri_large     ; static large-delta path — must not fall into runtime block
+
+.roll_tri_runtime:
+    ; RUNTIME: delta = N*(N-1)/2  where N = [to_var_va]  (for from=0)
+    ; Emits 36-byte sequence with a forward-jump guard for N<=0.
+    ; Formula for from!=0 not yet implemented — fall back to normal loop.
+    cmp     qword [for_from_val], 0
+    jne     .fe_normal_backjump
+
+    ; Rewind body (remove the 8-byte O-G RMW)
+    mov     rax, [for_body_start_idx]
+    mov     [out_idx], rax
+    sub     qword [emit_tail_len], 8
+
+    ; Emit: mov rax, [to_var_va]  =  48 8B 04 25 addr (8 bytes)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [for_to_var_va]
+    call    emit_d
+    ; Emit: test rax, rax  =  48 85 C0 (3 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; Emit: jle .done  =  0F 8E 13 00 00 00  (rel32=19: skips lea+imul+sar+add = 4+4+3+8)
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x8E
+    call    emit_b
+    mov     al, 19
+    call    emit_b
+    xor     eax, eax
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    ; Emit: lea rbx, [rax-1]  =  48 8D 58 FF (4 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8D
+    call    emit_b
+    mov     al, 0x58
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    ; Emit: imul rax, rbx  =  48 0F AF C3 (4 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xAF
+    call    emit_b
+    mov     al, 0xC3
+    call    emit_b
+    ; Emit: sar rax, 1  =  48 D1 F8 (3 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xD1
+    call    emit_b
+    mov     al, 0xF8
+    call    emit_b
+    ; Emit: add [og_rw_addr32], rax  =  48 01 04 25 addr (8 bytes)  ← .done target
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [og_rw_addr32]
+    call    emit_d
+    pop     rax
+    jmp     .fe_rolling_done_dyn
 
 .roll_tri_large:
     ; movabs rax, delta (48 B8 imm64, 10 bytes) + add [addr32], rax (48 01 04 25 addr32, 8 bytes)
@@ -4299,8 +4380,35 @@ codegen_emit_for_end:
     pop     rax
     jmp     .fe_rolling_done
 
+.fe_rolling_done_dyn:
+    ; Dynamic to: set loop variable = [to_var_va] at runtime
+    ; emit: mov rax,[to_var_va](8) + mov [var_va],rax(8) = 16 bytes
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [for_to_var_va]
+    call    emit_d
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r14d               ; var VA (loop variable)
+    call    emit_d
+    pop     rax
+    jmp     .fe_rolling_done_common
+
 .fe_rolling_done:
-    ; Set loop variable to its post-loop value (= to_imm)
+    ; Static to: set loop variable to its post-loop value (= to_imm)
     ; Emits: mov qword [var_va], to  =  48 C7 04 25 var_va32 to_imm32  (10 bytes)
     push    rax
     mov     al, 0x48
@@ -4317,12 +4425,14 @@ codegen_emit_for_end:
     call    emit_d                  ; to_imm32 (final loop-var value)
     pop     rax
 
+.fe_rolling_done_common:
     ; Clear pin and rolling flags
     mov     byte [loop_pin_active], 0
     mov     qword [loop_pin_var_va], -1
     mov     qword [reg_cache_var], -1
     mov     byte [og_fired_in_body], 0
     mov     byte [oh_mul_fired_in_body], 0
+    mov     byte [for_to_is_var], 0
 
     ; Patch jge exit, clean up break/cont stacks, decrement loop depth
     mov     rdi, r13
@@ -4385,6 +4495,7 @@ codegen_emit_for_end:
     ; clear rolling flags for next loop
     mov     byte [og_fired_in_body], 0
     mov     byte [oh_mul_fired_in_body], 0
+    mov     byte [for_to_is_var], 0
     ; reset step
     mov     qword [for_step_val], 1
 
@@ -4400,83 +4511,120 @@ codegen_emit_for_start_dyn:
     push    r13
     push    r14
     push    r15
-    mov     r12, rdi
-    mov     r13, rsi
+    mov     r12, rdi                ; var VA (loop counter variable)
+    mov     r13, rsi                ; from_imm
     mov     r14, rdx                ; to_var_va
 
-    ; init counter
+    ; O-A: init r15 with loop counter (same as static for-loop)
     test    r13, r13
-    jnz     .di_nz
+    jnz     .dyn_init_nz
     push    rax
+    mov     al, 0x45                ; xor r15d, r15d  (45 31 FF)
+    call    emit_b
     mov     al, 0x31
     call    emit_b
-    mov     al, 0xc0
+    mov     al, 0xff
     call    emit_b
-    mov     al, 0x89
+    pop     rax
+    jmp     .dyn_set_state
+
+.dyn_init_nz:
+    push    rax
+    mov     al, 0x41                ; mov r15d, imm32  (41 BF imm32)
     call    emit_b
-    mov     al, 0x04
+    mov     al, 0xbf
     call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r12d
+    mov     eax, r13d
     call    emit_d
     pop     rax
-    jmp     .di_top
-.di_nz:
-    mov     rdi, r13
-    call    codegen_emit_mov_rax_imm64
-    mov     rdi, r12
-    call    codegen_emit_store_rax_to_var
 
-.di_top:
-    ; O-E: align loop condition to 16-byte boundary
-    call    codegen_align_loop_top
+.dyn_set_state:
+    ; Activate O-A pin and record dynamic-to state for runtime fold
+    mov     byte [loop_pin_active], 1
+    mov     qword [loop_pin_var_va], r12
+    mov     qword [reg_cache_var], r12
+    mov     [for_from_val], r13
+    mov     byte [for_to_is_var], 1
+    mov     [for_to_var_va], r14
+    mov     byte [og_fired_in_body], 0
+    mov     byte [oh_mul_fired_in_body], 0
 
-    mov     r15, [out_idx]
-
-    ; cmp [var_va], [to_var_va]: load both, compare
-    ; emit: mov rax, [var_va]; cmp rax, [to_var_va]; jge exit
+    ; emit: jmp .check  (skip increment on first iteration)
     push    rax
-    mov     al, 0x48                ; mov rax, [var_va]
-    call    emit_b
-    mov     al, 0x8b
-    call    emit_b
-    mov     al, 0x04
-    call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r12d
-    call    emit_d
-    mov     al, 0x48                ; cmp rax, [to_var_va]
-    call    emit_b
-    mov     al, 0x3b
-    call    emit_b
-    mov     al, 0x04
-    call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r14d
-    call    emit_d
-    mov     al, 0x0f                ; jge rel32
-    call    emit_b
-    mov     al, 0x8d
+    mov     al, 0xe9
     call    emit_b
     mov     rax, [out_idx]
-    mov     r13, rax
+    mov     r15, rax                ; save jmp patch offset
     xor     eax, eax
     call    emit_d
     pop     rax
 
-    mov     rdi, r15
+    ; Increment point: inc r15  (cont target for continue / for_end back-jump)
+    call    codegen_get_out_idx
+    mov     [for_cont_addr], rax
+    mov     rdi, rax
     call    codegen_push_cont
+    push    rax
+    mov     al, 0x49                ; inc r15  (49 FF C7)
+    call    emit_b
+    mov     al, 0xff
+    call    emit_b
+    mov     al, 0xc7
+    call    emit_b
+    pop     rax
+
+    ; O-E: align condition to 16-byte boundary
+    call    codegen_align_loop_top
+
+    ; Patch jmp → here (condition check)
+    push    rax
+    push    rdi
+    mov     rdi, r15
+    call    codegen_patch_jump
+    pop     rdi
+    pop     rax
+
+    ; Save condition start (returned in rax)
+    mov     r15, [out_idx]
+
+    ; Condition: cmp r15, [to_var_va]  =  4C 3B 3C 25 addr (8 bytes)
+    ; REX.WR=4C: W=1(64-bit), R=1(reg=r15 high bit), opcode 3B=CMP r64,r/m64
+    ; ModRM 3C: mod=00 reg=7(r15&7) rm=4(SIB)  SIB 25: scale=0 idx=4 base=5(disp32)
+    push    rax
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x3B
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r14d               ; to_var_va addr32
+    call    emit_d
+    ; jge rel32  (0F 8D rel32)
+    mov     al, 0x0f
+    call    emit_b
+    mov     al, 0x8d
+    call    emit_b
+    mov     rax, [out_idx]
+    mov     r13, rax                ; save jge patch offset
+    xor     eax, eax
+    call    emit_d
+    pop     rax
+
+    ; Push break base
     mov     rdi, [break_base_depth]
     mov     rsi, [break_jump_depth]
     mov     [break_base_stack + rdi*8], rsi
     inc     qword [break_base_depth]
     inc     qword [loop_depth]
 
-    mov     rax, r15
-    mov     rbx, r13
+    ; Record body start position
+    mov     r8, [out_idx]
+    mov     [for_body_start_idx], r8
+
+    mov     rax, r15                ; return: loop_start = condition check
+    mov     rbx, r13                ; return: jge_patch offset
     pop     r15
     pop     r14
     pop     r13
