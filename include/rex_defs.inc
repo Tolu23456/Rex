@@ -77,6 +77,13 @@
 %define MEM_EXTRA           0x48000
 
 ; ----------------------------------------------------------------
+; Buffered stdout output (F-7)
+; 4096-byte ring buffer; flushed by codegen_emit_exit0 and when full
+; ----------------------------------------------------------------
+%define OUTPUT_BUF_BASE     0x447000   ; 4096-byte stdout write buffer
+%define OUTPUT_BUF_WPTR     0x448000   ; dword: bytes currently in buffer
+
+; ----------------------------------------------------------------
 ; Output buffer size
 ; ----------------------------------------------------------------
 %define OUT_BUF_SIZE        524288    ; 512 KB

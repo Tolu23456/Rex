@@ -188,6 +188,18 @@ oh_mul_const:         resq 1    ; multiplier constant A (64-bit, sign-extended)
 for_to_is_var:        resb 1    ; 1 when for-loop 'to' is a variable (runtime fold)
 for_to_var_va:        resq 1    ; VA of the 'to' variable (when for_to_is_var=1)
 
+; F-11: count-down loop form
+; When loop var 'i' is unused in body and there are no breaks/continues,
+; rewrite header to: mov r15d,N → body → dec r15 → jnz .top  (1 µop overhead vs 4)
+for_header_start_idx: resq 1   ; out_idx before for_start's first emit (before hoist slot)
+loop_var_used_in_body: resb 1  ; 1 = body reads loop var via r15 (blocks count-down)
+loop_has_skip:        resb 1   ; 1 = body has a skip/continue stmt (blocks count-down)
+cd_body_scratch:      resb 4096 ; temp buffer for count-down body copy (max 4 KB body)
+
+; F-10: LICM — hoist loop-invariant variable loads into r12
+for_hoist_slot_pos:   resq 1   ; position of the 8-NOP hoist slot in out_buffer
+licm_hoisted_addr:    resd 1   ; abs32 of the variable hoisted to r12 (0 = none)
+
 ; ============================================================
 ; DATA — ELF header template (176 bytes) + runtime JMP (5 bytes)
 ; ============================================================
@@ -285,6 +297,12 @@ codegen_init:
     mov     byte  [og_op_code],        0
     mov     byte  [oh_mul_fired_in_body], 0
     mov     qword [oh_mul_const],      0
+    ; F-10/F-11 state
+    mov     qword [for_header_start_idx], 0
+    mov     byte  [loop_var_used_in_body], 0
+    mov     byte  [loop_has_skip],     0
+    mov     qword [for_hoist_slot_pos], 0
+    mov     dword [licm_hoisted_addr], 0
     ret
 
 ; ---- codegen_get_out_idx: return current out_idx in rax ----
@@ -1045,6 +1063,11 @@ codegen_emit_mov_rax_var:
     jne     .not_cached
     pop     rdi
     pop     rax
+    ; F-11: body is reading the loop variable via r15 — block count-down rewrite
+    cmp     byte [loop_pin_active], 0
+    je      .cached_do_emit
+    mov     byte [loop_var_used_in_body], 1
+.cached_do_emit:
     ; Emit: mov rax, r15 = 4C 89 F8 (3 bytes)
     push    rax
     mov     al, 0x4c
@@ -3977,6 +4000,27 @@ codegen_emit_for_start:
     mov     r13, rsi                ; from
     mov     r14, rdx                ; to
 
+    ; F-10/F-11: record header start, emit 8-byte LICM hoist slot (NOPs),
+    ; and clear per-loop optimisation flags BEFORE any code is emitted.
+    ; Count-down rewrite will preserve this slot; LICM will patch it.
+    mov     r15, [out_idx]
+    mov     [for_header_start_idx], r15
+    mov     [for_hoist_slot_pos], r15
+    mov     byte [loop_var_used_in_body], 0
+    mov     byte [loop_has_skip], 0
+    mov     dword [licm_hoisted_addr], 0
+    push    rax
+    mov     al, 0x90                ; NOP × 8 (hoist slot placeholder)
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    pop     rax
+
     ; O-A: init r15 with loop counter (pin r15 = loop var)
     ; emit: mov r15d, from (zero-extends) or xor r15d,r15d if from==0
     test    r13, r13
@@ -4499,6 +4543,304 @@ codegen_emit_for_end:
     ret
 
     ; ================================================================
+    ; F-10 LICM + F-11 Count-down (static-bounds loops with O-A pin)
+    ; ================================================================
+.fe_licm_cd:
+    cmp     byte [loop_pin_active], 0
+    je      .fe_normal_backjump         ; no pin → skip both optimisations
+
+    ; --- F-10: LICM ---
+    ; Scan body for the first load-only abs32 variable (pattern 48 8B 04 25 addr32)
+    ; and hoist it to r12 by patching the hoist slot + all body loads.
+    ; Uses r10 as a byte-pointer into out_buffer; r11 = body end pointer; ecx = candidate addr.
+    lea     r10, [out_buffer]
+    add     r10, [for_body_start_idx]   ; r10 → body start
+    lea     r11, [out_buffer]
+    add     r11, [out_idx]              ; r11 → body end
+
+.licm_scan:
+    lea     rax, [r10 + 7]
+    cmp     rax, r11
+    jg      .licm_done
+    cmp     dword [r10], 0x25048B48     ; little-endian: 48 8B 04 25
+    jne     .licm_next
+    mov     ecx, dword [r10 + 4]        ; candidate addr32
+    cmp     rcx, [loop_pin_var_va]      ; skip: loop counter
+    je      .licm_next
+    cmp     ecx, [og_rw_addr32]         ; skip: O-G accumulation target
+    je      .licm_next
+    cmp     ecx, [oh_mul_addr32]        ; skip: O-H multiply target
+    je      .licm_next
+    ; inner scan: is ecx written anywhere in body?
+    push    r10
+    lea     r10, [out_buffer]
+    add     r10, [for_body_start_idx]
+.licm_ws:
+    lea     rax, [r10 + 8]
+    cmp     rax, r11
+    jg      .licm_clean                 ; not written → hoist!
+    cmp     byte [r10 + 2], 0x04
+    jne     .licm_try3c
+    cmp     byte [r10 + 3], 0x25
+    jne     .licm_try3c
+    cmp     dword [r10 + 4], ecx
+    jne     .licm_try3c
+    movzx   eax, byte [r10 + 1]         ; opcode
+    cmp     eax, 0x8B; je .licm_ws_next ; reg←mem (load): 8B
+    je      .licm_ws_next
+    cmp     eax, 0x03; je .licm_ws_next ; reg←mem: add
+    je      .licm_ws_next
+    cmp     eax, 0x0B; je .licm_ws_next ; reg←mem: or
+    je      .licm_ws_next
+    cmp     eax, 0x23; je .licm_ws_next ; reg←mem: and
+    je      .licm_ws_next
+    cmp     eax, 0x2B; je .licm_ws_next ; reg←mem: sub
+    je      .licm_ws_next
+    cmp     eax, 0x33; je .licm_ws_next ; reg←mem: xor
+    je      .licm_ws_next
+    jmp     .licm_ws_written            ; write opcode → not invariant
+.licm_try3c:
+    cmp     byte [r10 + 2], 0x3C        ; r15-dest pattern → always a write
+    jne     .licm_ws_next
+    cmp     byte [r10 + 3], 0x25
+    jne     .licm_ws_next
+    cmp     dword [r10 + 4], ecx
+    jne     .licm_ws_next
+.licm_ws_written:
+    pop     r10
+    jmp     .licm_next                  ; addr is written; try next load
+.licm_ws_next:
+    inc     r10
+    jmp     .licm_ws
+.licm_clean:
+    ; ecx = invariant addr32 → hoist to r12
+    pop     r10
+    ; patch hoist slot: 8 NOPs → mov r12,[abs32]  (4C 8B 24 25 ecx)
+    mov     rax, [for_hoist_slot_pos]
+    lea     rax, [out_buffer + rax]
+    mov     byte [rax],     0x4C
+    mov     byte [rax + 1], 0x8B
+    mov     byte [rax + 2], 0x24
+    mov     byte [rax + 3], 0x25
+    mov     dword [rax + 4], ecx
+    mov     [licm_hoisted_addr], ecx
+    ; patch every body load of ecx: 48 8B 04 25 ecx → mov rax,r12 + 5 NOPs
+    ;   4C 89 E0  (mov rax,r12)  +  90 90 90 90 90  (5×NOP)
+    lea     r10, [out_buffer]
+    add     r10, [for_body_start_idx]
+.licm_patch:
+    lea     rax, [r10 + 7]
+    cmp     rax, r11
+    jg      .licm_done
+    cmp     dword [r10], 0x25048B48
+    jne     .licm_pnext
+    cmp     dword [r10 + 4], ecx
+    jne     .licm_pnext
+    mov     byte [r10],     0x4C
+    mov     byte [r10 + 1], 0x89
+    mov     byte [r10 + 2], 0xE0
+    mov     byte [r10 + 3], 0x90
+    mov     byte [r10 + 4], 0x90
+    mov     byte [r10 + 5], 0x90
+    mov     byte [r10 + 6], 0x90
+    mov     byte [r10 + 7], 0x90
+    add     r10, 8
+    jmp     .licm_patch
+.licm_pnext:
+    inc     r10
+    jmp     .licm_patch
+.licm_next:
+    inc     r10
+    jmp     .licm_scan
+
+.licm_done:
+    ; --- F-11: Count-down ---
+    ; Rewrite: header + inc→jge loop  →  mov r15d,N + body + dec r15 + jnz
+    ; Saves 3 µops of loop overhead; enables dec/jnz macro-fusion on Intel.
+    cmp     byte [loop_var_used_in_body], 0
+    jne     .fe_normal_backjump         ; body reads i → can't count-down
+    cmp     byte [loop_has_skip], 0
+    jne     .fe_normal_backjump         ; body has skip/continue
+    cmp     byte [for_to_is_var], 0
+    jne     .fe_normal_backjump         ; dynamic bound → N not known statically
+    ; no break exits in this loop?
+    mov     rax, [break_base_depth]
+    dec     rax
+    mov     rbx, [break_base_stack + rax*8]
+    cmp     [break_jump_depth], rbx
+    jne     .fe_normal_backjump         ; breaks exist → can't count-down
+    ; body must fit in scratch buffer (≤ 4096 B)
+    mov     rbx, [out_idx]
+    sub     rbx, [for_body_start_idx]
+    cmp     rbx, 4096
+    jg      .fe_normal_backjump
+    test    rbx, rbx
+    jz      .fe_normal_backjump         ; empty body
+    ; N = to - from > 0
+    mov     r10, [for_to_val]
+    sub     r10, [for_from_val]
+    cmp     r10, 0
+    jle     .fe_normal_backjump
+
+    ; === Count-down rewrite ===
+    ; rbx = body_len, r10 = N
+
+    ; 1. Save body bytes to cd_body_scratch
+    push    rdi
+    push    rsi
+    mov     rdi, cd_body_scratch
+    mov     rsi, [for_body_start_idx]
+    lea     rsi, [out_buffer + rsi]
+    mov     rcx, rbx
+    rep     movsb
+    pop     rsi
+    pop     rdi
+
+    ; 2. Rewind out_idx to just after the hoist slot
+    mov     rax, [for_header_start_idx]
+    add     rax, 8
+    mov     [out_idx], rax
+    mov     qword [emit_tail_len], 0    ; invalidate peephole tail buffer
+
+    ; 3. Emit: mov r15d, N  (41 BF N32)
+    push    rax
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0xBF
+    call    emit_b
+    mov     eax, r10d
+    call    emit_d
+    pop     rax
+
+    ; 4. Align loop top (preserving rbx=body_len across the call)
+    push    rbx
+    call    codegen_align_loop_top
+    pop     rbx
+
+    ; 5. Record loop top position
+    mov     r10, [out_idx]
+
+    ; 6. Copy body bytes back
+    push    rdi
+    push    rsi
+    mov     rdi, [out_idx]
+    lea     rdi, [out_buffer + rdi]
+    mov     rsi, cd_body_scratch
+    mov     rcx, rbx
+    rep     movsb
+    pop     rsi
+    pop     rdi
+    add     [out_idx], rbx
+
+    ; 7. Emit: dec r15  (49 FF CF)
+    push    rax
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xCF
+    call    emit_b
+    pop     rax
+
+    ; 8. Emit: jnz loop_top  (short 75 rel8 or long 0F 85 rel32)
+    push    rax
+    push    rbx
+    mov     rax, r10
+    sub     rax, [out_idx]
+    sub     rax, 2                  ; rel8 candidate = top - (pc_after_short_jnz)
+    cmp     rax, -128
+    jl      .cd_jnz_long
+    mov     rbx, rax
+    mov     al, 0x75
+    call    emit_b
+    mov     rax, rbx
+    call    emit_b                  ; signed rel8
+    jmp     .cd_jnz_done
+.cd_jnz_long:
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    mov     rax, r10
+    sub     rax, [out_idx]
+    sub     rax, 4                  ; rel32 = top - (pc_after_long_jnz)
+    call    emit_d
+.cd_jnz_done:
+    pop     rbx
+    pop     rax
+
+    ; 9. Emit: mov [loop_var], to_val  (set post-loop value of i)
+    mov     r11, [for_to_val]
+    mov     rax, r11
+    sar     rax, 31
+    test    rax, rax
+    jz      .cd_setvar_small
+    cmp     rax, -1
+    je      .cd_setvar_small
+.cd_setvar_large:
+    ; movabs rax, to_val (10B) + mov [var_va], rax (8B)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xB8
+    call    emit_b
+    mov     rax, r11
+    call    emit_q
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [loop_pin_var_va]
+    call    emit_d
+    pop     rax
+    jmp     .cd_setvar_done
+.cd_setvar_small:
+    ; 48 C7 04 25 addr32 imm32  (12B, imm32 sign-extends to 64 bits)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xC7
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [loop_pin_var_va]
+    call    emit_d
+    mov     rax, r11                ; to_val low 32 bits
+    call    emit_d
+    pop     rax
+.cd_setvar_done:
+
+    ; 10. Clear all pin / rolling / F-11 state
+    mov     byte [loop_pin_active], 0
+    mov     qword [loop_pin_var_va], -1
+    mov     qword [reg_cache_var], -1
+    mov     byte [og_fired_in_body], 0
+    mov     byte [og_op_code], 0
+    mov     byte [oh_mul_fired_in_body], 0
+    mov     byte [for_to_is_var], 0
+    mov     byte [loop_var_used_in_body], 0
+    mov     byte [loop_has_skip], 0
+    mov     dword [licm_hoisted_addr], 0
+    mov     qword [for_step_val], 1
+
+    ; 11. Patch breaks (no-op), clean cont stack, decrement loop depth
+    ;     Do NOT call codegen_patch_jump(r13) — the jge slot is now dead code
+    call    codegen_patch_breaks
+    call    codegen_pop_cont
+    dec     qword [loop_depth]
+
+    pop     r14
+    pop     r13
+    pop     r12
+    ret
+
+    ; ================================================================
     ; Normal (non-rolled) loop end: emit back-jump + flush r15
     ; ================================================================
 .fe_normal_backjump:
@@ -4566,6 +4908,26 @@ codegen_emit_for_start_dyn:
     mov     r12, rdi                ; var VA (loop counter variable)
     mov     r13, rsi                ; from_imm
     mov     r14, rdx                ; to_var_va
+
+    ; F-10: record header start and emit 8-byte LICM hoist slot (NOPs).
+    ; Dynamic loops cannot count-down (N not statically known) but LICM still applies.
+    mov     r15, [out_idx]
+    mov     [for_header_start_idx], r15
+    mov     [for_hoist_slot_pos], r15
+    mov     byte [loop_var_used_in_body], 0
+    mov     byte [loop_has_skip], 0
+    mov     dword [licm_hoisted_addr], 0
+    push    rax
+    mov     al, 0x90                ; NOP × 8 (hoist slot placeholder)
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    pop     rax
 
     ; O-A: init r15 with loop counter (same as static for-loop)
     test    r13, r13
@@ -4875,6 +5237,8 @@ codegen_emit_skip:
     call    emit_d
     pop     rdi
 .skip_no_flush:
+    ; F-11: body has a skip (continue) — block count-down rewrite
+    mov     byte [loop_has_skip], 1
     mov     rbx, [cont_base_depth]
     dec     rbx
     mov     rbx, [cont_base_stack + rbx*8]  ; loop condition address
@@ -4894,7 +5258,66 @@ codegen_emit_skip:
 ; ============================================================
 codegen_emit_exit0:
     push    rax
-    ; mov rax, 60
+    ; ── Flush stdout output buffer (F-7) before exit ──────────────
+    ; mov eax, [OUTPUT_BUF_WPTR]  → 8B 04 25 wptr32  (7 bytes)
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, OUTPUT_BUF_WPTR        ; 0x448000
+    call    emit_d
+    ; test eax, eax  → 85 C0
+    mov     al, 0x85
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; jz .skip (21 bytes past this jz)  → 74 15
+    mov     al, 0x74
+    call    emit_b
+    mov     al, 0x15
+    call    emit_b
+    ; mov edx, eax  → 89 C2
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xC2
+    call    emit_b
+    ; mov rax, 1 (SYS_write)  → 48 C7 C0 01 00 00 00
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xC7
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0x00
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    ; mov edi, 1 (stdout)  → BF 01 00 00 00
+    mov     al, 0xBF
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0x00
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    ; mov esi, OUTPUT_BUF_BASE  → BE addr32
+    mov     al, 0xBE
+    call    emit_b
+    mov     eax, OUTPUT_BUF_BASE        ; 0x447000
+    call    emit_d
+    ; syscall  → 0F 05
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x05
+    call    emit_b
+    ; .skip: (21 bytes from jz: 2+7+5+5+2 = 21 ✓)
+    ; ── Exit ──────────────────────────────────────────────────────
+    ; mov rax, 60  → 48 C7 C0 3C 00 00 00
     mov     al, 0x48
     call    emit_b
     mov     al, 0xc7
@@ -4905,18 +5328,16 @@ codegen_emit_exit0:
     call    emit_b
     mov     al, 0x00
     call    emit_b
-    mov     al, 0x00
     call    emit_b
-    mov     al, 0x00
     call    emit_b
-    ; xor rdi, rdi
+    ; xor rdi, rdi  → 48 31 FF
     mov     al, 0x48
     call    emit_b
     mov     al, 0x31
     call    emit_b
     mov     al, 0xff
     call    emit_b
-    ; syscall
+    ; syscall  → 0F 05
     mov     al, 0x0f
     call    emit_b
     mov     al, 0x05
