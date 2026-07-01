@@ -22,6 +22,6 @@ prot pow(int base, int exp):
 int x = 0
 int i = 0
 while i < 1000000:
-    :x = @sum_to(1000)
+    :x = x + @sum_to(1000)
     :i = i + 1
 output x

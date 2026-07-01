@@ -1,7 +1,7 @@
 ; ============================================================
-; rt_pri — print signed int64 + newline to stdout (buffered)
+; rt_pri — print signed int64 + newline to stdout (direct syscall)
 ; Input:  rdi = signed 64-bit integer
-; Output: decimal digits + 0x0a to stdout output buffer
+; Output: decimal digits + 0x0a to stdout
 ; Clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10
 ; Preserves: rbx, rbp, r12–r15
 ; ============================================================
@@ -24,10 +24,7 @@ rt_pri_blob:
     mov     byte [r8], '0'
     mov     rsi, r8             ; "0\n"
     mov     edx, 2
-    call    .buf_write
-    add     rsp, 24
-    pop     rbx
-    ret
+    jmp     .do_write
 
 .nonzero:
     ; ---- INT64_MIN? ----
@@ -64,63 +61,28 @@ rt_pri_blob:
     lea     rcx, [rsp+23]       ; one past '\n'
     sub     rcx, r8             ; length
     mov     rsi, r8
-    mov     rdx, rcx
-    call    .buf_write
-    add     rsp, 24
-    pop     rbx
-    ret
+    mov     edx, ecx
+    jmp     .do_write
 
 .print_min:
     add     rsp, 24
     lea     rsi, [rel .min_str]
     mov     edx, 21
-    call    .buf_write
+    pop     rbx
+    mov     rax, SYS_write
+    mov     rdi, 1
+    syscall
+    ret
+
+.do_write:
+    mov     rax, SYS_write
+    mov     rdi, 1
+    syscall
+    add     rsp, 24
     pop     rbx
     ret
 
 .min_str:
     db "-9223372036854775808", 0x0a
-
-; ============================================================
-; .buf_write(rsi=str, rdx=len): write rdx bytes from rsi into
-;   the output buffer, flushing to stdout first if needed.
-; Clobbers: rax, rcx, rdi  Preserves: rbx, rsi, rdx, r8–r15
-; ============================================================
-.buf_write:
-    ; Load current write pointer
-    mov     eax, dword [OUTPUT_BUF_WPTR]
-    ; Check space: eax + rdx > 4095 → flush first
-    lea     ecx, [eax + edx]           ; ecx = new wptr (rdx ≤ 22, no overflow)
-    cmp     ecx, 4095
-    jg      .bw_flush
-.bw_copy:
-    ; Dest = OUTPUT_BUF_BASE + eax (eax = current wptr)
-    mov     rdi, OUTPUT_BUF_BASE
-    add     rdi, rax
-    mov     rcx, rdx                   ; length
-    push    rsi
-    rep     movsb                      ; copies [rsi..rsi+rcx) → [rdi..)
-    pop     rsi
-    ; Update write pointer to ecx (= old wptr + rdx, or rdx after flush)
-    mov     dword [OUTPUT_BUF_WPTR], ecx
-    ret
-.bw_flush:
-    ; Flush buffer: write current contents to stdout
-    test    eax, eax
-    jz      .bw_empty
-    push    rsi
-    push    rdx
-    mov     rdx, rax                   ; bytes to flush
-    mov     rax, 1                     ; SYS_write
-    mov     rdi, 1                     ; stdout fd
-    mov     rsi, OUTPUT_BUF_BASE
-    syscall
-    pop     rdx
-    pop     rsi
-.bw_empty:
-    xor     eax, eax                   ; wptr = 0 after flush
-    mov     dword [OUTPUT_BUF_WPTR], eax
-    mov     ecx, edx                   ; new wptr after copy = 0 + rdx = rdx
-    jmp     .bw_copy
 
 times RT_PRI_SIZE - ($ - rt_pri_blob) db 0x90

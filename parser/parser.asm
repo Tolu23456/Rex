@@ -759,18 +759,18 @@ parse_assign:
 
     advance                          ; consume '='
 
-    ; Parse expression
-    call    parse_expr
-
-    ; Find variable
+    ; Find variable BEFORE parse_expr — parse_expr can overwrite tmp_name
+    ; (e.g. @prot() calls copy the protocol name into tmp_name)
     lea     rdi, [tmp_name]
     call    var_find
     cmp     rax, -1
     je      .assign_err             ; undeclared
-
     mov     r12, rax
 
-    ; Store
+    ; Parse expression (may clobber tmp_name; r12 holds var index)
+    call    parse_expr
+
+    ; Store result into variable
     mov     rdi, r12
     call    get_var_va
     mov     rdi, rax

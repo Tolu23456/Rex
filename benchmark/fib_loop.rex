@@ -5,7 +5,7 @@ prot fib(int n):
 
 int i = 0
 int sum = 0
-while i < 10000000:
-    :sum = @fib(20)
+while i < 10000:
+    :sum = sum + @fib(20)
     :i = i + 1
 output sum
