@@ -28,6 +28,7 @@ global codegen_emit_mov_rax_imm64
 global codegen_emit_mov_rax_var
 global codegen_emit_store_rax_to_var
 global codegen_cache_var_begin, codegen_cache_var_end
+global codegen_emit_leave_placeholder
 global reg_cache_var, var_rbp_offsets
 global emit_tail, emit_tail_len
 global fused_cmp_var_addr
@@ -89,6 +90,8 @@ global codegen_emit_seq_subscript, codegen_emit_seq_in
 global codegen_emit_break_n
 global break_jump_depths
 global codegen_emit_mov_rdi_rbx, codegen_emit_mov_rsi_rax, codegen_emit_neg_var
+global codegen_align_loop_top, codegen_emit_zero_var
+global loop_pin_active
 
 ; ---- externs ----
 extern rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
@@ -162,6 +165,15 @@ fused_cmp_var_addr: resq 1                      ; -1 = no fused comparison
 for_step_val:       resq 1                      ; step value for current for-loop
 for_step_sign:      resb 1                      ; 0=positive, 1=negative
 for_cont_addr:      resq 1                      ; continue target for current for-loop
+
+; O-A: r15 register pin for static-bounds for-loops
+loop_pin_active:    resb 1                      ; 1 = r15 is pinned to loop counter
+loop_pin_var_va:    resq 1                      ; var VA pinned in r15
+
+; O-F: FLC patch lists (sub rsp and epilogue add rsp)
+frame_size_patch_pos: resq 1                    ; out_idx of imm32 in sub rsp, N
+leave_patch_list:   resq 16                     ; up to 16 epilogue patch positions
+leave_patch_cnt:    resq 1                      ; number of epilogue patches
 
 ; ============================================================
 ; DATA — ELF header template (176 bytes) + runtime JMP (5 bytes)
@@ -250,11 +262,225 @@ codegen_init:
     mov     qword [fwd_ref_count],     0
     mov     byte  [proto_section_open],0
     mov     qword [for_step_val],      1
+    mov     byte  [loop_pin_active],   0
+    mov     qword [loop_pin_var_va],   -1
+    mov     qword [leave_patch_cnt],   0
     ret
 
 ; ---- codegen_get_out_idx: return current out_idx in rax ----
 codegen_get_out_idx:
     mov     rax, [out_idx]
+    ret
+
+; ============================================================
+; O-E: Loop-top 16-byte alignment
+; Emits 0-15 NOP bytes to advance out_idx to next 16-byte boundary.
+; Call this just before recording the loop condition address.
+; ============================================================
+codegen_align_loop_top:
+    push    rax
+    push    rcx
+.alt_spin:
+    mov     rcx, [out_idx]
+    test    rcx, 15
+    jz      .alt_done
+    mov     al, 0x90
+    call    emit_b
+    jmp     .alt_spin
+.alt_done:
+    pop     rcx
+    pop     rax
+    ret
+
+; ============================================================
+; O-D: Short zero-init — emit  mov qword [addr32], 0  (9 bytes)
+; rdi = var VA (absolute 32-bit address)
+; Replaces the 18-byte movabs+store form for zero initialization.
+; ============================================================
+codegen_emit_zero_var:
+    push    rax
+    push    rdi
+    ; 48 C7 04 25 <addr32> 00 00 00 00
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xc7
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    pop     rdi
+    mov     eax, edi
+    call    emit_d
+    xor     eax, eax
+    call    emit_d
+    pop     rax
+    ret
+
+; ============================================================
+; O-B/C: Peephole scan for r10 round-trip patterns.
+; Call after emitting code that may complete the pattern.
+; Pattern E (14 bytes):
+;   49 89 C2          mov r10, rax
+;   48 8B 04 25 <a>   mov rax, [abs32]
+;   4C 89 D3          mov rbx, r10
+; → 48 89 C3          mov rbx, rax
+;   48 8B 04 25 <a>   (unchanged)
+;   90 90 90          NOP NOP NOP
+;
+; Pattern F (6 bytes):
+;   49 89 C2          mov r10, rax
+;   4C 89 D3          mov rbx, r10
+; → 48 89 C3          mov rbx, rax
+;   90 90 90          NOP NOP NOP
+; ============================================================
+codegen_peephole_r10:
+    push    rax
+    push    rcx
+    push    rdi
+
+    mov     rcx, [emit_tail_len]
+
+    ; --- Pattern F (6 bytes): mov r10,rax + mov rbx,r10 ---
+    cmp     rcx, 6
+    jl      .r10_check_e
+
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x49
+    jne     .r10_check_e
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .r10_check_e
+    mov     rax, rcx
+    sub     rax, 4
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xC2
+    jne     .r10_check_e
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x4C
+    jne     .r10_check_e
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .r10_check_e
+    mov     rax, rcx
+    sub     rax, 1
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xD3
+    jne     .r10_check_e
+
+    ; Pattern F matched: rollback 6, emit mov rbx,rax + 3 NOPs
+    sub     qword [out_idx], 6
+    sub     qword [emit_tail_len], 6
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xc3
+    call    emit_b
+    mov     al, 0x90
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    jmp     .r10_done
+
+.r10_check_e:
+    ; --- Pattern E (14 bytes): mov r10,rax + mov rax,[abs32] + mov rbx,r10 ---
+    cmp     rcx, 14
+    jl      .r10_done
+
+    mov     rax, rcx
+    sub     rax, 14
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x49
+    jne     .r10_done
+    mov     rax, rcx
+    sub     rax, 13
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .r10_done
+    mov     rax, rcx
+    sub     rax, 12
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xC2
+    jne     .r10_done
+    ; Check mov rax,[abs32]: 48 8B 04 25
+    mov     rax, rcx
+    sub     rax, 11
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .r10_done
+    mov     rax, rcx
+    sub     rax, 10
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x8B
+    jne     .r10_done
+    mov     rax, rcx
+    sub     rax, 9
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x04
+    jne     .r10_done
+    mov     rax, rcx
+    sub     rax, 8
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x25
+    jne     .r10_done
+    ; Check mov rbx,r10 at tail[N-3..N-1]: 4C 89 D3
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x4C
+    jne     .r10_done
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .r10_done
+    mov     rax, rcx
+    sub     rax, 1
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xD3
+    jne     .r10_done
+
+    ; Pattern E matched: extract addr32 from out_buffer[out_idx - 7]
+    mov     rdi, [out_idx]
+    mov     edi, dword [out_buffer + rdi - 7]
+
+    ; rollback 14 bytes, emit: mov rbx,rax + mov rax,[abs32] + 3 NOPs
+    sub     qword [out_idx], 14
+    sub     qword [emit_tail_len], 14
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xc3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8b
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    mov     al, 0x90
+    call    emit_b
+    call    emit_b
+    call    emit_b
+
+.r10_done:
+    pop     rdi
+    pop     rcx
+    pop     rax
     ret
 
 ; ============================================================
@@ -1367,6 +1593,55 @@ codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
 
     mov     r12, [emit_tail_len]
 
+    ; --- O-A Pattern A-reg (checked first): push + mov rax,r15 + pop → add rax,r15 ---
+    ; Only active when r15 is pinned as loop counter (reg_cache_var != -1)
+    cmp     qword [reg_cache_var], -1
+    je      .add_check_a
+    cmp     r12, 5
+    jl      .add_check_a
+
+    mov     rcx, r12
+    sub     rcx, 5
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50       ; push rax
+    jne     .add_check_a
+
+    mov     rcx, r12
+    sub     rcx, 4
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x4C       ; REX (mov rax,r15 prefix)
+    jne     .add_check_a
+
+    mov     rcx, r12
+    sub     rcx, 3
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x89       ; MOV opcode
+    jne     .add_check_a
+
+    mov     rcx, r12
+    sub     rcx, 2
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xF8       ; r15→rax modrm
+    jne     .add_check_a
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B       ; pop rbx
+    jne     .add_check_a
+
+    ; Pattern A-reg matched: rollback 5 bytes, emit add rax, r15 (4C 01 F8)
+    sub     qword [out_idx], 5
+    sub     qword [emit_tail_len], 5
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0xf8
+    call    emit_b
+    jmp     .add_done
+
+.add_check_a:
     ; --- Pattern A: push + mov rax,[abs32] + pop → add rax,[abs32] (10 bytes) ---
     cmp     r12, 10
     jl      .add_check_b
@@ -1504,6 +1779,54 @@ codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
 
     mov     r12, [emit_tail_len]
 
+    ; --- O-A Pattern A-reg (checked first): push + mov rax,r15 + pop → sub rax,r15 ---
+    cmp     qword [reg_cache_var], -1
+    je      .sub_check_a
+    cmp     r12, 5
+    jl      .sub_check_a
+
+    mov     rcx, r12
+    sub     rcx, 5
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .sub_check_a
+
+    mov     rcx, r12
+    sub     rcx, 4
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x4C
+    jne     .sub_check_a
+
+    mov     rcx, r12
+    sub     rcx, 3
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x89
+    jne     .sub_check_a
+
+    mov     rcx, r12
+    sub     rcx, 2
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xF8
+    jne     .sub_check_a
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .sub_check_a
+
+    ; Pattern A-reg matched: rollback 5 bytes, emit sub rax, r15 (4C 29 F8)
+    sub     qword [out_idx], 5
+    sub     qword [emit_tail_len], 5
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x29
+    call    emit_b
+    mov     al, 0xf8
+    call    emit_b
+    jmp     .sub_done
+
+.sub_check_a:
     ; --- Pattern A: push + mov rax,[abs32] + pop → sub rax,[abs32] ---
     cmp     r12, 10
     jl      .sub_check_b
@@ -2206,11 +2529,11 @@ codegen_emit_test_jz:
     push    rdx
     push    rdi
 
-    ; FAST PATH: register cache active — look for push+movabs+pop+cmp+setCC+movzx (22 bytes)
+    ; FAST PATH: register cache active — look for mov rax,r15+push+movabs+pop+cmp+setCC+movzx (25 bytes)
     cmp     qword [reg_cache_var], -1
     je      .check_full_pattern
     mov     rcx, [emit_tail_len]
-    cmp     rcx, 22
+    cmp     rcx, 25
     jb      .check_full_pattern
     lea     rdi, [emit_tail]
     ; Check movzx at tail[N-4..N-1] = 48 0F B6 C0
@@ -2318,7 +2641,24 @@ codegen_emit_test_jz:
     and     rax, 31
     cmp     byte [rdi + rax], 0x50
     jne     .check_full_pattern
-    ; Pattern matched (cached): push+movabs+pop+cmp+setCC+movzx = 22 bytes
+    ; Check mov rax,r15 at tail[N-25..N-23] = 4C 89 F8
+    ; This ensures the push was pushing r15 (the loop counter), not some computed value.
+    mov     rax, rcx
+    sub     rax, 25
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x4c
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 24
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x89
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 23
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xf8
+    jne     .check_full_pattern
+    ; Pattern matched: mov rax,r15+push+movabs+pop+cmp+setCC+movzx = 25 bytes
     ; Extract imm64 from out_buffer[out_idx - 19]
     ; movzx(4) + setCC(3) + cmp(3) + pop(1) = 11 bytes at end
     ; imm64(8) starts at out_idx - 11 - 8 = out_idx - 19
@@ -2336,9 +2676,9 @@ codegen_emit_test_jz:
     cmp     sil, 0xff
     jne     .check_full_pattern
   .cached_imm32_ok:
-    ; Undo 22 bytes
-    sub     qword [out_idx], 22
-    sub     qword [emit_tail_len], 22
+    ; Undo 25 bytes (mov rax,r15 + push + movabs + pop + cmp + setCC + movzx)
+    sub     qword [out_idx], 25
+    sub     qword [emit_tail_len], 25
     ; Emit: cmp r15, imm32 = 49 81 FF XX XX XX XX (7 bytes)
     mov     al, 0x49
     call    emit_b
@@ -2757,40 +3097,43 @@ codegen_emit_for_start:
     mov     r13, rsi                ; from
     mov     r14, rdx                ; to
 
-    ; emit: mov [var_va], from
-    ; if from == 0: xor eax,eax; mov [var_va], eax
+    ; O-A: init r15 with loop counter (pin r15 = loop var)
+    ; emit: mov r15d, from (zero-extends) or xor r15d,r15d if from==0
     test    r13, r13
-    jnz     .init_nonzero
+    jnz     .init_nonzero_pin
     push    rax
-    mov     al, 0x31                ; xor eax, eax
+    mov     al, 0x45                ; xor r15d, r15d = REX.R + XOR r/m32,r32
     call    emit_b
-    mov     al, 0xc0
+    mov     al, 0x31
     call    emit_b
-    mov     al, 0x89                ; mov [var_va], eax  (32-bit)
+    mov     al, 0xff
     call    emit_b
-    mov     al, 0x04
-    call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r12d
-    call    emit_d
     pop     rax
     jmp     .emit_jmp_check
 
-.init_nonzero:
-    ; emit: mov rax, from (imm64); mov [var_va], rax
-    mov     rdi, r13
-    call    codegen_emit_mov_rax_imm64
-    mov     rdi, r12
-    call    codegen_emit_store_rax_to_var
+.init_nonzero_pin:
+    ; emit: mov r15d, imm32 (sign-extended to 64-bit)
+    push    rax
+    mov     al, 0x41                ; REX.B
+    call    emit_b
+    mov     al, 0xbf                ; MOV r15d, imm32
+    call    emit_b
+    mov     eax, r13d
+    call    emit_d
+    pop     rax
 
 .emit_jmp_check:
+    ; set O-A pin state
+    mov     byte [loop_pin_active], 1
+    mov     qword [loop_pin_var_va], r12
+    mov     qword [reg_cache_var], r12
+
     ; emit: jmp .check  (skip increment on first iteration)
     push    rax
     mov     al, 0xe9
     call    emit_b
     mov     rax, [out_idx]
-    mov     r15, rax                ; save jmp patch offset
+    mov     r15, rax                ; save jmp patch offset (internal scratch)
     xor     eax, eax
     call    emit_d
     pop     rax
@@ -2802,21 +3145,20 @@ codegen_emit_for_start:
     mov     rdi, rax
     call    codegen_push_cont
 
-    ; emit: inc qword [var_va] (or add with step)
+    ; O-A: emit: inc r15 (49 FF C7)
     push    rax
-    mov     al, 0x48
+    mov     al, 0x49
     call    emit_b
     mov     al, 0xff
     call    emit_b
-    mov     al, 0x04
+    mov     al, 0xc7
     call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r12d
-    call    emit_d
     pop     rax
 
 .check_point:
+    ; O-E: align loop condition to 16-byte boundary
+    call    codegen_align_loop_top
+
     ; patch jmp to skip to here
     push    rax
     push    rdi
@@ -2828,18 +3170,14 @@ codegen_emit_for_start:
     ; save loop start PC (condition check)
     mov     r15, [out_idx]
 
-    ; emit: cmp qword [var_va], to_imm; jge exit_placeholder
+    ; O-A: emit: cmp r15, to_imm32 (49 81 FF imm32) + jge exit_placeholder
     push    rax
-    mov     al, 0x48
+    mov     al, 0x49
     call    emit_b
     mov     al, 0x81
     call    emit_b
-    mov     al, 0x3c
+    mov     al, 0xff
     call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r12d
-    call    emit_d
     mov     eax, r14d               ; to (imm32)
     call    emit_d
     ; jge rel32
@@ -2900,6 +3238,28 @@ codegen_emit_for_end:
     call    codegen_pop_cont
     dec     qword [loop_depth]
 
+    ; O-A: flush r15 to [var_va] if pin is active for this var
+    cmp     byte [loop_pin_active], 0
+    je      .for_end_no_flush
+    ; emit: mov [var_va], r15  (4D 89 3C 25 addr32)
+    push    rax
+    mov     al, 0x4d
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3c
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r14d
+    call    emit_d
+    pop     rax
+    ; clear pin
+    mov     byte [loop_pin_active], 0
+    mov     qword [loop_pin_var_va], -1
+    mov     qword [reg_cache_var], -1
+
+.for_end_no_flush:
     ; reset step
     mov     qword [for_step_val], 1
 
@@ -2944,6 +3304,9 @@ codegen_emit_for_start_dyn:
     call    codegen_emit_store_rax_to_var
 
 .di_top:
+    ; O-E: align loop condition to 16-byte boundary
+    call    codegen_align_loop_top
+
     mov     r15, [out_idx]
 
     ; cmp [var_va], [to_var_va]: load both, compare
@@ -3431,20 +3794,20 @@ codegen_emit_prot_start:
     call    emit_b
     mov     al, 0xe5
     call    emit_b
-    ; Emit: sub rsp, 0x100 (48 81 EC 00 01 00 00) — reserve 256 bytes for locals
+    ; O-F: emit patchable sub rsp, 0 placeholder (48 81 EC 00 00 00 00)
+    ; Will be patched in codegen_emit_prot_end with the actual frame size.
     mov     al, 0x48
     call    emit_b
     mov     al, 0x81
     call    emit_b
     mov     al, 0xec
     call    emit_b
-    mov     al, 0x00
-    call    emit_b
-    mov     al, 0x01
-    call    emit_b
+    mov     rax, [out_idx]
+    mov     [frame_size_patch_pos], rax
     xor     eax, eax
-    call    emit_b
-    call    emit_b
+    call    emit_d
+    ; Reset leave patch list
+    mov     qword [leave_patch_cnt], 0
     pop     rax
 
     ; Set frame mode
@@ -3456,19 +3819,95 @@ codegen_emit_prot_start:
     pop     rbx
     ret
 
-; codegen_emit_prot_end: emit leave; ret
-codegen_emit_prot_end:
+; codegen_emit_leave_placeholder: emit "add rsp, 0" placeholder + pop rbp + ret
+; Saves patch position to leave_patch_list for later patching in codegen_emit_prot_end.
+codegen_emit_leave_placeholder:
     push    rax
-    ; Emit leave (0xC9) — mov rsp, rbp; pop rbp
-    mov     al, 0xc9
+    push    rbx
+    ; Emit: add rsp, 0 placeholder (48 81 C4 00 00 00 00)
+    mov     al, 0x48
     call    emit_b
-    ; Emit ret (0xC3)
+    mov     al, 0x81
+    call    emit_b
+    mov     al, 0xc4
+    call    emit_b
+    ; Save out_idx (position of imm32) to leave_patch_list
+    mov     rax, [out_idx]
+    mov     rbx, [leave_patch_cnt]
+    cmp     rbx, 15
+    jge     .lp_skip
+    mov     [leave_patch_list + rbx*8], rax
+    inc     qword [leave_patch_cnt]
+.lp_skip:
+    xor     eax, eax
+    call    emit_d
+    ; Emit: pop rbp (5D)
+    mov     al, 0x5d
+    call    emit_b
+    ; Emit: ret (C3)
     mov     al, 0xc3
     call    emit_b
+    pop     rbx
     pop     rax
+    ret
+
+; codegen_emit_prot_end: compute frame size, patch prologue and early returns, emit epilogue.
+; O-F: frame size = number_of_locals * 8 (derived from proto_local_offset).
+codegen_emit_prot_end:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdx
+
+    ; Compute frame size N = -proto_local_offset - 8  (= number_of_locals * 8)
+    ; proto_local_offset starts at -8, goes to -8-K*8 after K locals.
+    mov     rcx, [proto_local_offset]
+    neg     rcx
+    sub     rcx, 8                      ; rcx = N = K*8
+
+    test    rcx, rcx
+    jle     .pe_skip_patch              ; N=0: placeholders already hold 0, no patch needed
+
+    ; Patch the sub rsp placeholder in the prologue
+    mov     rbx, [frame_size_patch_pos]
+    mov     [out_buffer + rbx], ecx
+
+    ; Patch all codegen_emit_leave_placeholder positions
+    mov     rax, [leave_patch_cnt]
+.pe_patch_loop:
+    test    rax, rax
+    jz      .pe_emit_add
+    dec     rax
+    mov     rbx, [leave_patch_list + rax*8]
+    mov     [out_buffer + rbx], ecx
+    jmp     .pe_patch_loop
+
+.pe_emit_add:
+    ; Emit: add rsp, N (48 81 C4 imm32)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x81
+    call    emit_b
+    mov     al, 0xc4
+    call    emit_b
+    mov     eax, ecx
+    call    emit_d
+
+.pe_skip_patch:
+    ; Emit: pop rbp (5D)
+    mov     al, 0x5d
+    call    emit_b
+    ; Emit: ret (C3)
+    mov     al, 0xc3
+    call    emit_b
 
     ; Clear frame mode
     mov     byte [in_proto_frame], 0
+
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rax
     ret
 
 ; codegen_init_proto_frame(rdi=proto_idx, rsi=param_count)

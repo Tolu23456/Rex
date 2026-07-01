@@ -40,6 +40,7 @@ extern codegen_push_cont, codegen_pop_cont, codegen_emit_skip
 extern codegen_emit_exit0, codegen_emit_exit1
 extern codegen_emit_str_rax
 extern codegen_begin_protos, codegen_end_protos, codegen_init_proto_frame, codegen_cache_var_begin, codegen_cache_var_end
+extern codegen_emit_leave_placeholder
 extern emit_tail, emit_tail_len
 extern fused_cmp_var_addr, in_proto_frame
 extern codegen_emit_prot_start, codegen_emit_prot_end
@@ -1489,13 +1490,9 @@ parse_return:
     ; value is in rax (or xmm0 for float via bit-cast)
 
 .ret_void:
-    ; Emit return: leave; ret (without ending the protocol frame)
-    push    rax
-    mov     al, 0xc9        ; leave
-    call    emit_b
-    mov     al, 0xc3        ; ret
-    call    emit_b
-    pop     rax
+    ; O-F: emit add rsp,N placeholder + pop rbp + ret via leave_placeholder helper.
+    ; The placeholder's N is patched to the actual frame size in codegen_emit_prot_end.
+    call    codegen_emit_leave_placeholder
 
     cmp     dword [cur_tok], TOK_NEWLINE
     jne     .ret_done
