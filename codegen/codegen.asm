@@ -1180,13 +1180,241 @@ codegen_emit_store_rax_to_var:
     jmp     .check_mem_pattern
 
 .check_mem_pattern:
-    ; Check tail_len >= 16 for mem-to-mem pattern
-    ; Pattern: mov rax, [addr1] (8 bytes) + add/sub rax, [addr2] (8 bytes)
+    ; ================================================================
+    ; O-G: in-place accumulation fusion
+    ; Eliminates the load-compute-store triple for result=result OP base
+    ; ================================================================
+
+    ; --- O-G part 1: 11-byte pattern ---
+    ; Tail: mov rax,[addr](8) + 3-byte OP rax,reg  →  OP [addr],reg
+    ; Supported ops: add/sub/or/and/xor with r15 (4C op F8) or rbx (48 op D8)
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 11
+    jl      .og_sub14_check
+
+    ; Verify bytes at tail[tail_len-11..tail_len-8] == 48 8B 04 25
+    mov     rax, rcx
+    sub     rax, 11
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .og_sub14_check
+
+    mov     rax, rcx
+    sub     rax, 10
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x8B
+    jne     .og_sub14_check
+
+    mov     rax, rcx
+    sub     rax, 9
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x04
+    jne     .og_sub14_check
+
+    mov     rax, rcx
+    sub     rax, 8
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x25
+    jne     .og_sub14_check
+
+    ; Extract load addr32 from out_buffer[out_idx - 7]
+    mov     r12, [out_idx]
+    mov     r12d, dword [out_buffer + r12 - 7]
+
+    ; Must match store destination (rdi = arg from function call)
+    cmp     r12d, edi
+    jne     .og_sub14_check
+
+    ; Read 3-byte OP: r8b = REX, r9b = opcode, al = ModRM
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    movzx   r8d, byte [emit_tail + rax]     ; REX (4C = r15 src, 48 = rbx src)
+
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    movzx   r9d, byte [emit_tail + rax]     ; opcode
+
+    mov     rax, rcx
+    sub     rax, 1
+    and     rax, 31
+    movzx   eax, byte [emit_tail + rax]     ; ModRM
+
+    ; --- r15 source: REX=4C ModRM=F8 → emit 4C [opcode] 3C 25 addr ---
+    cmp     r8b, 0x4C
+    jne     .og_try_rbx
+    cmp     al, 0xF8
+    jne     .og_sub14_check
+
+    cmp     r9b, 0x01   ; add rax, r15
+    je      .og_r15_ok
+    cmp     r9b, 0x29   ; sub rax, r15
+    je      .og_r15_ok
+    cmp     r9b, 0x09   ; or  rax, r15
+    je      .og_r15_ok
+    cmp     r9b, 0x21   ; and rax, r15
+    je      .og_r15_ok
+    cmp     r9b, 0x31   ; xor rax, r15
+    je      .og_r15_ok
+    jmp     .og_sub14_check
+
+.og_r15_ok:
+    ; Roll back 11 bytes (load + 3-byte op), emit OP [abs32], r15
+    ; Encoding: 4C [opcode] 3C 25 addr32
+    ; REX=4C(W+R), ModRM=3C(mod=00 reg=7=r15%8 rm=4=SIB), SIB=25(idx=none base=disp32)
+    sub     qword [out_idx], 11
+    sub     qword [emit_tail_len], 11
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, r9b
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r12d
+    call    emit_d
+    jmp     .peephole_done
+
+.og_try_rbx:
+    ; --- rbx source: REX=48 ModRM=D8 → emit 48 [opcode] 1C 25 addr ---
+    cmp     r8b, 0x48
+    jne     .og_sub14_check
+    cmp     al, 0xD8
+    jne     .og_sub14_check
+
+    cmp     r9b, 0x01   ; add rax, rbx
+    je      .og_rbx_ok
+    cmp     r9b, 0x09   ; or  rax, rbx
+    je      .og_rbx_ok
+    cmp     r9b, 0x21   ; and rax, rbx
+    je      .og_rbx_ok
+    cmp     r9b, 0x31   ; xor rax, rbx
+    je      .og_rbx_ok
+    jmp     .og_sub14_check
+
+.og_rbx_ok:
+    ; Roll back 11 bytes, emit OP [abs32], rbx
+    ; Encoding: 48 [opcode] 1C 25 addr32
+    ; REX=48(W only), ModRM=1C(mod=00 reg=3=rbx rm=4=SIB), SIB=25
+    sub     qword [out_idx], 11
+    sub     qword [emit_tail_len], 11
+    mov     al, 0x48
+    call    emit_b
+    mov     al, r9b
+    call    emit_b
+    mov     al, 0x1C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r12d
+    call    emit_d
+    jmp     .peephole_done
+
+.og_sub14_check:
+    ; --- O-G part 2: 14-byte sub pattern ---
+    ; Tail: mov rax,[addr](8) + neg rax(3) + add rax,rbx(3)  →  sub [addr],rbx
+    ; This is the general sub-rbx case from codegen_emit_sub_rax_rbx .sub_normal
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 14
+    jl      .og_mem16_check
+
+    ; First 8 bytes: 48 8B 04 25
+    mov     rax, rcx
+    sub     rax, 14
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 13
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x8B
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 12
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x04
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 11
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x25
+    jne     .og_mem16_check
+
+    ; Last 6 bytes: 48 F7 D8 48 01 D8  (neg rax; add rax,rbx)
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xF7
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 4
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xD8
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x01
+    jne     .og_mem16_check
+
+    mov     rax, rcx
+    sub     rax, 1
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xD8
+    jne     .og_mem16_check
+
+    ; Extract load addr32 from out_buffer[out_idx - 10]
+    mov     r12, [out_idx]
+    mov     r12d, dword [out_buffer + r12 - 10]
+
+    ; Must match store destination
+    cmp     r12d, edi
+    jne     .og_mem16_check
+
+    ; Roll back 14 bytes, emit sub [abs32], rbx = 48 29 1C 25 addr32
+    sub     qword [out_idx], 14
+    sub     qword [emit_tail_len], 14
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x29
+    call    emit_b
+    mov     al, 0x1C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r12d
+    call    emit_d
+    jmp     .peephole_done
+
+.og_mem16_check:
+    ; ================================================================
+    ; Existing 16-byte mem-to-mem pattern (extended for OR/AND/XOR)
+    ; Pattern: mov rax,[addr1](8) + OP rax,[addr2](8)  →  mov rax,[addr2]; OP [addr1],rax
+    ; ================================================================
     mov     rcx, [emit_tail_len]
     cmp     rcx, 16
     jl      .abs_store_normal
 
-    ; tail[tail_len-16] == 0x48, tail[tail_len-15] == 0x8B, tail[tail_len-14] == 0x04, tail[tail_len-13] == 0x25
+    ; tail[tail_len-16..tail_len-13] == 48 8B 04 25
     mov     rax, rcx
     sub     rax, 16
     and     rax, 31
@@ -1211,23 +1439,29 @@ codegen_emit_store_rax_to_var:
     cmp     byte [emit_tail + rax], 0x25
     jne     .abs_store_normal
 
-    ; Check add/sub rax, [abs32] at tail[tail_len-8..tail_len-5]
-    ; tail[tail_len-8] == 0x48, tail[tail_len-7] == 0x03 or 0x2B
+    ; tail[tail_len-8] == 0x48 (REX of second load+op)
     mov     rax, rcx
     sub     rax, 8
     and     rax, 31
     cmp     byte [emit_tail + rax], 0x48
     jne     .abs_store_normal
 
+    ; tail[tail_len-7] == opcode: 0x03(add) 0x2B(sub) 0x0B(or) 0x23(and) 0x33(xor)
     mov     rax, rcx
     sub     rax, 7
     and     rax, 31
     movzx   r8d, byte [emit_tail + rax]
 
-    cmp     r8b, 0x03           ; add rax, r/m64
+    cmp     r8b, 0x03           ; add rax, [abs32]
     je      .peephole_add_mem
-    cmp     r8b, 0x2B           ; sub rax, r/m64
+    cmp     r8b, 0x2B           ; sub rax, [abs32]
     je      .peephole_sub_mem
+    cmp     r8b, 0x0B           ; or  rax, [abs32]
+    je      .peephole_or_mem
+    cmp     r8b, 0x23           ; and rax, [abs32]
+    je      .peephole_and_mem
+    cmp     r8b, 0x33           ; xor rax, [abs32]
+    je      .peephole_xor_mem
     jmp     .abs_store_normal
 
 .peephole_add:
@@ -1482,6 +1716,110 @@ codegen_emit_store_rax_to_var:
     mov     eax, edi
     call    emit_d
 
+    jmp     .peephole_done
+
+.peephole_or_mem:
+    ; Pattern: mov rax,[addr1]; or rax,[addr2]; store [addr1]
+    ; → mov rax,[addr2]; or [addr1],rax
+    ; (O-G: 16-byte mem-to-mem or, commutative so rax as src in or [addr1],rax)
+    mov     rax, [out_idx]
+    mov     eax, dword [out_buffer + rax - 12]   ; addr1
+    cmp     eax, edi
+    jne     .abs_store_normal
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 4]     ; addr2
+    sub     qword [out_idx], 16
+    sub     qword [emit_tail_len], 16
+    ; Emit: mov rax, [addr2]
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r8d
+    call    emit_d
+    ; Emit: or [addr1], rax = 48 09 04 25 addr1
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x09
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .peephole_done
+
+.peephole_and_mem:
+    ; Pattern: mov rax,[addr1]; and rax,[addr2]; store [addr1]
+    ; → mov rax,[addr2]; and [addr1],rax
+    mov     rax, [out_idx]
+    mov     eax, dword [out_buffer + rax - 12]
+    cmp     eax, edi
+    jne     .abs_store_normal
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 4]
+    sub     qword [out_idx], 16
+    sub     qword [emit_tail_len], 16
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r8d
+    call    emit_d
+    ; Emit: and [addr1], rax = 48 21 04 25 addr1
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x21
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .peephole_done
+
+.peephole_xor_mem:
+    ; Pattern: mov rax,[addr1]; xor rax,[addr2]; store [addr1]
+    ; → mov rax,[addr2]; xor [addr1],rax
+    mov     rax, [out_idx]
+    mov     eax, dword [out_buffer + rax - 12]
+    cmp     eax, edi
+    jne     .abs_store_normal
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 4]
+    sub     qword [out_idx], 16
+    sub     qword [emit_tail_len], 16
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r8d
+    call    emit_d
+    ; Emit: xor [addr1], rax = 48 31 04 25 addr1
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x31
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
     jmp     .peephole_done
 
 .peephole_done:
@@ -2220,36 +2558,342 @@ codegen_emit_neg_rax:          ; neg rax  (48 F7 D8)
 ; ============================================================
 ; Bitwise / shift
 ; ============================================================
-codegen_emit_bitwise_and:   ; and rax, rbx  (48 21 D8)
+codegen_emit_bitwise_and:   ; and rax, rbx  (48 21 D8) — Pattern A-reg / A peepholes
     push    rax
+    push    rcx
+    push    rdi
+    push    r12
+
+    mov     r12, [emit_tail_len]
+
+    ; --- Pattern A-reg: push + mov rax,r15 + pop → and rax,r15  (4C 21 F8) ---
+    cmp     qword [reg_cache_var], -1
+    je      .and_check_a
+    cmp     r12, 5
+    jl      .and_check_a
+    mov     rcx, r12
+    sub     rcx, 5
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .and_check_a
+    mov     rcx, r12
+    sub     rcx, 4
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x4C
+    jne     .and_check_a
+    mov     rcx, r12
+    sub     rcx, 3
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x89
+    jne     .and_check_a
+    mov     rcx, r12
+    sub     rcx, 2
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xF8
+    jne     .and_check_a
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .and_check_a
+    sub     qword [out_idx], 5
+    sub     qword [emit_tail_len], 5
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x21
+    call    emit_b
+    mov     al, 0xF8
+    call    emit_b
+    jmp     .and_done
+
+.and_check_a:
+    ; --- Pattern A: push + mov rax,[abs32] + pop → and rax,[abs32]  (48 23 04 25 addr) ---
+    cmp     r12, 10
+    jl      .and_normal
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .and_normal
+    mov     rcx, r12
+    sub     rcx, 9
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48
+    jne     .and_normal
+    mov     rcx, r12
+    sub     rcx, 8
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x8B
+    jne     .and_normal
+    mov     rcx, r12
+    sub     rcx, 7
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x04
+    jne     .and_normal
+    mov     rcx, r12
+    sub     rcx, 6
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x25
+    jne     .and_normal
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .and_normal
+    mov     rdi, [out_idx]
+    mov     edi, dword [out_buffer + rdi - 5]
+    sub     qword [out_idx], 10
+    sub     qword [emit_tail_len], 10
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x23
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .and_done
+
+.and_normal:
     mov     al, 0x48
     call    emit_b
     mov     al, 0x21
     call    emit_b
     mov     al, 0xd8
     call    emit_b
+
+.and_done:
+    pop     r12
+    pop     rdi
+    pop     rcx
     pop     rax
     ret
 
-codegen_emit_bitwise_or:    ; or rax, rbx  (48 09 D8)
+codegen_emit_bitwise_or:    ; or rax, rbx  (48 09 D8) — Pattern A-reg / A peepholes
     push    rax
+    push    rcx
+    push    rdi
+    push    r12
+
+    mov     r12, [emit_tail_len]
+
+    ; --- Pattern A-reg: push + mov rax,r15 + pop → or rax,r15  (4C 09 F8) ---
+    cmp     qword [reg_cache_var], -1
+    je      .or_check_a
+    cmp     r12, 5
+    jl      .or_check_a
+    mov     rcx, r12
+    sub     rcx, 5
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .or_check_a
+    mov     rcx, r12
+    sub     rcx, 4
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x4C
+    jne     .or_check_a
+    mov     rcx, r12
+    sub     rcx, 3
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x89
+    jne     .or_check_a
+    mov     rcx, r12
+    sub     rcx, 2
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xF8
+    jne     .or_check_a
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .or_check_a
+    sub     qword [out_idx], 5
+    sub     qword [emit_tail_len], 5
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x09
+    call    emit_b
+    mov     al, 0xF8
+    call    emit_b
+    jmp     .or_done
+
+.or_check_a:
+    ; --- Pattern A: push + mov rax,[abs32] + pop → or rax,[abs32]  (48 0B 04 25 addr) ---
+    cmp     r12, 10
+    jl      .or_normal
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .or_normal
+    mov     rcx, r12
+    sub     rcx, 9
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48
+    jne     .or_normal
+    mov     rcx, r12
+    sub     rcx, 8
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x8B
+    jne     .or_normal
+    mov     rcx, r12
+    sub     rcx, 7
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x04
+    jne     .or_normal
+    mov     rcx, r12
+    sub     rcx, 6
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x25
+    jne     .or_normal
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .or_normal
+    mov     rdi, [out_idx]
+    mov     edi, dword [out_buffer + rdi - 5]
+    sub     qword [out_idx], 10
+    sub     qword [emit_tail_len], 10
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .or_done
+
+.or_normal:
     mov     al, 0x48
     call    emit_b
     mov     al, 0x09
     call    emit_b
     mov     al, 0xd8
     call    emit_b
+
+.or_done:
+    pop     r12
+    pop     rdi
+    pop     rcx
     pop     rax
     ret
 
-codegen_emit_bitwise_xor:   ; xor rax, rbx  (48 31 D8)
+codegen_emit_bitwise_xor:   ; xor rax, rbx  (48 31 D8) — Pattern A-reg / A peepholes
     push    rax
+    push    rcx
+    push    rdi
+    push    r12
+
+    mov     r12, [emit_tail_len]
+
+    ; --- Pattern A-reg: push + mov rax,r15 + pop → xor rax,r15  (4C 31 F8) ---
+    cmp     qword [reg_cache_var], -1
+    je      .xor_check_a
+    cmp     r12, 5
+    jl      .xor_check_a
+    mov     rcx, r12
+    sub     rcx, 5
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .xor_check_a
+    mov     rcx, r12
+    sub     rcx, 4
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x4C
+    jne     .xor_check_a
+    mov     rcx, r12
+    sub     rcx, 3
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x89
+    jne     .xor_check_a
+    mov     rcx, r12
+    sub     rcx, 2
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xF8
+    jne     .xor_check_a
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .xor_check_a
+    sub     qword [out_idx], 5
+    sub     qword [emit_tail_len], 5
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x31
+    call    emit_b
+    mov     al, 0xF8
+    call    emit_b
+    jmp     .xor_done
+
+.xor_check_a:
+    ; --- Pattern A: push + mov rax,[abs32] + pop → xor rax,[abs32]  (48 33 04 25 addr) ---
+    cmp     r12, 10
+    jl      .xor_normal
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .xor_normal
+    mov     rcx, r12
+    sub     rcx, 9
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48
+    jne     .xor_normal
+    mov     rcx, r12
+    sub     rcx, 8
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x8B
+    jne     .xor_normal
+    mov     rcx, r12
+    sub     rcx, 7
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x04
+    jne     .xor_normal
+    mov     rcx, r12
+    sub     rcx, 6
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x25
+    jne     .xor_normal
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .xor_normal
+    mov     rdi, [out_idx]
+    mov     edi, dword [out_buffer + rdi - 5]
+    sub     qword [out_idx], 10
+    sub     qword [emit_tail_len], 10
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x33
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .xor_done
+
+.xor_normal:
     mov     al, 0x48
     call    emit_b
     mov     al, 0x31
     call    emit_b
     mov     al, 0xd8
     call    emit_b
+
+.xor_done:
+    pop     r12
+    pop     rdi
+    pop     rcx
     pop     rax
     ret
 

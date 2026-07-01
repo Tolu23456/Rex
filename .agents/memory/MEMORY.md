@@ -7,3 +7,4 @@
 - [RexC & RIC instruction set spec](rex-rexc-spec.md) — full bytecode format, core/memory/IO opcodes (0x00–0x7F), and RIC SIMD layer (0x80–0xFF) with vector types and platform mappings.
 - [RexC backend build layout](rexc-backend-build.md) — rxc/ directory, Makefile tab fix, include path conventions, duplicate label pitfall.
 - [Rex docs second-pass decisions](rex-docs-v2.md) — all confirmed design decisions now reflected in design.md, grammar.md, syn.md; key rules for future consistency.
+- [O-G RMW fusion](og-rmw.md) — in-place accumulation peephole in codegen_emit_store_rax_to_var; encoding rules, interaction with O-A pin and Pattern A-reg, and the `:x=0` vs `int x=0` footgun.
