@@ -148,14 +148,6 @@ _start:
     mov     rdi, [out_file_fd]
     call    codegen_write_runtime
 
-    ; DEBUG: dump first 20 bytes of out_buffer to stderr
-    extern out_buffer
-    mov     rax, 1          ; SYS_write
-    mov     rdi, 2          ; stderr
-    mov     rsi, out_buffer
-    mov     rdx, 20
-    syscall
-
     ; Write user code
     mov     rdi, [out_file_fd]
     call    codegen_write_code

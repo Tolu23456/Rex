@@ -27,7 +27,11 @@ global fwd_ref_names, fwd_ref_patches, fwd_ref_count
 global codegen_emit_mov_rax_imm64
 global codegen_emit_mov_rax_var
 global codegen_emit_store_rax_to_var
-global codegen_emit_push_rax, codegen_emit_pop_rbx
+global codegen_cache_var_begin, codegen_cache_var_end
+global reg_cache_var, var_rbp_offsets
+global emit_tail, emit_tail_len
+global fused_cmp_var_addr
+global codegen_emit_push_rax, codegen_emit_pop_rbx, codegen_emit_mov_rbx_rax
 global codegen_emit_add_rax_rbx, codegen_emit_sub_rax_rbx
 global codegen_emit_imul_rax_rbx, codegen_emit_idiv_rbx_by_rax
 global codegen_emit_imod_rbx_by_rax, codegen_emit_neg_rax
@@ -54,6 +58,8 @@ global codegen_emit_str_rax
 global codegen_begin_protos, codegen_end_protos
 global codegen_emit_prot_start, codegen_emit_prot_end
 global codegen_emit_call_prot
+global codegen_init_proto_frame
+global var_rbp_offsets, proto_local_offset, in_proto_frame
 global codegen_emit_seq_alloc, codegen_emit_seq_push
 global codegen_emit_seq_pop, codegen_emit_seq_len, codegen_emit_seq_cap
 global codegen_emit_inc_var, codegen_emit_dec_var, codegen_emit_swap_vars
@@ -95,6 +101,8 @@ extern rt_str_data, rt_inp_data, rt_str_cat_data
 section .bss
 out_buffer:         resb OUT_BUF_SIZE           ; 512 KB user code buffer
 out_idx:            resq 1                      ; current write position
+emit_tail:          resb 32                     ; last 32 bytes emitted (for peephole)
+emit_tail_len:      resq 1                      ; how many valid bytes in emit_tail
 
 ; variable table (compiler-side name/type tracker)
 var_table:          resb VAR_ENTRY_SIZE * VAR_MAX
@@ -138,9 +146,22 @@ fwd_ref_count:      resq 1
 proto_section_jmp:  resq 1                      ; out_idx of proto-section jmp
 proto_section_open: resb 1                      ; 1 if proto-section jmp is active
 
+; stack-frame protocol support
+in_proto_frame:     resb 1                      ; 1 when compiling inside protocol body
+var_addr_is_rbp:    resb 1                      ; set by get_var_va: 1=rbp-relative, 0=absolute
+var_rbp_offsets:    resq VAR_MAX                ; rbp-relative offset for each var (when in proto frame)
+proto_local_offset: resq 1                      ; next rbp offset for locals (negative, starts at -8)
+cmp_fused_cc:       resb 1                      ; temp: inverse CC byte for fused comparison
+; Register cache: when a variable is "cached" in a register, loads/stores use the register
+reg_cache_var:      resq 1                      ; var_index of cached variable (-1 = none)
+reg_cache_reg:      resb 1                      ; register code: 1=rcx, 2=rdx, 3=rsi, 4=rdi
+; When a while-loop comparison is fused to cmp [abs32], N, this stores the abs32 address
+fused_cmp_var_addr: resq 1                      ; -1 = no fused comparison
+
 ; for-loop state
 for_step_val:       resq 1                      ; step value for current for-loop
 for_step_sign:      resb 1                      ; 0=positive, 1=negative
+for_cont_addr:      resq 1                      ; continue target for current for-loop
 
 ; ============================================================
 ; DATA — ELF header template (176 bytes) + runtime JMP (5 bytes)
@@ -194,7 +215,7 @@ elf_hdr_template_end:
 ; 5-byte JMP over runtime blobs (relative to next instruction)
 runtime_jmp_bytes:
     db 0xe9
-    dd RT_TOTAL_SIZE             ; = 8448
+    dd RT_TOTAL_SIZE             ; = 9728
 
 ; Error messages
 err_var_full:   db "rex: variable table full", 0x0a, 0
@@ -210,11 +231,15 @@ section .text
 codegen_init:
     ; zero out_idx, var_count, proto_count, etc.
     mov     qword [out_idx],        0
+    mov     qword [emit_tail_len],  0
     mov     qword [var_count],      0
     mov     qword [proto_count],    0
     mov     byte  [cur_type],       TYPE_INT
     mov     qword [cur_proto_idx],  -1
     mov     qword [prot_body_depth],0
+    mov     qword [reg_cache_var],  -1         ; no cached variable
+    mov     byte  [reg_cache_reg],  0
+    mov     qword [fused_cmp_var_addr], -1
     mov     qword [jump_patch_depth],  0
     mov     qword [end_jump_depth],    0
     mov     qword [chain_base_depth],  0
@@ -233,15 +258,77 @@ codegen_get_out_idx:
     ret
 
 ; ============================================================
+; Register cache management
+; ============================================================
+; codegen_cache_var_begin(rdi=var_va): cache variable in r15, emit mov r15, [addr]
+codegen_cache_var_begin:
+    mov     [reg_cache_var], rdi
+    ; Emit: push r15 (save old r15) + mov r15, [abs32] (9 bytes)
+    push    rax
+    push    rdi
+    ; push r15 = 41 57
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x57
+    call    emit_b
+    ; mov r15, [abs32] = 4C 8B 3C 25 XX XX XX XX
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x8b
+    call    emit_b
+    mov     al, 0x3c
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    pop     rdi
+    mov     eax, edi
+    call    emit_d
+    pop     rax
+    ret
+
+; codegen_cache_var_end(rdi=var_va): uncache variable, emit mov [addr], r15 + pop r15
+codegen_cache_var_end:
+    mov     qword [reg_cache_var], -1
+    ; Emit: mov [abs32], r15 + pop r15
+    push    rax
+    push    rdi
+    ; mov [abs32], r15 = 4C 89 3C 25 XX XX XX XX
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3c
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    pop     rdi
+    mov     eax, edi
+    call    emit_d
+    ; pop r15 = 41 5F
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5f
+    call    emit_b
+    pop     rax
+    ret
+
+; ============================================================
 ; Emit helpers
 ; ============================================================
 emit_b:
     ; al = byte to emit
     push    rcx
+    push    rdi
     mov     rcx, [out_idx]
     mov     [out_buffer + rcx], al
     inc     rcx
     mov     [out_idx], rcx
+    ; Track last byte for peephole (circular buffer)
+    mov     rdi, [emit_tail_len]
+    and     rdi, 31                 ; mod 32
+    mov     [emit_tail + rdi], al
+    inc     qword [emit_tail_len]
+    pop     rdi
     pop     rcx
     ret
 
@@ -249,10 +336,41 @@ emit_d:
     ; eax = dword to emit (little-endian)
     push    rcx
     push    rdx
+    push    rdi
+    push    rax
     mov     rcx, [out_idx]
     mov     [out_buffer + rcx], eax
     add     rcx, 4
     mov     [out_idx], rcx
+    ; Update emit_tail with 4 bytes (circular)
+    mov     rdi, [emit_tail_len]
+    ; byte 0
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], al
+    mov     edx, eax
+    shr     edx, 8
+    inc     rdi
+    ; byte 1
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    ; byte 2
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    ; byte 3
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    inc     rdi
+    mov     [emit_tail_len], rdi
+    pop     rax
+    pop     rdi
     pop     rdx
     pop     rcx
     ret
@@ -260,10 +378,59 @@ emit_d:
 emit_q:
     ; rax = qword to emit
     push    rcx
+    push    rdx
+    push    rdi
+    push    rax
     mov     rcx, [out_idx]
     mov     [out_buffer + rcx], rax
     add     rcx, 8
     mov     [out_idx], rcx
+    ; Update emit_tail with 8 bytes (circular)
+    mov     rdi, [emit_tail_len]
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], al
+    mov     edx, eax
+    shr     edx, 8
+    inc     rdi
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    shr     edx, 8
+    inc     rdi
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], dl
+    inc     rdi
+    mov     [emit_tail_len], rdi
+    pop     rax
+    pop     rdi
+    pop     rdx
     pop     rcx
     ret
 
@@ -272,14 +439,36 @@ emit_blob:
     push    rdi
     push    rsi
     push    rcx
+    push    rax
+    push    rdx
+    mov     rdx, rcx            ; save byte count
     mov     rdi, [out_idx]
     lea     rdi, [out_buffer + rdi]
     rep     movsb
-    mov     rdi, [rsp + 8]  ; original rsi
-    mov     rcx, [rsp]      ; original rcx
     mov     rdi, [out_idx]
-    add     rdi, rcx
+    add     rdi, rdx
     mov     [out_idx], rdi
+    ; Update emit_tail
+    sub     rdi, rdx            ; rdi = start offset
+    lea     rsi, [out_buffer + rdi]
+    mov     rdi, [emit_tail_len]
+    test    rdx, rdx
+    jz      .blob_tail_done
+.blob_tail_loop:
+    movzx   eax, byte [rsi]
+    push    rcx
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], al
+    pop     rcx
+    inc     rsi
+    inc     rdi
+    dec     rdx
+    jnz     .blob_tail_loop
+.blob_tail_done:
+    mov     [emit_tail_len], rdi
+    pop     rdx
+    pop     rax
     pop     rcx
     pop     rsi
     pop     rdi
@@ -291,11 +480,33 @@ emit_blob_v2:
     push    rdi
     push    rsi
     push    rcx
+    push    rax
+    push    rdx
     mov     rcx, rdx
     mov     rdi, out_buffer
     add     rdi, [out_idx]
     rep     movsb
     add     [out_idx], rdx
+    ; Update emit_tail with emitted bytes
+    mov     rax, [out_idx]
+    sub     rax, rdx            ; rax = start offset in out_buffer
+    lea     rsi, [out_buffer + rax]
+    mov     rdi, [emit_tail_len]
+    test    rdx, rdx
+    jz      .blob_tail_done
+.blob_tail_loop:
+    movzx   eax, byte [rsi]
+    mov     rcx, rdi
+    and     rcx, 31
+    mov     [emit_tail + rcx], al
+    inc     rsi
+    inc     rdi
+    dec     rdx
+    jnz     .blob_tail_loop
+.blob_tail_done:
+    mov     [emit_tail_len], rdi
+    pop     rdx
+    pop     rax
     pop     rcx
     pop     rsi
     pop     rdi
@@ -305,10 +516,19 @@ emit_blob_v2:
 ; Variable table management
 ; ============================================================
 
-; get_var_va(rdi=index) → rax = VAR_STORAGE_BASE + idx*64
+; get_var_va(rdi=index) → rax = address/offset
+; When in_proto_frame: returns rbp-relative offset from var_rbp_offsets
+; Otherwise: returns VAR_STORAGE_BASE + idx*64
 get_var_va:
+    test    byte [in_proto_frame], 1
+    jnz     .rbp_mode
     shl     rdi, 6              ; idx * 64
     lea     rax, [rdi + VAR_STORAGE_BASE]
+    mov     byte [var_addr_is_rbp], 0
+    ret
+  .rbp_mode:
+    mov     rax, [var_rbp_offsets + rdi*8]
+    mov     byte [var_addr_is_rbp], 1
     ret
 
 ; var_add(rdi=name_ptr, rsi=type) → rax=index (-1 if full)
@@ -384,21 +604,6 @@ var_find:
     push    r11
 
     ; load first 8 bytes of query name for fast prefix rejection
-    xor     r11, r11
-    mov     rcx, 0                      ; will fill up to 8 bytes
-.load_prefix:
-    cmp     rcx, 8
-    jge     .prefix_done
-    movzx   edx, byte [rdi + rcx]
-    test    dl, dl
-    jz      .prefix_done
-    mov     [rsp - 8 + rcx], dl         ; store in unused stack space
-    inc     rcx
-    jmp     .load_prefix
-.prefix_done:
-    ; Just do memcmp approach
-    ; r11 = first 8 bytes of query (or fewer if shorter)
-    ; Build r11 from [rdi]
     mov     r11, [rdi]                  ; load first 8 bytes (may read past NUL, ok)
 
     mov     rbx, [var_count]            ; start from highest index
@@ -591,20 +796,54 @@ codegen_emit_mov_rax_imm32:
     pop     rax
     ret
 
-; codegen_emit_mov_rax_var(rdi=var_va): emit  mov rax, [abs32]
+; codegen_emit_mov_rax_var(rdi=var_va): emit  mov rax, [addr]
+; When var_addr_is_rbp=1: emit mov rax, [rbp+disp32]
+; Otherwise: emit mov rax, [abs32]
 codegen_emit_mov_rax_var:
     push    rax
     push    rdi
+    ; Check register cache: if rdi == reg_cache_var, emit mov rax, r15 (3 bytes)
+    cmp     rdi, [reg_cache_var]
+    jne     .not_cached
+    pop     rdi
+    pop     rax
+    ; Emit: mov rax, r15 = 4C 89 F8 (3 bytes)
+    push    rax
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xf8
+    call    emit_b
+    pop     rax
+    ret
+  .not_cached:
+    test    byte [var_addr_is_rbp], 1
+    jnz     .rbp_load
+    ; absolute mode: 48 8B 04 25 addr32
     mov     al, 0x48
     call    emit_b
-    mov     al, 0x8b            ; MOV rax, [disp32]
+    mov     al, 0x8b
     call    emit_b
     mov     al, 0x04
     call    emit_b
     mov     al, 0x25
     call    emit_b
     pop     rdi
-    mov     eax, edi            ; addr32 (fits in 32 bits)
+    mov     eax, edi
+    call    emit_d
+    pop     rax
+    ret
+  .rbp_load:
+    ; rbp-relative: mov rax, [rbp+disp32] = 48 8B 85 disp32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8b
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    pop     rdi
+    mov     eax, edi
     call    emit_d
     pop     rax
     ret
@@ -627,18 +866,432 @@ codegen_emit_mov_rdi_var:
     pop     rax
     ret
 
-; codegen_emit_store_rax_to_var(rdi=var_va): emit  mov [abs32], rax
+; codegen_emit_store_rax_to_var(rdi=var_va): emit  mov [addr], rax
+; When var_addr_is_rbp=1: emit mov [rbp+disp32], rax
+; Otherwise: emit mov [abs32], rax
+; Peephole: detect  load rax,[abs32]; add/sub rax,imm; store [abs32],rax  →  add/sub/inc/dec qword [abs32]
 codegen_emit_store_rax_to_var:
     push    rax
     push    rdi
+    push    rcx
+    push    r12
+
+    ; Check register cache: if rdi == reg_cache_var, emit mov r15, rax (3 bytes)
+    cmp     rdi, [reg_cache_var]
+    jne     .not_cached_store
+    pop     r12
+    pop     rcx
+    pop     rdi
+    pop     rax
+    push    rax
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xc7
+    call    emit_b
+    pop     rax
+    ret
+  .not_cached_store:
+
+    test    byte [var_addr_is_rbp], 1
+    jnz     .rbp_store
+
+    ; --- Peephole: detect load+add/sub+store → direct mem op ---
+    ; Pattern: mov rax, [addr32] (8 bytes) + add/sub rax, imm32 (6 bytes) = 14 bytes
+    ; Or: mov rax, [addr1] (8 bytes) + add/sub rax, [addr2] (8 bytes) = 16 bytes
+    mov     rcx, [emit_tail_len]
+
+    ; Check tail_len >= 14 for imm pattern
+    cmp     rcx, 14
+    jl      .check_mem_pattern
+
+    ; Check: tail[tail_len-14] == 0x48 (REX.W)
+    mov     rax, rcx
+    sub     rax, 14
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .check_mem_pattern
+
+    ; tail[tail_len-13] == 0x8B (MOV r)
+    mov     rax, rcx
+    sub     rax, 13
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x8B
+    jne     .check_mem_pattern
+
+    ; tail[tail_len-12] == 0x04 (SIB)
+    mov     rax, rcx
+    sub     rax, 12
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x04
+    jne     .check_mem_pattern
+
+    ; tail[tail_len-11] == 0x25 (disp32)
+    mov     rax, rcx
+    sub     rax, 11
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x25
+    jne     .check_mem_pattern
+
+    ; Check REX.W of add/sub at tail[tail_len-6]
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .check_mem_pattern
+
+    ; Check opcode at tail[tail_len-5]
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    movzx   r8d, byte [emit_tail + rax]     ; r8b = opcode
+
+    cmp     r8b, 0x05          ; add rax, imm32
+    je      .peephole_add
+    cmp     r8b, 0x2D          ; sub rax, imm32
+    je      .peephole_sub
+    jmp     .check_mem_pattern
+
+.check_mem_pattern:
+    ; Check tail_len >= 16 for mem-to-mem pattern
+    ; Pattern: mov rax, [addr1] (8 bytes) + add/sub rax, [addr2] (8 bytes)
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 16
+    jl      .abs_store_normal
+
+    ; tail[tail_len-16] == 0x48, tail[tail_len-15] == 0x8B, tail[tail_len-14] == 0x04, tail[tail_len-13] == 0x25
+    mov     rax, rcx
+    sub     rax, 16
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .abs_store_normal
+
+    mov     rax, rcx
+    sub     rax, 15
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x8B
+    jne     .abs_store_normal
+
+    mov     rax, rcx
+    sub     rax, 14
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x04
+    jne     .abs_store_normal
+
+    mov     rax, rcx
+    sub     rax, 13
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x25
+    jne     .abs_store_normal
+
+    ; Check add/sub rax, [abs32] at tail[tail_len-8..tail_len-5]
+    ; tail[tail_len-8] == 0x48, tail[tail_len-7] == 0x03 or 0x2B
+    mov     rax, rcx
+    sub     rax, 8
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .abs_store_normal
+
+    mov     rax, rcx
+    sub     rax, 7
+    and     rax, 31
+    movzx   r8d, byte [emit_tail + rax]
+
+    cmp     r8b, 0x03           ; add rax, r/m64
+    je      .peephole_add_mem
+    cmp     r8b, 0x2B           ; sub rax, r/m64
+    je      .peephole_sub_mem
+    jmp     .abs_store_normal
+
+.peephole_add:
+    ; Extract load addr32 from out_buffer[out_idx - 10]
+    mov     rax, [out_idx]
+    mov     eax, dword [out_buffer + rax - 10]   ; load addr32
+
+    ; Extract add imm32 from out_buffer[out_idx - 4]
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 4]    ; add imm32
+
+    ; Check if load addr == store addr (rdi)
+    cmp     eax, edi
+    jne     .abs_store_normal
+
+    ; Undo 14 bytes
+    sub     qword [out_idx], 14
+    sub     qword [emit_tail_len], 14
+
+    ; Check if imm32 == 1 → inc
+    cmp     r8d, 1
+    jne     .add_not_one
+
+    ; inc qword [abs32] = 48 FF 04 25 addr32 (8 bytes)
     mov     al, 0x48
     call    emit_b
-    mov     al, 0x89            ; MOV [disp32], rax
+    mov     al, 0xFF
     call    emit_b
     mov     al, 0x04
     call    emit_b
     mov     al, 0x25
     call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .peephole_done
+
+.add_not_one:
+    ; Check if imm32 == -1 → dec
+    cmp     r8d, -1
+    jne     .add_not_neg1
+
+    ; dec qword [abs32] = 48 FF 0C 25 addr32 (8 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0x0C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .peephole_done
+
+.add_not_neg1:
+    ; Check if imm32 fits in signed 8 bits (-128..127)
+    mov     rax, r8
+    sar     rax, 32
+    test    rax, rax
+    jnz     .abs_store_normal
+    cmp     r8d, 127
+    jg      .abs_store_normal
+    cmp     r8d, -128
+    jl      .abs_store_normal
+
+    ; add qword [abs32], imm8 = 48 83 00 addr32 imm8 (9 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0x00             ; /0 = add
+    call    emit_b
+    mov     al, 0x25             ; SIB: [disp32]
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    mov     eax, r8d
+    call    emit_b               ; imm8
+    jmp     .peephole_done
+
+.peephole_sub:
+    ; Extract load addr32
+    mov     rax, [out_idx]
+    mov     eax, dword [out_buffer + rax - 10]
+
+    ; Extract sub imm32
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 4]
+
+    ; Check if load addr == store addr
+    cmp     eax, edi
+    jne     .abs_store_normal
+
+    ; Undo 14 bytes
+    sub     qword [out_idx], 14
+    sub     qword [emit_tail_len], 14
+
+    ; Check if imm32 == 1 → dec
+    cmp     r8d, 1
+    jne     .sub_not_one
+
+    ; dec qword [abs32] = 48 FF 0C 25 addr32 (8 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0x0C            ; /1 = dec
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .peephole_done
+
+.sub_not_one:
+    ; Check if imm32 == -1 → inc
+    cmp     r8d, -1
+    jne     .sub_not_neg1
+
+    ; inc qword [abs32] = 48 FF 04 25 addr32 (8 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .peephole_done
+
+.sub_not_neg1:
+    ; Check if imm32 fits in signed 8 bits
+    mov     rax, r8
+    sar     rax, 32
+    test    rax, rax
+    jnz     .abs_store_normal
+    cmp     r8d, 127
+    jg      .abs_store_normal
+    cmp     r8d, -128
+    jl      .abs_store_normal
+
+    ; sub qword [abs32], imm8 = 48 83 28 addr32 imm8 (9 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0x28            ; /5 = sub
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    mov     eax, r8d
+    call    emit_b
+    jmp     .peephole_done
+
+.peephole_add_mem:
+    ; Pattern: mov rax, [addr1]; add rax, [addr2]; store [addr1], rax
+    ; → mov rax, [addr2]; add [addr1], rax
+    ; Extract addr1 from out_buffer[out_idx - 12]
+    mov     rax, [out_idx]
+    mov     eax, dword [out_buffer + rax - 12]   ; addr1
+
+    ; Extract addr2 from out_buffer[out_idx - 4]
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 4]    ; addr2
+
+    ; Check if addr1 == store addr (rdi)
+    cmp     eax, edi
+    jne     .abs_store_normal
+
+    ; Undo 16 bytes (mov rax,[addr1] + add rax,[addr2])
+    sub     qword [out_idx], 16
+    sub     qword [emit_tail_len], 16
+
+    ; Emit: mov rax, [addr2] = 48 8B 04 25 addr2 (8 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r8d
+    call    emit_d
+
+    ; Emit: add [addr1], rax = 48 01 04 25 addr1 (8 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+
+    jmp     .peephole_done
+
+.peephole_sub_mem:
+    ; Pattern: mov rax, [addr1]; sub rax, [addr2]; store [addr1], rax
+    ; → mov rax, [addr2]; neg rax; add [addr1], rax
+    ; Extract addr1
+    mov     rax, [out_idx]
+    mov     eax, dword [out_buffer + rax - 12]
+
+    ; Extract addr2
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 4]
+
+    ; Check if addr1 == store addr
+    cmp     eax, edi
+    jne     .abs_store_normal
+
+    ; Undo 16 bytes
+    sub     qword [out_idx], 16
+    sub     qword [emit_tail_len], 16
+
+    ; Emit: mov rax, [addr2] = 48 8B 04 25 addr2
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r8d
+    call    emit_d
+
+    ; Emit: neg rax = 48 F7 D8
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xF7
+    call    emit_b
+    mov     al, 0xD8
+    call    emit_b
+
+    ; Emit: add [addr1], rax = 48 01 04 25 addr1
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+
+    jmp     .peephole_done
+
+.peephole_done:
+    pop     r12
+    pop     rcx
+    pop     rdi
+    pop     rax
+    ret
+
+.abs_store_normal:
+    ; absolute mode: 48 89 04 25 addr32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    pop     r12
+    pop     rcx
+    pop     rdi
+    mov     eax, edi
+    call    emit_d
+    pop     rax
+    ret
+  .rbp_store:
+    ; rbp-relative: mov [rbp+disp32], rax = 48 89 85 disp32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    pop     r12
+    pop     rcx
     pop     rdi
     mov     eax, edi
     call    emit_d
@@ -649,6 +1302,18 @@ codegen_emit_store_rax_to_var:
 codegen_emit_push_rax:
     push    rax
     mov     al, 0x50
+    call    emit_b
+    pop     rax
+    ret
+
+; Emit mov rbx, rax (save left operand in rbx, avoiding push/pop)
+codegen_emit_mov_rbx_rax:
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xc3
     call    emit_b
     pop     rax
     ret
@@ -696,34 +1361,473 @@ codegen_emit_mov_rax_rdi:
 
 codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
     push    rax
+    push    rcx
+    push    rdi
+    push    r12
+
+    mov     r12, [emit_tail_len]
+
+    ; --- Pattern A: push + mov rax,[abs32] + pop → add rax,[abs32] (10 bytes) ---
+    cmp     r12, 10
+    jl      .add_check_b
+
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50       ; push rax
+    jne     .add_check_b
+
+    mov     rcx, r12
+    sub     rcx, 9
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48       ; REX.W
+    jne     .add_check_b
+
+    mov     rcx, r12
+    sub     rcx, 8
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x8B       ; MOV
+    jne     .add_check_b
+
+    mov     rcx, r12
+    sub     rcx, 7
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x04       ; SIB
+    jne     .add_check_b
+
+    mov     rcx, r12
+    sub     rcx, 6
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x25       ; disp32
+    jne     .add_check_b
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B       ; pop rbx
+    jne     .add_check_b
+
+    ; Pattern A matched: extract addr32 from out_buffer[out_idx - 5]
+    mov     rdi, [out_idx]
+    mov     edi, dword [out_buffer + rdi - 5]
+
+    sub     qword [out_idx], 10
+    sub     qword [emit_tail_len], 10
+
+    ; emit: add rax, [abs32] = 48 03 04 25 addr32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x03
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .add_done
+
+.add_check_b:
+    ; --- Pattern B: push + movabs N + pop → add rax, imm32 (12→6 bytes) ---
+    cmp     r12, 12
+    jl      .add_normal
+
+    mov     rcx, r12
+    sub     rcx, 12
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50       ; push
+    jne     .add_normal
+
+    mov     rcx, r12
+    sub     rcx, 11
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48       ; REX.W
+    jne     .add_normal
+
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xB8       ; movabs
+    jne     .add_normal
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B       ; pop
+    jne     .add_normal
+
+    ; Pattern B matched: extract imm64 from out_buffer[out_idx - 9]
+    mov     rdi, [out_idx]
+    mov     rdi, [out_buffer + rdi - 9]
+
+    ; check signed 32-bit fit
+    mov     rax, rdi
+    sar     rax, 32
+    test    rax, rax
+    jz      .add_b_fits
+    cmp     rax, -1
+    jne     .add_normal
+
+.add_b_fits:
+    sub     qword [out_idx], 12
+    sub     qword [emit_tail_len], 12
+
+    ; emit: add rax, imm32 = 48 05 imm32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x05
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .add_done
+
+.add_normal:
     mov     al, 0x48
     call    emit_b
     mov     al, 0x01
     call    emit_b
     mov     al, 0xd8
     call    emit_b
+
+.add_done:
+    pop     r12
+    pop     rdi
+    pop     rcx
     pop     rax
     ret
 
 codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
     push    rax
-    mov     al, 0x48            ; neg rax
+    push    rcx
+    push    rdi
+    push    r12
+
+    mov     r12, [emit_tail_len]
+
+    ; --- Pattern A: push + mov rax,[abs32] + pop → sub rax,[abs32] ---
+    cmp     r12, 10
+    jl      .sub_check_b
+
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .sub_check_b
+
+    mov     rcx, r12
+    sub     rcx, 9
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48
+    jne     .sub_check_b
+
+    mov     rcx, r12
+    sub     rcx, 8
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x8B
+    jne     .sub_check_b
+
+    mov     rcx, r12
+    sub     rcx, 7
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x04
+    jne     .sub_check_b
+
+    mov     rcx, r12
+    sub     rcx, 6
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x25
+    jne     .sub_check_b
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .sub_check_b
+
+    ; Pattern A matched: sub rax, [abs32] = 48 2B 04 25 addr32
+    mov     rdi, [out_idx]
+    mov     edi, dword [out_buffer + rdi - 5]
+
+    sub     qword [out_idx], 10
+    sub     qword [emit_tail_len], 10
+
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x2B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .sub_done
+
+.sub_check_b:
+    ; --- Pattern B: push + movabs N + pop → sub rax, imm32 ---
+    cmp     r12, 12
+    jl      .sub_normal
+
+    mov     rcx, r12
+    sub     rcx, 12
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .sub_normal
+
+    mov     rcx, r12
+    sub     rcx, 11
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48
+    jne     .sub_normal
+
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xB8
+    jne     .sub_normal
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .sub_normal
+
+    ; Pattern B matched: extract imm64
+    mov     rdi, [out_idx]
+    mov     rdi, [out_buffer + rdi - 9]
+
+    mov     rax, rdi
+    sar     rax, 32
+    test    rax, rax
+    jz      .sub_b_fits
+    cmp     rax, -1
+    jne     .sub_normal
+
+.sub_b_fits:
+    sub     qword [out_idx], 12
+    sub     qword [emit_tail_len], 12
+
+    ; emit: sub rax, imm32 = 48 2D imm32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x2D
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .sub_done
+
+.sub_normal:
+    ; neg rax (48 F7 D8)
+    mov     al, 0x48
     call    emit_b
     mov     al, 0xf7
     call    emit_b
     mov     al, 0xd8
     call    emit_b
-    mov     al, 0x48            ; add rax, rbx
+    ; add rax, rbx (48 01 D8)
+    mov     al, 0x48
     call    emit_b
     mov     al, 0x01
     call    emit_b
     mov     al, 0xd8
     call    emit_b
+
+.sub_done:
+    pop     r12
+    pop     rdi
+    pop     rcx
     pop     rax
     ret
 
 codegen_emit_imul_rax_rbx:     ; imul rax, rbx  (48 0F AF C3)
     push    rax
+    push    rcx
+    push    rdi
+    push    r12
+
+    mov     r12, [emit_tail_len]
+
+    ; --- Pattern A: push + mov rax,[abs32] + pop → imul rax,[abs32] ---
+    cmp     r12, 10
+    jl      .mul_check_b
+
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .mul_check_b
+
+    mov     rcx, r12
+    sub     rcx, 9
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48
+    jne     .mul_check_b
+
+    mov     rcx, r12
+    sub     rcx, 8
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x8B
+    jne     .mul_check_b
+
+    mov     rcx, r12
+    sub     rcx, 7
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x04
+    jne     .mul_check_b
+
+    mov     rcx, r12
+    sub     rcx, 6
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x25
+    jne     .mul_check_b
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .mul_check_b
+
+    ; Pattern A matched: imul rax, [abs32] = 48 0F AF 04 25 addr32
+    mov     rdi, [out_idx]
+    mov     edi, dword [out_buffer + rdi - 5]
+
+    sub     qword [out_idx], 10
+    sub     qword [emit_tail_len], 10
+
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xAF
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .mul_done
+
+.mul_check_b:
+    ; --- Pattern B: push + movabs N + pop → strength-reduced or imul ---
+    cmp     r12, 12
+    jl      .mul_normal
+
+    mov     rcx, r12
+    sub     rcx, 12
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x50
+    jne     .mul_normal
+
+    mov     rcx, r12
+    sub     rcx, 11
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x48
+    jne     .mul_normal
+
+    mov     rcx, r12
+    sub     rcx, 10
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0xB8
+    jne     .mul_normal
+
+    mov     rcx, r12
+    sub     rcx, 1
+    and     rcx, 31
+    cmp     byte [emit_tail + rcx], 0x5B
+    jne     .mul_normal
+
+    ; Pattern B matched: extract imm64
+    mov     rdi, [out_idx]
+    mov     rdi, [out_buffer + rdi - 9]
+
+    ; check signed 32-bit fit
+    mov     rax, rdi
+    sar     rax, 32
+    test    rax, rax
+    jz      .mul_b_fits
+    cmp     rax, -1
+    jne     .mul_normal
+
+.mul_b_fits:
+    ; strength reduction: check power of 2
+    mov     rax, rdi
+    test    rax, rax
+    jz      .mul_zero
+    ; check if power of 2: (x & (x-1)) == 0
+    mov     rcx, rax
+    dec     rcx
+    test    rax, rcx
+    jnz     .mul_imm             ; not power of 2, use imul
+
+    ; power of 2: compute shift amount via bit scan
+    ; bsf rcx, rax → shift count
+    mov     rcx, rax
+    xor     eax, eax
+.bsf_loop:
+    test    cl, 1
+    jnz     .got_shift
+    shr     rcx, 1
+    inc     eax
+    cmp     eax, 63
+    jle     .bsf_loop
+.got_shift:
+    ; eax = shift count (0..62)
+    ; undo movabs+pop (12 bytes)
+    sub     qword [out_idx], 12
+    sub     qword [emit_tail_len], 12
+
+    cmp     eax, 1
+    jne     .shift_not1
+    ; shl rax, 1 = 48 D1 E0 (3 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xD1
+    call    emit_b
+    mov     al, 0xE0
+    call    emit_b
+    jmp     .mul_done
+.shift_not1:
+    ; shl rax, imm8 = 48 C1 E0 imm8 (4 bytes)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    mov     al, 0xE0
+    call    emit_b
+    pop     rax
+    call    emit_b              ; emit shift count as byte
+    jmp     .mul_done
+
+.mul_zero:
+    ; N = 0: just emit xor eax, eax
+    sub     qword [out_idx], 12
+    sub     qword [emit_tail_len], 12
+    mov     al, 0x31
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    jmp     .mul_done
+
+.mul_imm:
+    ; N fits in 32 bits but not power of 2: imul rax, rax, imm32
+    ; = 48 69 C0 imm32 (7 bytes)
+    sub     qword [out_idx], 12
+    sub     qword [emit_tail_len], 12
+
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x69
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    jmp     .mul_done
+
+.mul_normal:
+    ; imul rax, rbx = 48 0F AF C3
     mov     al, 0x48
     call    emit_b
     mov     al, 0x0f
@@ -732,6 +1836,11 @@ codegen_emit_imul_rax_rbx:     ; imul rax, rbx  (48 0F AF C3)
     call    emit_b
     mov     al, 0xc3
     call    emit_b
+
+.mul_done:
+    pop     r12
+    pop     rdi
+    pop     rcx
     pop     rax
     ret
 
@@ -877,81 +1986,177 @@ codegen_emit_shr:   ; rbx >> rax → rax
 ; ============================================================
 ; Boolean operations
 ; ============================================================
-codegen_emit_and_bool: ; and rax, rbx (eager)
+codegen_emit_and_bool: ; boolean AND: 0 or 1
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .and_code]
+    mov     edx, 14
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.and_code:
+    db 0x48, 0x85, 0xDB               ; test rbx, rbx
+    db 0x0F, 0x95, 0xC1               ; setnz cl
+    db 0x48, 0x85, 0xC0               ; test rax, rax
+    db 0x0F, 0x95, 0xC0               ; setnz al
+    db 0x20, 0xC8                     ; and al, cl
+    db 0x48, 0x0F, 0xB6, 0xC0        ; movzx rax, al
+
+codegen_emit_or_bool:  ; boolean OR: 0 or 1
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .or_code]
+    mov     edx, 14
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.or_code:
+    db 0x48, 0x09, 0xD8               ; or rax, rbx
+    db 0x0F, 0x95, 0xC0               ; setnz al
+    db 0x48, 0x0F, 0xB6, 0xC0        ; movzx rax, al
+    pop     rcx
+    pop     rsi
+    ; Fall through to emit individual bytes
+    ; test rax, rax
     push    rax
-    mov     al, 0x48            ; test rbx, rbx
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    mov     al, 0xc0
+    call    emit_b
+    pop     rax
+    ; jz offset (patch later)
+    push    rax
+    mov     al, 0x74
+    call    emit_b
+    mov     rax, [out_idx]
+    inc     rax
+    push    rax                     ; save patch offset
+    xor     eax, eax
+    call    emit_b                  ; placeholder
+    ; test rbx, rbx
+    push    rax
+    mov     al, 0x48
     call    emit_b
     mov     al, 0x85
     call    emit_b
     mov     al, 0xdb
     call    emit_b
-    mov     al, 0x0f            ; setnz cl
+    pop     rax
+    ; jz offset (patch later)
+    push    rax
+    mov     al, 0x74
     call    emit_b
-    mov     al, 0x95
+    mov     rax, [out_idx]
+    inc     rax
+    push    rax                     ; save patch offset
+    xor     eax, eax
+    call    emit_b                  ; placeholder
+    ; test rbx, rbx
+    push    rax
+    mov     al, 0x48
     call    emit_b
-    mov     al, 0xc1
+    mov     al, 0x85
     call    emit_b
-    mov     al, 0x48            ; test rax, rax
+    mov     al, 0xdb
+    call    emit_b
+    pop     rax
+    ; js offset
+    push    rax
+    mov     al, 0x78
+    call    emit_b
+    mov     rax, [out_idx]
+    inc     rax
+    push    rax                     ; save patch offset
+    xor     eax, eax
+    call    emit_b                  ; placeholder
+    ; test rax, rax
+    push    rax
+    mov     al, 0x48
     call    emit_b
     mov     al, 0x85
     call    emit_b
     mov     al, 0xc0
     call    emit_b
-    mov     al, 0x0f            ; setnz al
-    call    emit_b
-    mov     al, 0x95
-    call    emit_b
-    mov     al, 0xc0
-    call    emit_b
-    mov     al, 0x20            ; and al, cl
-    call    emit_b
-    mov     al, 0xc8
-    call    emit_b
-    mov     al, 0x48            ; movzx rax, al
-    call    emit_b
-    mov     al, 0x0f
-    call    emit_b
-    mov     al, 0xb6
-    call    emit_b
-    mov     al, 0xc0
-    call    emit_b
     pop     rax
-    ret
-
-codegen_emit_or_bool:  ; or rax, rbx → bool
+    ; js offset
     push    rax
-    mov     al, 0x48            ; or rax, rbx
+    mov     al, 0x78
     call    emit_b
-    mov     al, 0x09
-    call    emit_b
-    mov     al, 0xd8
-    call    emit_b
-    mov     al, 0x0f            ; setnz al
-    call    emit_b
-    mov     al, 0x95
-    call    emit_b
-    mov     al, 0xc0
-    call    emit_b
-    mov     al, 0x48            ; movzx rax, al
-    call    emit_b
-    mov     al, 0x0f
-    call    emit_b
-    mov     al, 0xb6
-    call    emit_b
-    mov     al, 0xc0
-    call    emit_b
-    pop     rax
-    ret
-
-codegen_emit_not_rax:  ; xor rax, 1  (for bool NOT)
+    mov     rax, [out_idx]
+    inc     rax
+    push    rax                     ; save patch offset
+    xor     eax, eax
+    call    emit_b                  ; placeholder
+    ; mov rax, 1
     push    rax
     mov     al, 0x48
     call    emit_b
-    mov     al, 0x83
+    mov     al, 0xc7
     call    emit_b
-    mov     al, 0xf0
+    mov     al, 0xc0
     call    emit_b
     mov     al, 0x01
+    call    emit_b
+    xor     eax, eax
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    pop     rax
+    ; jmp .adone
+    push    rax
+    mov     al, 0xeb
+    call    emit_b
+    mov     rax, [out_idx]
+    inc     rax
+    push    rax                     ; save patch offset
+    xor     eax, eax
+    call    emit_b                  ; placeholder
+    ; .aneg: mov rax, -1
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xc7
+    call    emit_b
+    mov     al, 0xc0
+    call    emit_b
+    mov     al, 0xff
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    call    emit_b
+    pop     rax
+    ; jmp .adone
+    push    rax
+    mov     al, 0xeb
+    call    emit_b
+    mov     rax, [out_idx]
+    inc     rax
+    push    rax                     ; save patch offset
+    xor     eax, eax
+    call    emit_b                  ; placeholder
+    ; .azero: xor eax, eax
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x31
+    call    emit_b
+    mov     al, 0xc0
+    call    emit_b
+    pop     rax
+    ; .adone = current out_idx
+    ; Now patch all the jz and jmp offsets
+    ; Pop the saved patch offsets and patch them
+codegen_emit_not_rax:  ; neg rax  (tri-state NOT: true→false, false→true, neutral→neutral)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xf7
+    call    emit_b
+    mov     al, 0xd8
     call    emit_b
     pop     rax
     ret
@@ -959,6 +2164,7 @@ codegen_emit_not_rax:  ; xor rax, 1  (for bool NOT)
 ; ============================================================
 ; Comparison: cmp rbx, rax; setCC al; movzx rax, al
 ; rdi = setCC opcode byte (0x94=sete, 0x95=setne, etc.)
+; Returns 0 (false) or 1 (true)
 ; ============================================================
 codegen_emit_cmp_setcc:
     push    rax
@@ -984,6 +2190,7 @@ codegen_emit_cmp_setcc:
     mov     al, 0xc0
     call    emit_b
     pop     rax
+
     ret
 
 ; ============================================================
@@ -991,27 +2198,402 @@ codegen_emit_cmp_setcc:
 ; ============================================================
 
 ; codegen_emit_test_jz: emit  test rax,rax; jz placeholder  → rax=offset of rel32
+; PEEPHOLE: if recent bytes are mov+push+movabs+pop+cmp+setCC+movzx, fuse to cmp [addr],N; jcc
+; Also: when register cache active, fuse to cmp r15,N; jcc
 codegen_emit_test_jz:
     push    rbx
-    mov     al, 0x48            ; test rax, rax
-    call    emit_b
-    mov     al, 0x85
-    call    emit_b
-    mov     al, 0xc0
-    call    emit_b
-    mov     al, 0x0f            ; jz rel32
-    call    emit_b
-    mov     al, 0x84
-    call    emit_b
-    mov     rax, [out_idx]      ; offset of placeholder
-    xor     ebx, ebx
-    call    emit_d              ; placeholder = 0
-    pop     rbx
-    ret
+    push    rcx
+    push    rdx
+    push    rdi
 
-; codegen_emit_test_jnz: test rax,rax; jnz placeholder
-codegen_emit_test_jnz:
-    push    rbx
+    ; FAST PATH: register cache active — look for push+movabs+pop+cmp+setCC+movzx (22 bytes)
+    cmp     qword [reg_cache_var], -1
+    je      .check_full_pattern
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 22
+    jb      .check_full_pattern
+    lea     rdi, [emit_tail]
+    ; Check movzx at tail[N-4..N-1] = 48 0F B6 C0
+    mov     rax, rcx
+    sub     rax, 4
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x48
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x0f
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xb6
+    jne     .check_full_pattern
+    mov     rax, rcx
+    dec     rax
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xc0
+    jne     .check_full_pattern
+    ; Check setCC at tail[N-7..N-5] = 0F XX C0
+    mov     rax, rcx
+    sub     rax, 7
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x0f
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xc0
+    jne     .check_full_pattern
+    ; Determine inverse CC from setCC byte at tail[N-6]
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    movzx   edx, byte [rdi + rax]
+    cmp     dl, 0x9c
+    jne     .cc_not_l
+    mov     byte [cmp_fused_cc], 0x8d
+    jmp     .cc_ok2
+  .cc_not_l:
+    cmp     dl, 0x9f
+    jne     .cc_not_g
+    mov     byte [cmp_fused_cc], 0x8e
+    jmp     .cc_ok2
+  .cc_not_g:
+    cmp     dl, 0x94
+    jne     .cc_not_e
+    mov     byte [cmp_fused_cc], 0x85
+    jmp     .cc_ok2
+  .cc_not_e:
+    cmp     dl, 0x95
+    jne     .cc_not_ne
+    mov     byte [cmp_fused_cc], 0x84
+    jmp     .cc_ok2
+  .cc_not_ne:
+    cmp     dl, 0x9e
+    jne     .cc_not_le
+    mov     byte [cmp_fused_cc], 0x8f
+    jmp     .cc_ok2
+  .cc_not_le:
+    cmp     dl, 0x9d
+    jne     .check_full_pattern
+    mov     byte [cmp_fused_cc], 0x8c
+  .cc_ok2:
+    ; Check cmp at tail[N-10..N-8] = 48 39 C3
+    mov     rax, rcx
+    sub     rax, 10
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x48
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 9
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x39
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 8
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xc3
+    jne     .check_full_pattern
+    ; Check pop at tail[N-11] = 5B
+    mov     rax, rcx
+    sub     rax, 11
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x5b
+    jne     .check_full_pattern
+    ; Check movabs at tail[N-21..N-20] = 48 B8
+    mov     rax, rcx
+    sub     rax, 21
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x48
+    jne     .check_full_pattern
+    mov     rax, rcx
+    sub     rax, 20
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xb8
+    jne     .check_full_pattern
+    ; Check push at tail[N-22] = 50
+    mov     rax, rcx
+    sub     rax, 22
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x50
+    jne     .check_full_pattern
+    ; Pattern matched (cached): push+movabs+pop+cmp+setCC+movzx = 22 bytes
+    ; Extract imm64 from out_buffer[out_idx - 19]
+    ; movzx(4) + setCC(3) + cmp(3) + pop(1) = 11 bytes at end
+    ; imm64(8) starts at out_idx - 11 - 8 = out_idx - 19
+    mov     rdi, [out_idx]
+    sub     rdi, 19
+    mov     rdi, [out_buffer + rdi]
+    ; Record fused var address for caching
+    mov     rax, [reg_cache_var]
+    mov     [fused_cmp_var_addr], rax
+    ; Check fits in signed 32 bits
+    mov     rsi, rdi
+    sar     rsi, 31
+    cmp     sil, 0
+    je      .cached_imm32_ok
+    cmp     sil, 0xff
+    jne     .check_full_pattern
+  .cached_imm32_ok:
+    ; Undo 22 bytes
+    sub     qword [out_idx], 22
+    sub     qword [emit_tail_len], 22
+    ; Emit: cmp r15, imm32 = 49 81 FF XX XX XX XX (7 bytes)
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0x81
+    call    emit_b
+    mov     al, 0xff
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    ; Emit: jcc rel32 placeholder = 0F CC rel32 (6 bytes)
+    mov     al, 0x0f
+    call    emit_b
+    movzx   eax, byte [cmp_fused_cc]
+    call    emit_b
+    mov     rax, [out_idx]
+    xor     ebx, ebx
+    call    emit_d
+    jmp     .jz_done
+
+  .check_full_pattern:
+    ; push rax = 50 (1 byte)
+    ; movabs = 48 B8 XX*8 (10 bytes: 2 emit_b + 8 emit_q)
+    ; pop rbx = 5B (1 byte)
+    ; cmp rbx,rax = 48 39 C3 (3 bytes)
+    ; setCC al = 0F CC C0 (3 bytes)
+    ; movzx rax,al = 48 0F B6 C0 (4 bytes)
+    ; Total: 30 bytes
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 30
+    jb      .normal_jz
+
+    lea     rdi, [emit_tail]
+
+    ; Verify movzx at tail[N-4..N-1] = 48 0F B6 C0
+    mov     rax, rcx
+    sub     rax, 4
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x48
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x0f
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xb6
+    jne     .normal_jz
+    mov     rax, rcx
+    dec     rax
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xc0
+    jne     .normal_jz
+
+    ; Verify setCC at tail[N-7..N-5] = 0F XX C0
+    mov     rax, rcx
+    sub     rax, 7
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x0f
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xc0
+    jne     .normal_jz
+
+    ; Determine inverse CC from the setCC byte at tail[N-6]
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    movzx   edx, byte [rdi + rax]
+    cmp     dl, 0x9c               ; setl
+    jne     .not_setl
+    mov     byte [cmp_fused_cc], 0x8d  ; jge
+    jmp     .cc_ok
+  .not_setl:
+    cmp     dl, 0x9f               ; setg
+    jne     .not_setg
+    mov     byte [cmp_fused_cc], 0x8e  ; jle
+    jmp     .cc_ok
+  .not_setg:
+    cmp     dl, 0x94               ; sete
+    jne     .not_sete
+    mov     byte [cmp_fused_cc], 0x85  ; jne
+    jmp     .cc_ok
+  .not_sete:
+    cmp     dl, 0x95               ; setne
+    jne     .not_setne
+    mov     byte [cmp_fused_cc], 0x84  ; je
+    jmp     .cc_ok
+  .not_setne:
+    cmp     dl, 0x9e               ; setle
+    jne     .not_setle
+    mov     byte [cmp_fused_cc], 0x8f  ; jg
+    jmp     .cc_ok
+  .not_setle:
+    cmp     dl, 0x9d               ; setge
+    jne     .normal_jz
+    mov     byte [cmp_fused_cc], 0x8c  ; jl
+  .cc_ok:
+
+    ; Verify cmp at tail[N-10..N-8] = 48 39 C3
+    mov     rax, rcx
+    sub     rax, 10
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x48
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 9
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x39
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 8
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xc3
+    jne     .normal_jz
+
+    ; Verify pop at tail[N-11] = 5B
+    mov     rax, rcx
+    sub     rax, 11
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x5b
+    jne     .normal_jz
+
+    ; Verify movabs at tail[N-21..N-20] = 48 B8
+    mov     rax, rcx
+    sub     rax, 21
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x48
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 20
+    and     rax, 31
+    cmp     byte [rdi + rax], 0xb8
+    jne     .normal_jz
+
+    ; Verify push at tail[N-22] = 50
+    mov     rax, rcx
+    sub     rax, 22
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x50
+    jne     .normal_jz
+
+    ; Verify mov rax,[abs32] at tail[N-30..N-27] = 48 8B 04 25
+    mov     rax, rcx
+    sub     rax, 30
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x48
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 29
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x8b
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 28
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x04
+    jne     .normal_jz
+    mov     rax, rcx
+    sub     rax, 27
+    and     rax, 31
+    cmp     byte [rdi + rax], 0x25
+    jne     .normal_jz
+
+    ; ALL PATTERN BYTES VERIFIED. Extract addr32 and imm64.
+    ; addr32 is at tail positions [N-26..N-23]
+    mov     rax, rcx
+    sub     rax, 26
+    and     rax, 31
+    movzx   edx, byte [rdi + rax]
+    mov     rax, rcx
+    sub     rax, 25
+    and     rax, 31
+    movzx   esi, byte [rdi + rax]
+    shl     esi, 8
+    or      edx, esi
+    mov     rax, rcx
+    sub     rax, 24
+    and     rax, 31
+    movzx   esi, byte [rdi + rax]
+    shl     esi, 16
+    or      edx, esi
+    mov     rax, rcx
+    sub     rax, 23
+    and     rax, 31
+    movzx   esi, byte [rdi + rax]
+    shl     esi, 24
+    or      edx, esi                 ; edx = addr32
+
+    ; imm64 is at tail positions [N-19..N-12]
+    ; Read from out_buffer at out_idx - 19 for simplicity
+    mov     rdi, [out_idx]
+    sub     rdi, 19
+    mov     rdi, [out_buffer + rdi]  ; rdi = imm64
+
+    ; Check if imm64 fits in signed 32 bits
+    mov     rsi, rdi
+    sar     rsi, 31
+    cmp     sil, 0
+    je      .imm32_ok
+    cmp     sil, 0xff
+    jne     .normal_jz
+  .imm32_ok:
+
+    ; PATTERN CONFIRMED. Undo the last 30 bytes.
+    sub     qword [out_idx], 30
+    sub     qword [emit_tail_len], 30
+
+    ; Record the fused comparison variable address for register caching
+    mov     [fused_cmp_var_addr], rdx
+
+    ; Check if this variable is cached in r15 — if so, use cmp r15, imm32 (7 bytes)
+    cmp     rdx, [reg_cache_var]
+    jne     .cmp_mem_fused
+    ; Emit: cmp r15, imm32 = 49 81 FF XX XX XX XX (7 bytes)
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0x81
+    call    emit_b
+    mov     al, 0xff
+    call    emit_b
+    mov     eax, edi
+    call    emit_d                 ; imm32
+    jmp     .cmp_fused_done
+  .cmp_mem_fused:
+    ; Emit: cmp qword [abs32], imm32 = 48 81 3C 25 XX XX XX XX YY YY YY YY (12 bytes)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x81
+    call    emit_b
+    mov     al, 0x3c
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edx
+    call    emit_d                 ; addr32
+    mov     eax, edi
+    call    emit_d                 ; imm32
+  .cmp_fused_done:
+
+    ; Emit: jcc rel32 placeholder = 0F CC 00 00 00 00 (6 bytes)
+    mov     al, 0x0f
+    call    emit_b
+    movzx   eax, byte [cmp_fused_cc]
+    call    emit_b
+    mov     rax, [out_idx]
+    xor     ebx, ebx
+    call    emit_d                 ; placeholder
+    jmp     .jz_done
+
+  .normal_jz:
+    ; Original: test rax, rax; jz placeholder
     mov     al, 0x48
     call    emit_b
     mov     al, 0x85
@@ -1020,11 +2602,16 @@ codegen_emit_test_jnz:
     call    emit_b
     mov     al, 0x0f
     call    emit_b
-    mov     al, 0x85
+    mov     al, 0x84
     call    emit_b
     mov     rax, [out_idx]
     xor     ebx, ebx
     call    emit_d
+
+  .jz_done:
+    pop     rdi
+    pop     rdx
+    pop     rcx
     pop     rbx
     ret
 
@@ -1058,6 +2645,8 @@ codegen_patch_chain_end:
     push    rbx
     push    rcx
     mov     rbx, [chain_base_depth]
+    dec     rbx
+    mov     rbx, [chain_base_stack + rbx*8]  ; load saved end_jump_depth
     mov     rcx, [end_jump_depth]
 .patch_loop:
     cmp     rcx, rbx
@@ -1157,8 +2746,8 @@ codegen_output_typed:
 ; For loop
 ; ============================================================
 ; codegen_emit_for_start(rdi=var_va, rsi=from_imm, rdx=to_imm)
-; Emits init + condition + captures loop start
-; Returns: rax = loop_start_pc, rbx = jge_patch_offset
+; Emits: init, jmp check, increment (cont target), condition, captures loop start
+; Returns: rax = loop_start_pc (condition), rbx = jge_patch_offset
 codegen_emit_for_start:
     push    r12
     push    r13
@@ -1186,7 +2775,7 @@ codegen_emit_for_start:
     mov     eax, r12d
     call    emit_d
     pop     rax
-    jmp     .loop_top
+    jmp     .emit_jmp_check
 
 .init_nonzero:
     ; emit: mov rax, from (imm64); mov [var_va], rax
@@ -1195,9 +2784,49 @@ codegen_emit_for_start:
     mov     rdi, r12
     call    codegen_emit_store_rax_to_var
 
-.loop_top:
-    ; save loop start PC (as VA offset from code start)
-    mov     r15, [out_idx]          ; r15 = loop start
+.emit_jmp_check:
+    ; emit: jmp .check  (skip increment on first iteration)
+    push    rax
+    mov     al, 0xe9
+    call    emit_b
+    mov     rax, [out_idx]
+    mov     r15, rax                ; save jmp patch offset
+    xor     eax, eax
+    call    emit_d
+    pop     rax
+
+.increment_point:
+    ; continue target = current out_idx (increment code)
+    call    codegen_get_out_idx
+    mov     [for_cont_addr], rax    ; save for codegen_emit_for_end
+    mov     rdi, rax
+    call    codegen_push_cont
+
+    ; emit: inc qword [var_va] (or add with step)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xff
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r12d
+    call    emit_d
+    pop     rax
+
+.check_point:
+    ; patch jmp to skip to here
+    push    rax
+    push    rdi
+    mov     rdi, r15                ; jmp patch offset
+    call    codegen_patch_jump
+    pop     rdi
+    pop     rax
+
+    ; save loop start PC (condition check)
+    mov     r15, [out_idx]
 
     ; emit: cmp qword [var_va], to_imm; jge exit_placeholder
     push    rax
@@ -1224,15 +2853,10 @@ codegen_emit_for_start:
     call    emit_d
     pop     rax
 
-    ; push cont target (loop top)
-    mov     rdi, r15
-    call    codegen_push_cont
-
     ; push break base
-    mov     rdi, [break_jump_depth]
-    lea     rdi, [break_base_stack + rdi*8]
+    mov     rdi, [break_base_depth]
     mov     rsi, [break_jump_depth]
-    mov     [rdi], rsi
+    mov     [break_base_stack + rdi*8], rsi
     inc     qword [break_base_depth]
 
     inc     qword [loop_depth]
@@ -1248,74 +2872,20 @@ codegen_emit_for_start:
     ret
 
 ; codegen_emit_for_end(rdi=loop_start, rsi=jge_patch, rdx=var_va)
-; Emits increment + back-jump + patches exit
+; Emits back-jump to increment point + patches exit
 codegen_emit_for_end:
     push    r12
     push    r13
     push    r14
-    mov     r12, rdi                ; loop_start
+    mov     r12, rdi                ; loop_start (condition check)
     mov     r13, rsi                ; jge_patch offset
     mov     r14, rdx                ; var VA
 
-    ; emit: inc qword [var_va]  (48 FF 04 25 addr32)
-    ; (or add qword [var_va], step  if step != 1)
-    mov     rax, [for_step_val]
-    cmp     rax, 1
-    je      .step1
-    ; step != 1: emit add qword [var_va], step_imm8/32
-    push    rax
-    cmp     rax, 127
-    jle     .step_imm8
-    mov     al, 0x48                ; add qword [var_va], imm32
-    call    emit_b
-    mov     al, 0x81
-    call    emit_b
-    mov     al, 0x04
-    call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r14d
-    call    emit_d
-    pop     rax
-    call    emit_d
-    jmp     .back_jmp
-.step_imm8:
-    mov     al, 0x48
-    call    emit_b
-    mov     al, 0x83
-    call    emit_b
-    mov     al, 0x04
-    call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r14d
-    call    emit_d
-    pop     rax
-    call    emit_b                  ; imm8
-    jmp     .back_jmp
-
-.step1:
-    push    rax
-    mov     al, 0x48
-    call    emit_b
-    mov     al, 0xff
-    call    emit_b
-    mov     al, 0x04
-    call    emit_b
-    mov     al, 0x25
-    call    emit_b
-    mov     eax, r14d
-    call    emit_d
-    pop     rax
-
-.back_jmp:
-    ; emit: jmp back to loop top
-    ; rel32 = (CODE_START + r12) - (CODE_START + out_idx + 5)
-    ;       = r12 - out_idx - 5
+    ; back-jump to increment point (not condition check)
     push    rax
     mov     al, 0xe9
     call    emit_b
-    mov     rax, r12
+    mov     rax, [for_cont_addr]   ; increment point
     sub     rax, [out_idx]
     sub     rax, 4
     call    emit_d
@@ -1411,8 +2981,9 @@ codegen_emit_for_start_dyn:
 
     mov     rdi, r15
     call    codegen_push_cont
+    mov     rdi, [break_base_depth]
     mov     rsi, [break_jump_depth]
-    mov     [break_base_stack + rsi*8], rsi
+    mov     [break_base_stack + rdi*8], rsi
     inc     qword [break_base_depth]
     inc     qword [loop_depth]
 
@@ -1437,6 +3008,25 @@ codegen_emit_while_end:
     push    r13
     mov     r12, rdi
     mov     r13, rsi
+    ; Flush register cache before back-jump
+    cmp     qword [reg_cache_var], -1
+    je      .while_no_flush
+    push    rax
+    push    rdi
+    mov     rdi, [reg_cache_var]
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3c
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    pop     rdi
+    pop     rax
+.while_no_flush:
     ; emit: jmp back to loop_start
     push    rax
     mov     al, 0xe9
@@ -1471,8 +3061,25 @@ codegen_pop_cont:
     ret
 
 codegen_emit_break:
-    ; emit: jmp placeholder; push offset onto break_jump_stack with depth=1
+    ; emit: flush cache if active, then jmp placeholder
     push    rax
+    ; Flush register cache before break
+    cmp     qword [reg_cache_var], -1
+    je      .break_no_flush
+    push    rdi
+    mov     rdi, [reg_cache_var]
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3c
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    pop     rdi
+.break_no_flush:
     mov     al, 0xe9
     call    emit_b
     mov     rax, [out_idx]          ; patch offset
@@ -1558,9 +3165,27 @@ codegen_patch_breaks:
     ret
 
 codegen_emit_skip:
-    ; emit: jmp to cont_base_stack top
+    ; emit: flush cache if active, then jmp to cont_base_stack top
     push    rax
     push    rbx
+    ; Flush register cache before skip
+    cmp     qword [reg_cache_var], -1
+    je      .skip_no_flush
+    ; emit: mov [abs32], r15 = 4C 89 3C 25 XX XX XX XX (9 bytes)
+    push    rdi
+    mov     rdi, [reg_cache_var]
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3c
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    pop     rdi
+.skip_no_flush:
     mov     rbx, [cont_base_depth]
     dec     rbx
     mov     rbx, [cont_base_stack + rbx*8]  ; loop condition address
@@ -1612,24 +3237,6 @@ codegen_emit_exit0:
 
 codegen_emit_exit1:
     push    rax
-    mov     al, 0x48
-    call    emit_b
-    mov     al, 0xc7
-    call    emit_b
-    mov     al, 0xc0
-    call    emit_b
-    mov     al, 0x3c
-    call    emit_b
-    times 3 db 0                    ; will be patched as NASM inline bytes
-    ; Hmm - I can't use `times` here. Let me just call emit_b for each:
-    pop     rax
-    push    rax
-    ; Redo:
-    ; Already emitted mov rax, 60 partially above... this is getting wrong.
-    ; Let me start over with a helper blob approach.
-    pop     rax
-
-    ; Emit exit(1) as a sequence of bytes
     push    rsi
     push    rcx
     lea     rsi, [rel .exit1_bytes]
@@ -1637,6 +3244,7 @@ codegen_emit_exit1:
     call    emit_blob_v2
     pop     rcx
     pop     rsi
+    pop     rax
     ret
 .exit1_bytes:
     db 0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00    ; mov rax, 60
@@ -1796,7 +3404,7 @@ codegen_end_protos:
     ret
 
 ; codegen_emit_prot_start(rdi=proto_idx, rsi=param_count)
-; Records out_idx in proto table; emits push r12 if param_count > 0
+; Records out_idx in proto table; emits push rbp; mov rbp, rsp
 codegen_emit_prot_start:
     push    rbx
     push    rcx
@@ -1812,21 +3420,103 @@ codegen_emit_prot_start:
     ; save param count
     mov     [rbx + PROTO_PARAMCNT_OFF], sil
 
-    ; args are loaded via mov rax,[rsp+offset] in emit_arg_pops — no callee-save push needed
+    ; Emit frame setup: push rbp (0x55)
+    push    rax
+    mov     al, 0x55
+    call    emit_b
+    ; Emit: mov rbp, rsp (48 89 E5)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xe5
+    call    emit_b
+    ; Emit: sub rsp, 0x100 (48 81 EC 00 01 00 00) — reserve 256 bytes for locals
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x81
+    call    emit_b
+    mov     al, 0xec
+    call    emit_b
+    mov     al, 0x00
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    xor     eax, eax
+    call    emit_b
+    call    emit_b
+    pop     rax
+
+    ; Set frame mode
+    mov     byte [in_proto_frame], 1
+    mov     qword [proto_local_offset], -8
+
     pop     rdx
     pop     rcx
     pop     rbx
     ret
 
-; codegen_emit_prot_end: emit ret
+; codegen_emit_prot_end: emit leave; ret
 codegen_emit_prot_end:
     push    rax
-    ; pop r12 if was pushed (simplified: always)
-    ; Actually check if we pushed r12...
-    ; For simplicity: emit ret
+    ; Emit leave (0xC9) — mov rsp, rbp; pop rbp
+    mov     al, 0xc9
+    call    emit_b
+    ; Emit ret (0xC3)
     mov     al, 0xc3
     call    emit_b
     pop     rax
+
+    ; Clear frame mode
+    mov     byte [in_proto_frame], 0
+    ret
+
+; codegen_init_proto_frame(rdi=proto_idx, rsi=param_count)
+; Computes rbp-relative offsets for protocol parameters and stores them in var_rbp_offsets.
+; After push rbp; mov rbp, rsp:
+;   [rbp+0]=saved rbp, [rbp+8]=ret addr, [rbp+16]=last arg, ..., [rbp + (N-i)*8 + 8] = arg i
+codegen_init_proto_frame:
+    push    rbx
+    push    rcx
+    push    rdx
+    push    r8
+    push    r9
+
+    mov     r8, rdi                 ; r8 = proto_idx
+    mov     r9, rsi                 ; r9 = param_count
+    test    rsi, rsi
+    jz      .cif_done
+
+    xor     rdx, rdx               ; i = 0
+  .cif_loop:
+    cmp     rdx, r9
+    jge     .cif_done
+
+    ; Get var index for param i
+    mov     rax, r8
+    imul    rax, PROTO_ENTRY_SIZE
+    lea     rax, [proto_table + rax]
+    movzx   rax, byte [rax + PROTO_PARAMS_OFF + rdx]
+    ; rax = var index
+
+    ; Compute rbp offset: (N - i) * 8 + 8
+    mov     rcx, r9
+    sub     rcx, rdx
+    inc     rcx
+    shl     rcx, 3                  ; * 8
+
+    ; Store in var_rbp_offsets
+    mov     [var_rbp_offsets + rax*8], rcx
+
+    inc     rdx
+    jmp     .cif_loop
+
+  .cif_done:
+    pop     r9
+    pop     r8
+    pop     rdx
+    pop     rcx
+    pop     rbx
     ret
 
 ; codegen_emit_call_prot(rdi=proto_idx)
@@ -2072,20 +3762,17 @@ codegen_emit_dec_var:   ; rdi = var_va
     ret
 
 codegen_emit_swap_vars:  ; rdi=va_a, rsi=va_b
+    ; Stack after 4 pushes: [rsp]=rdx, [rsp+8]=rsi(va_b), [rsp+16]=rdi(va_a), [rsp+24]=rax
     push    rax
     push    rdi
     push    rsi
     push    rdx
-    mov     rdx, rdi
     ; mov rax, [va_a]
     call    codegen_emit_mov_rax_var
-    ; mov rbx, [va_b]
-    pop     rsi
-    pop     rdx
-    push    rsi
-    push    rdx
+    ; mov rbx, [va_b] -- emit manually
+    mov     rdi, [rsp + 8]         ; rdi = va_b
     push    rax
-    mov     rdi, [rsp + 8]          ; va_b
+    push    rdi
     mov     al, 0x48
     call    emit_b
     mov     al, 0x8b
@@ -2094,12 +3781,13 @@ codegen_emit_swap_vars:  ; rdi=va_a, rsi=va_b
     call    emit_b
     mov     al, 0x25
     call    emit_b
+    pop     rdi
     mov     eax, edi
     call    emit_d
     pop     rax
-    ; mov [va_a], rbx
+    ; mov [va_a], rbx -- emit manually
     push    rax
-    mov     rdi, [rsp + 16]         ; va_a
+    mov     rdi, [rsp + 24]        ; va_a (after 4 pushes + 1 push rax)
     mov     al, 0x48
     call    emit_b
     mov     al, 0x89
@@ -2112,10 +3800,8 @@ codegen_emit_swap_vars:  ; rdi=va_a, rsi=va_b
     call    emit_d
     pop     rax
     ; mov [va_b], rax
-    push    rax
-    mov     rdi, [rsp + 8]          ; va_b
+    mov     rdi, [rsp + 8]         ; va_b
     call    codegen_emit_store_rax_to_var
-    pop     rax
     pop     rdx
     pop     rsi
     pop     rdi
@@ -2166,28 +3852,26 @@ codegen_emit_clock_ms:
     push    rsi
     push    rcx
     lea     rsi, [rel .clock_bytes]
-    mov     edx, 46
+    mov     edx, 55
     call    emit_blob_v2
     pop     rcx
     pop     rsi
     ret
 .clock_bytes:
-    db 0x48, 0x83, 0xec, 0x10           ; sub rsp, 16
-    db 0xb8, 0xe4, 0x00, 0x00, 0x00     ; mov eax, 228 (SYS_clock_gettime)
-    db 0xbf, 0x01, 0x00, 0x00, 0x00     ; mov edi, 1 (CLOCK_MONOTONIC)
-    db 0x48, 0x89, 0xe6                 ; mov rsi, rsp
-    db 0x0f, 0x05                       ; syscall
-    db 0x4c, 0x8b, 0x04, 0x24           ; mov r8, [rsp]     (tv_sec)
-    db 0x4c, 0x8b, 0x4c, 0x24, 0x08     ; mov r9, [rsp+8]   (tv_nsec)
-    db 0x48, 0x83, 0xc4, 0x10           ; add rsp, 16
-    db 0x49, 0x69, 0xc0, 0xe8, 0x03, 0x00, 0x00  ; imul r8, r8, 1000
-    db 0x49, 0x89, 0xc8                 ; mov r8, r9 (temp)
-    db 0x31, 0xd2                       ; xor edx, edx
-    db 0xb9, 0x40, 0x42, 0x0f, 0x00     ; mov ecx, 1000000
-    db 0x48, 0xf7, 0xf1                 ; div rcx
-    ; Hmm this is getting complex. Let me simplify clock_ms.
-    ; Just do: sub rsp,16; clock_gettime(1,rsp); mov r8,[rsp]; mov r9,[rsp+8]; add rsp,16
-    ; result = sec*1000 + nsec/1000000
+    db 0x48, 0x83, 0xec, 0x10                           ; sub rsp, 16
+    db 0xb8, 0xe4, 0x00, 0x00, 0x00                     ; mov eax, 228 (SYS_clock_gettime)
+    db 0xbf, 0x01, 0x00, 0x00, 0x00                     ; mov edi, 1 (CLOCK_MONOTONIC)
+    db 0x48, 0x89, 0xe6                                 ; mov rsi, rsp
+    db 0x0f, 0x05                                       ; syscall
+    db 0x4c, 0x8b, 0x04, 0x24                           ; mov r8, [rsp]     (tv_sec)
+    db 0x4c, 0x8b, 0x4c, 0x24, 0x08                     ; mov r9, [rsp+8]   (tv_nsec)
+    db 0x48, 0x83, 0xc4, 0x10                           ; add rsp, 16
+    db 0x49, 0x69, 0xc0, 0xe8, 0x03, 0x00, 0x00        ; imul r8, r8, 1000
+    db 0x4c, 0x89, 0xc8                                 ; mov rax, r9 (nsec)
+    db 0x31, 0xd2                                       ; xor edx, edx
+    db 0xb9, 0x40, 0x42, 0x0f, 0x00                     ; mov ecx, 1000000
+    db 0x48, 0xf7, 0xf1                                 ; div rcx (rax = nsec/1000000)
+    db 0x4c, 0x01, 0xc0                                 ; add rax, r8 (sec*1000 + nsec/1000000)
 
 ; ============================================================
 ; Dict operations (simplified using rt_prq blob entry points)
@@ -2280,7 +3964,7 @@ codegen_emit_sign_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .sign_bytes]
-    mov     edx, 14
+    mov     edx, 15
     call    emit_blob_v2
     pop     rcx
     pop     rsi
@@ -2528,7 +4212,7 @@ codegen_emit_seq_in:
     db 0x58                       ; pop rax             (search value)
     ; .search: (offset 7)
     db 0x48, 0x85, 0xC9          ; test rcx, rcx
-    db 0x74, 18                  ; jz .notfound: next=12, target=30, rel8=18
+    db 0x74, 24                  ; jz .notfound: next=12, target=36, rel8=24
     db 0x48, 0x3B, 0x44, 0xD3, 0x10  ; cmp rax, [rbx+rdx*8+16]
     db 0x74, 0x08                ; je .found: next=19, target=27, rel8=8
     db 0x48, 0xFF, 0xC2          ; inc rdx

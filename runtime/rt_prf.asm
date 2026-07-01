@@ -34,7 +34,8 @@ rt_prf_blob:
     pxor    xmm0, xmm1
 
 .positive:
-    movq    r11, xmm0           ; save positive float bits
+    push    rax                 ; save float bits on stack (syscall-safe)
+    movq    [rsp], xmm0        ; store float bits at top of stack (overwrite the push)
 
     ; --- print integer part ---
     cvttsd2si rax, xmm0         ; truncate toward zero → integer part
@@ -88,7 +89,8 @@ rt_prf_blob:
     ; --- compute fractional part × 1000000 ---
     pop     rax                 ; integer part
     cvtsi2sd xmm1, rax         ; xmm1 = float(int_part)
-    movq    xmm0, r11           ; restore positive float
+    movq    xmm0, [rsp]        ; restore positive float from stack
+    add     rsp, 8             ; clean up saved float bits
     subsd   xmm0, xmm1          ; xmm0 = frac part (0 ≤ frac < 1)
 
     ; multiply by 1000000.0

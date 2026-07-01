@@ -662,6 +662,16 @@ scan_ident:
     push    rbx
     push    r12
 
+    ; Zero tok_ident to prevent stale bytes from causing false prefix mismatches
+    mov     qword [tok_ident], 0
+    mov     qword [tok_ident + 8], 0
+    mov     qword [tok_ident + 16], 0
+    mov     qword [tok_ident + 24], 0
+    mov     qword [tok_ident + 32], 0
+    mov     qword [tok_ident + 40], 0
+    mov     qword [tok_ident + 48], 0
+    mov     qword [tok_ident + 56], 0
+
     mov     r12, [src_pos]
     mov     rbx, [src_buf]
     xor     ecx, ecx
@@ -728,32 +738,9 @@ scan_ident:
     je      .kwd_false
     cmp     eax, TOK_NEUTRAL
     je      .kwd_neutral
-    mov     [src_pos], r12          ; update position (use r12=src pointer? No!)
-    ; r12 was clobbered by kwd scan. Need original src_pos + len(ident) which is in rcx
-    ; Actually src_pos was already at end (rcx was scanning length)
-    ; Hmm, let me rethink...
-    ; Actually I need to use [src_pos] which scan_ident updated during the loop
-    ; Wait, I saved r12=[src_pos] at start of scan_ident, then incremented r12 during loop
-    ; At .ident_done, I then reset r12 to kwds pointer. So I need to save the ident end.
-    ; Let me fix: I'll use a different register for keyword scanning.
-    ; For now: src_pos is correct (it was [src_pos] at entry, then loop updated... no, loop updated r12 not [src_pos])
-    ; I need to fix this. The [src_pos] wasn't updated during the ident scan loop!
-
-    ; Let me recalculate: original r12 = [src_pos] at entry
-    ; After .ident_done: r12 has been overwritten with kwds pointer
-    ; But rcx holds the identifier length
-    ; So actual new src_pos = [src_pos]@entry + rcx (wrong if [src_pos] wasn't updated)
-    
-    ; Actually wait - I need to properly track this. Let me use a different approach.
-    ; I'll save the end position before overwriting r12.
-
-    ; This is a design flaw in my scan_ident. I need to save the end position.
-    ; Let me just reconstruct: at .ident_done, r12 should be the end position.
-    ; But then I overwrite r12 with &kwds. So I need another register.
-    
-    ; Fix: don't use r12 for kwds pointer. Use a saved offset.
-    ; Since fixing this requires a rewrite, let me just note this as a bug and move on.
-    ; For now: update [src_pos] by using the count in rcx:
+    ; [src_pos] still holds the original src_pos from scan_ident entry
+    ; (the ident loop only incremented r12, not [src_pos]).
+    ; rcx = identifier length. So new src_pos = original + rcx.
     push    rdx
     mov     rdx, [src_pos]
     add     rdx, rcx
@@ -946,8 +933,18 @@ scan_char_lit:
     jmp     .char_done
 .char_esc_check:
     cmp     al, 't'
-    jne     .char_done
+    jne     .char_esc_bs
     mov     al, 0x09
+    jmp     .char_done
+.char_esc_bs:
+    cmp     al, 0x5C            ; backslash
+    jne     .char_esc_quote
+    mov     al, 0x5C
+    jmp     .char_done
+.char_esc_quote:
+    cmp     al, 0x27            ; single quote
+    jne     .char_done
+    mov     al, 0x27
 .char_plain:
 .char_done:
     inc     r8

@@ -16,10 +16,10 @@ rt_prs_blob:
     ; find length with repne scasb
     mov     rdi, r12
     xor     eax, eax
-    mov     ecx, 0x7fffffff
+    mov     rcx, -1
     repne   scasb
-    not     ecx
-    dec     ecx                 ; ecx = strlen (without NUL)
+    not     rcx
+    dec     rcx                 ; rcx = strlen (without NUL)
 
     ; write string
     mov     rax, 1              ; SYS_write

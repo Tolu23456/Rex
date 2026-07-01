@@ -1,0 +1,2 @@
+for i in 0..1:
+    output i

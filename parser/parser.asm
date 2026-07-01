@@ -8,6 +8,7 @@ global parse_program
 
 extern lex_next, cur_tok, cur_tok_val, tok_ident
 extern var_add, var_find, get_var_va
+extern var_rbp_offsets, proto_local_offset
 extern proto_add, proto_find
 extern codegen_init
 extern emit_b, emit_d, emit_q, emit_blob, emit_blob_v2
@@ -15,6 +16,7 @@ extern codegen_emit_mov_rax_imm64, codegen_emit_mov_rax_imm32
 extern codegen_emit_mov_rax_var, codegen_emit_store_rax_to_var
 extern codegen_emit_push_rax, codegen_emit_pop_rbx
 extern codegen_emit_add_rax_rbx, codegen_emit_sub_rax_rbx
+extern codegen_emit_mov_rbx_rax
 extern codegen_emit_imul_rax_rbx, codegen_emit_idiv_rbx_by_rax
 extern codegen_emit_imod_rbx_by_rax, codegen_emit_neg_rax
 extern codegen_emit_bitwise_and, codegen_emit_bitwise_or
@@ -37,7 +39,9 @@ extern codegen_emit_break, codegen_emit_break_n, codegen_patch_breaks
 extern codegen_push_cont, codegen_pop_cont, codegen_emit_skip
 extern codegen_emit_exit0, codegen_emit_exit1
 extern codegen_emit_str_rax
-extern codegen_begin_protos, codegen_end_protos
+extern codegen_begin_protos, codegen_end_protos, codegen_init_proto_frame, codegen_cache_var_begin, codegen_cache_var_end
+extern emit_tail, emit_tail_len
+extern fused_cmp_var_addr, in_proto_frame
 extern codegen_emit_prot_start, codegen_emit_prot_end
 extern codegen_emit_call_prot
 extern codegen_emit_seq_alloc, codegen_emit_seq_push
@@ -90,14 +94,22 @@ tmp_name:           resb 64
 tmp_name2:          resb 64
 tmp_type:           resb 1
 tmp_type2:          resb 1
+tmp_argcount:       resq 1         ; temp arg count for fwd ref cleanup
 
 ; Protocol definition state
 protos_started:     resb 1      ; 1 = we've emitted begin_protos already
 in_proto:           resb 1      ; 1 = inside a protocol body
+fwd_exit_jmp:       resq 1      ; out_idx of jmp-to-exit placeholder (0 = none)
 cur_indent_depth:   resq 1      ; current block nesting level
 
 ; scope depth for protocols
 scope_depth:        resq 1
+
+; Constant folding state
+expr_const_val:     resq 1      ; compile-time constant value
+expr_is_const:      resb 1      ; 1 if expression is compile-time constant
+lhs_const_val:      resq 1      ; saved LHS const value during operator parsing
+lhs_is_const:       resb 1      ; saved LHS const flag during operator parsing
 
 section .data
 ; Error strings
@@ -140,11 +152,9 @@ parse_program:
     push    r12
     push    r13
 
-    ; Emit the protocol section jump placeholder, then immediately patch it
-    ; to a no-op (rel32=0) so execution falls through into main code.
-    ; Protocol bodies are emitted inline and reached via call rel32.
+    ; Emit the protocol section jump placeholder
     call    codegen_begin_protos
-    call    codegen_end_protos
+    mov     byte [protos_started], 1
 
     ; Skip leading newlines
 .skip_nl:
@@ -162,13 +172,70 @@ parse_program:
     cmp     dword [cur_tok], TOK_NEWLINE
     je      .skip_nl
 
+    ; If this is the first non-prot statement, patch the proto section jump
+    cmp     byte [protos_started], 0
+    je      .no_protos_patch
+    cmp     dword [cur_tok], TOK_PROT
+    je      .no_protos_patch
+    ; First non-prot statement: end protos section
+    call    codegen_end_protos
+    mov     byte [protos_started], 0
+.no_protos_patch:
+
+    ; If we see a prot AFTER protos_started was set to 0, it's a forward ref protocol.
+    ; We need to emit a jmp-to-exit before it so the main code doesn't fall through.
+    cmp     dword [cur_tok], TOK_PROT
+    jne     .no_fwd_exit
+    cmp     byte [protos_started], 1
+    je      .no_fwd_exit
+    ; Check if we already have a fwd exit jmp
+    cmp     qword [fwd_exit_jmp], 0
+    jne     .no_fwd_exit
+    ; Emit jmp placeholder (will be patched to exit code at EOF)
+    push    rax
+    mov     al, 0xe9            ; jmp rel32
+    call    emit_b
+    mov     rax, [out_idx]
+    mov     [fwd_exit_jmp], rax ; save patch offset
+    xor     eax, eax
+    call    emit_d              ; placeholder
+    pop     rax
+.no_fwd_exit:
+
     call    parse_stmt
 
     jmp     .main_loop
 
 .done:
+    ; Patch proto section jump if we never saw any non-prot code (unlikely)
+    cmp     byte [protos_started], 0
+    je      .no_final_patch
+    call    codegen_end_protos
+    mov     byte [protos_started], 0
+.no_final_patch:
+
+    ; Save out_idx before exit code (for fwd exit jmp patching)
+    push    rax
+    mov     rax, [out_idx]
+    mov     [tmp_argcount], rax     ; reuse tmp_argcount as exit_start
+    pop     rax
+
     ; Emit exit(0)
     call    codegen_emit_exit0
+
+    ; Patch fwd exit jmp to point to exit code (if any forward-ref protocols exist)
+    cmp     qword [fwd_exit_jmp], 0
+    je      .no_fwd_patch
+    push    rax
+    push    rcx
+    mov     rax, [tmp_argcount]     ; exit code starts here
+    mov     rcx, [fwd_exit_jmp]     ; patch site
+    sub     rax, rcx
+    sub     rax, 4                  ; rel32 = target - (patch + 4)
+    mov     [out_buffer + rcx], eax ; write rel32
+    pop     rcx
+    pop     rax
+.no_fwd_patch:
 
     ; Resolve forward references (protocols called before defined)
     call    resolve_fwd_refs
@@ -534,6 +601,15 @@ parse_decl:
     call    var_add
     mov     r13, rax                 ; r13 = var index
 
+    ; If inside protocol, assign rbp-relative offset for local
+    cmp     byte [in_proto], 0
+    je      .check_init
+    push    rax
+    mov     rax, [proto_local_offset]
+    mov     [var_rbp_offsets + r13*8], rax
+    sub     qword [proto_local_offset], 8
+    pop     rax
+
     jmp     .check_init
 
 .already_decl:
@@ -729,18 +805,7 @@ parse_output:
 
     advance                          ; consume 'output'
 
-    ; Handle output(expr) with parens
-    cmp     dword [cur_tok], TOK_LPAREN
-    jne     .output_no_paren
-    advance
-    call    parse_expr
-    cmp     dword [cur_tok], TOK_RPAREN
-    jne     .output_no_rp
-    advance
-.output_no_rp:
-    jmp     .emit_output
-
-.output_no_paren:
+    ; Parse the output expression
     call    parse_expr
 
 .emit_output:
@@ -801,16 +866,17 @@ parse_if:
     ; Parse if-body
     call    parse_block
 
-    ; Patch jz to here
-    mov     rdi, r12
-    call    codegen_patch_jump
-
     ; Emit jmp to chain end (to skip elif/else bodies)
+    ; Do this FIRST so the jz patch skips over it to the elif test
     call    codegen_emit_jmp_end     ; rax = jmp patch
     ; Push onto end_jump_stack
     mov     rbx, [end_jump_depth]
     mov     [end_jump_stack + rbx*8], rax
     inc     qword [end_jump_depth]
+
+    ; Patch jz to here (after jmp_end, at elif test or next statement)
+    mov     rdi, r12
+    call    codegen_patch_jump
 
 .check_elif:
     ; Check for elif
@@ -846,15 +912,15 @@ parse_if:
 .elif_ni:
     call    parse_block
 
-    ; patch jz
-    mov     rdi, r12
-    call    codegen_patch_jump
-
-    ; jmp to chain end
+    ; jmp to chain end (emit FIRST)
     call    codegen_emit_jmp_end
     mov     rbx, [end_jump_depth]
     mov     [end_jump_stack + rbx*8], rax
     inc     qword [end_jump_depth]
+
+    ; patch jz to here (after jmp_end)
+    mov     rdi, r12
+    call    codegen_patch_jump
 
     jmp     .check_elif
 
@@ -892,6 +958,7 @@ parse_while:
     push    rbx
     push    r12
     push    r13
+    push    r14
 
     advance                          ; consume 'while'
 
@@ -899,24 +966,11 @@ parse_while:
     call    codegen_get_out_idx
     mov     r12, rax                 ; loop start
 
-    call    codegen_push_cont        ; push loop_start as continue target
-    ; Wait - codegen_push_cont takes rdi = address
-    ; I called it wrong here. Let me fix:
-    ; Actually the cont target for while is the condition start
-    ; Let me redo: save out_idx in r12 AFTER this:
-    ; The cont target = condition start (before parsing expr)
-    ; That's already saved in r12 above. Need to call codegen_push_cont(r12).
-    ; But I already called it... let me call it properly.
-    ; Actually I called codegen_get_out_idx first (got r12), then need push_cont(r12).
-    ; But I called push_cont() with no arg... hmm.
-    ; Let me just inline it:
-    ; Actually wait, I wrote `call codegen_push_cont` without setting rdi. Let me fix this.
+    ; Push continue target (loop start = condition re-evaluation point)
+    mov     rdi, r12
+    call    codegen_push_cont
 
     ; Push break base
-    mov     rdi, [break_jump_depth]
-    mov     rsi, rdi
-    mov     [break_base_stack + rsi*8], rdi   ; Hmm this is wrong
-    ; Just push current break_jump_depth as the base
     mov     rbx, [break_base_depth]
     mov     rsi, [break_jump_depth]
     mov     [break_base_stack + rbx*8], rsi
@@ -924,7 +978,7 @@ parse_while:
 
     inc     qword [loop_depth]
 
-    ; Parse condition
+    ; Parse condition (comparison fused to cmp [mem], N; jge)
     call    parse_expr
 
     ; test rax, jz exit
@@ -945,21 +999,24 @@ parse_while:
     advance
 .while_ni:
 
+    ; REGISTER CACHING: disabled — overhead exceeds benefit for simple loops
+    mov     r14, -1
+
     ; Parse body
     call    parse_block
+
+    ; Uncache variable after body
+    cmp     r14, -1
+    je      .no_uncache
+    mov     rdi, r14
+    call    codegen_cache_var_end
+.no_uncache:
+    pop     r14
 
     ; Emit while end (back-jump + patch exit)
     mov     rdi, r12
     mov     rsi, r13
     call    codegen_emit_while_end
-    ; (while_end also calls patch_breaks and pop_cont, but I set up manually)
-    ; Actually while_end calls those internally... but I pushed cont manually.
-    ; Let me just call while_end and it handles everything.
-    ; But I didn't use codegen_push_cont... let me restructure.
-
-    ; Undo manual setup and rely on while_end:
-    dec     qword [break_base_depth]
-    dec     qword [loop_depth]
 
     pop     r13
     pop     r12
@@ -996,31 +1053,21 @@ parse_for:
     je      .for_each
 
     ; Range-based for: start..end
-    ; Save from value
-    call    parse_expr              ; parse start
-    ; Result is in rax - but we need the value/type
-    ; For simplicity: peek if expr was a literal (in cur_tok_val from before parse_expr)
-    ; Actually we just emitted code to compute the value into rax.
-    ; We need to save it somewhere for the for_start function.
-    ; For a simple literal, we can use the value directly.
-    ; But in general, we'd need to store to a temp var.
-    ; Simplified: assume start is always a literal or variable load
-    ; For now, just handle the common case.
+    ; Peek at start token to get literal value if possible
+    cmp     dword [cur_tok], TOK_INT_LIT
+    jne     .for_start_expr
+    ; Literal start: use cur_tok_val directly, advance past it
+    mov     r15, [cur_tok_val]      ; from = literal value
+    advance                          ; consume start literal
+    jmp     .for_start_done
 
-    ; Store start in temp var (or just 0 if it's a literal 0)
-    ; Actually for the codegen_emit_for_start, we pass literal values.
-    ; But if the start was a variable, we need special handling.
-    ; SIMPLIFICATION: just use 0 as start for now, or handle literal case.
+.for_start_expr:
+    ; Non-literal start: parse the expression (emits code)
+    call    parse_expr
+    ; For non-literal start, fall back to 0
+    mov     r15, 0
 
-    ; For the bootstrap, let's just generate code that:
-    ; 1. Evaluates start into temp storage
-    ; 2. Sets up the loop
-    ; This requires a temp variable. Let's use a special approach:
-    ; emit the comparison and increment inline.
-
-    ; Let me use a simpler approach: always compile as a range loop
-    ; with the 'from' already computed into some scratch variable.
-    ; For now: just support literal 0 as start and variable/literal end.
+.for_start_done:
 
     ; Expect '..'
     cmp     dword [cur_tok], TOK_DOTDOT
@@ -1029,9 +1076,6 @@ parse_for:
 
     ; Parse end expression
     ; For simplicity, check if it's a literal
-    mov     r15, 0                  ; from = 0 (simplified)
-
-    ; Actually let's just support the common case: literal or identifier range
     cmp     dword [cur_tok], TOK_INT_LIT
     jne     .for_end_var
 
@@ -1264,15 +1308,17 @@ parse_prot:
 
     lea     rdi, [tok_ident]
     movzx   rsi, al
-    call    var_add                  ; add param as local var (will be at top of var table)
+    call    var_add                  ; add param as local var
+
+    ; Save var index in rbx (callee-saved, preserved across advance)
+    mov     rbx, rax
+
     advance                          ; consume name
 
     ; Store param var index in proto table
-    push    rax
     mov     rax, r12
     imul    rax, PROTO_ENTRY_SIZE
     lea     rax, [proto_table + rax]
-    pop     rbx
     movzx   ecx, byte [rax + PROTO_PARAMCNT_OFF]
     cmp     rcx, 6
     jge     .prot_too_many_params
@@ -1321,15 +1367,14 @@ parse_prot:
     mov     rsi, r13
     call    codegen_emit_prot_start
 
-    ; Emit argument pops if params exist
-    test    r13, r13
-    jz      .prot_no_pop_args
-    ; Emit pops for args: arg1→rdi, arg2→rsi, etc.
-    call    emit_arg_pops
-.prot_no_pop_args:
-
+    ; Set cur_proto_idx BEFORE init so it reads correct params
     mov     byte [in_proto], 1
     mov     qword [cur_proto_idx], r12
+
+    ; Initialize protocol frame: compute rbp offsets for params
+    mov     rdi, r12
+    mov     rsi, r13
+    call    codegen_init_proto_frame
 
     ; Parse protocol body
     call    parse_block
@@ -1444,7 +1489,13 @@ parse_return:
     ; value is in rax (or xmm0 for float via bit-cast)
 
 .ret_void:
-    call    codegen_emit_prot_end   ; emit ret
+    ; Emit return: leave; ret (without ending the protocol frame)
+    push    rax
+    mov     al, 0xc9        ; leave
+    call    emit_b
+    mov     al, 0xc3        ; ret
+    call    emit_b
+    pop     rax
 
     cmp     dword [cur_tok], TOK_NEWLINE
     jne     .ret_done
@@ -1827,6 +1878,25 @@ parse_call_stmt:
     call    emit_d
     pop     rax
 
+    ; Emit stack cleanup: add rsp, r13*8 (args were pushed)
+    test    r13, r13
+    jz      .fwd_no_cleanup
+    push    rax
+    push    rdx
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xc4
+    call    emit_b
+    mov     rdx, r13
+    shl     edx, 3
+    mov     al, dl
+    call    emit_b
+    pop     rdx
+    pop     rax
+.fwd_no_cleanup:
+
     inc     qword [fwd_ref_count]
 
 .call_done:
@@ -2177,10 +2247,34 @@ parse_additive:
 
 .do_add:
     mov     r12, TYPE_INT
+    ; Save LHS const state on stack (recursive calls may clobber BSS vars)
+    push    qword [expr_const_val]
+    mov     al, [expr_is_const]
+    push    rax
     call    codegen_emit_push_rax
     advance
     call    parse_term
+    ; Check if both operands are compile-time constants
+    pop     rax
+    mov     [lhs_is_const], al
+    pop     qword [lhs_const_val]
+    cmp     byte [lhs_is_const], 0
+    je      .do_add_not_const
+    cmp     byte [expr_is_const], 0
+    je      .do_add_not_const
+    ; Both const: fold!
+    call    codegen_emit_pop_rbx     ; clean stack
+    mov     rax, [lhs_const_val]
+    add     rax, [expr_const_val]
+    mov     [expr_const_val], rax
+    mov     byte [expr_is_const], 1
+    mov     byte [cur_type], TYPE_INT
+    mov     rdi, rax
+    call    codegen_emit_mov_rax_imm64
+    jmp     .add_loop
+.do_add_not_const:
     call    codegen_emit_pop_rbx
+    mov     byte [expr_is_const], 0
     ; B-11: string concatenation
     cmp     byte [cur_type], TYPE_STR
     je      .str_cat
@@ -2203,10 +2297,35 @@ parse_additive:
     jmp     .add_loop
 
 .do_sub:
+    ; Save LHS const state on stack
+    push    qword [expr_const_val]
+    mov     al, [expr_is_const]
+    push    rax
     call    codegen_emit_push_rax
     advance
     call    parse_term
+    ; Restore LHS const state
+    pop     rax
+    mov     [lhs_is_const], al
+    pop     qword [lhs_const_val]
+    ; Check if both operands are compile-time constants
+    cmp     byte [lhs_is_const], 0
+    je      .do_sub_not_const
+    cmp     byte [expr_is_const], 0
+    je      .do_sub_not_const
+    ; Both const: fold!
     call    codegen_emit_pop_rbx
+    mov     rax, [lhs_const_val]
+    sub     rax, [expr_const_val]
+    mov     [expr_const_val], rax
+    mov     byte [expr_is_const], 1
+    mov     byte [cur_type], TYPE_INT
+    mov     rdi, rax
+    call    codegen_emit_mov_rax_imm64
+    jmp     .add_loop
+.do_sub_not_const:
+    call    codegen_emit_pop_rbx
+    mov     byte [expr_is_const], 0
     cmp     byte [cur_type], TYPE_FLOAT
     je      .fsub
     call    codegen_emit_sub_rax_rbx
@@ -2266,10 +2385,34 @@ parse_term:
     jmp     .term_done
 
 .do_mul:
+    ; Save LHS const state on stack
+    push    qword [expr_const_val]
+    mov     al, [expr_is_const]
+    push    rax
     call    codegen_emit_push_rax
     advance
     call    parse_factor
+    ; Restore LHS const state
+    pop     rax
+    mov     [lhs_is_const], al
+    pop     qword [lhs_const_val]
+    cmp     byte [lhs_is_const], 0
+    je      .do_mul_not_const
+    cmp     byte [expr_is_const], 0
+    je      .do_mul_not_const
+    ; Both const: fold!
     call    codegen_emit_pop_rbx
+    mov     rax, [lhs_const_val]
+    imul    rax, [expr_const_val]
+    mov     [expr_const_val], rax
+    mov     byte [expr_is_const], 1
+    mov     byte [cur_type], TYPE_INT
+    mov     rdi, rax
+    call    codegen_emit_mov_rax_imm64
+    jmp     .term_loop
+.do_mul_not_const:
+    call    codegen_emit_pop_rbx
+    mov     byte [expr_is_const], 0
     cmp     byte [cur_type], TYPE_FLOAT
     je      .fmul
     call    codegen_emit_imul_rax_rbx
@@ -2280,10 +2423,35 @@ parse_term:
     jmp     .term_loop
 
 .do_div:
+    ; Save LHS const state on stack
+    push    qword [expr_const_val]
+    mov     al, [expr_is_const]
+    push    rax
     call    codegen_emit_push_rax
     advance
     call    parse_factor
+    ; Restore LHS const state
+    pop     rax
+    mov     [lhs_is_const], al
+    pop     qword [lhs_const_val]
+    cmp     byte [lhs_is_const], 0
+    je      .do_div_not_const
+    cmp     byte [expr_is_const], 0
+    je      .do_div_not_const
+    ; Both const: fold!
     call    codegen_emit_pop_rbx
+    mov     rax, [lhs_const_val]
+    cqo
+    idiv    qword [expr_const_val]
+    mov     [expr_const_val], rax
+    mov     byte [expr_is_const], 1
+    mov     byte [cur_type], TYPE_INT
+    mov     rdi, rax
+    call    codegen_emit_mov_rax_imm64
+    jmp     .term_loop
+.do_div_not_const:
+    call    codegen_emit_pop_rbx
+    mov     byte [expr_is_const], 0
     cmp     byte [cur_type], TYPE_FLOAT
     je      .fdiv
     call    codegen_emit_idiv_rbx_by_rax
@@ -2294,10 +2462,32 @@ parse_term:
     jmp     .term_loop
 
 .do_mod:
+    ; Save LHS const state
+    mov     al, [expr_is_const]
+    mov     [lhs_is_const], al
+    mov     rax, [expr_const_val]
+    mov     [lhs_const_val], rax
     call    codegen_emit_push_rax
     advance
     call    parse_factor
+    cmp     byte [lhs_is_const], 0
+    je      .do_mod_not_const
+    cmp     byte [expr_is_const], 0
+    je      .do_mod_not_const
+    ; Both const: fold!
     call    codegen_emit_pop_rbx
+    mov     rax, [lhs_const_val]
+    cqo
+    idiv    qword [expr_const_val]
+    mov     [expr_const_val], rdx    ; remainder
+    mov     byte [expr_is_const], 1
+    mov     byte [cur_type], TYPE_INT
+    mov     rdi, rdx
+    call    codegen_emit_mov_rax_imm64
+    jmp     .term_loop
+.do_mod_not_const:
+    call    codegen_emit_pop_rbx
+    mov     byte [expr_is_const], 0
     call    codegen_emit_imod_rbx_by_rax
     jmp     .term_loop
 
@@ -2333,6 +2523,10 @@ parse_factor:
     mov     rdi, [cur_tok_val]
     call    codegen_emit_mov_rax_imm64
     mov     byte [cur_type], TYPE_INT
+    ; constant folding: track value
+    mov     rax, [cur_tok_val]
+    mov     [expr_const_val], rax
+    mov     byte [expr_is_const], 1
     advance
     pop     rbx
     ret
@@ -2371,6 +2565,7 @@ parse_factor:
     ; Identifier (variable load)
     cmp     eax, TOK_IDENT
     jne     .pf_not_ident
+    mov     byte [expr_is_const], 0      ; variables are not compile-time constants
     lea     rdi, [tok_ident]
     call    var_find
     cmp     rax, -1
@@ -2419,6 +2614,9 @@ parse_factor:
     ret
 
 .pf_not_ident:
+    ; Mark non-constant for all other factor types
+    mov     byte [expr_is_const], 0
+
     ; Parenthesized expression
     cmp     eax, TOK_LPAREN
     jne     .pf_not_paren
@@ -2444,11 +2642,11 @@ parse_factor:
     pop     rbx
     ret
 .pf_fneg:
-    ; negate float: flip sign bit
+    ; negate float: xmm0 = -xmm0
     push    rsi
     push    rcx
     lea     rsi, [rel .fneg_bytes]
-    mov     edx, 12
+    mov     edx, 18
     ; emit_blob_v2(rsi, rdx)
     extern emit_blob_v2
     call    emit_blob_v2
@@ -2508,6 +2706,7 @@ parse_factor:
     advance
     jmp     .pf_at_args
 .pf_at_args_done:
+    mov     [tmp_argcount], rcx     ; save arg count BEFORE advance clobbers rcx
     cmp     dword [cur_tok], TOK_RPAREN
     jne     .pf_at_call
     advance
@@ -2516,10 +2715,65 @@ parse_factor:
     lea     rdi, [tmp_name]
     call    proto_find
     cmp     rax, -1
-    je      .pf_at_done
+    je      .pf_at_fwd_ref2
     mov     rdi, rax
     call    codegen_emit_call_prot
-    ; result in rax
+    jmp     .pf_at_done
+
+.pf_at_fwd_ref2:
+    mov     rcx, [tmp_argcount]     ; restore arg count
+    ; Forward reference: add to fwd_ref table and emit placeholder call
+    mov     rax, [fwd_ref_count]
+    cmp     rax, FWD_REF_MAX
+    jge     .pf_at_fwd_done
+    ; Store name
+    push    rcx
+    mov     rbx, rax
+    imul    rbx, 32
+    lea     rbx, [fwd_ref_names + rbx]
+    lea     rsi, [tmp_name]
+    mov     rdi, rbx
+    xor     ecx, ecx
+.fwd_name_copy:
+    cmp     ecx, 31
+    jge     .fwd_nc_done
+    movzx   edx, byte [rsi + rcx]
+    mov     [rdi + rcx], dl
+    test    dl, dl
+    jz      .fwd_nc_done
+    inc     ecx
+    jmp     .fwd_name_copy
+.fwd_nc_done:
+    ; Emit placeholder call
+    mov     al, 0xe8
+    call    emit_b
+    mov     rax, [fwd_ref_count]
+    mov     rbx, [out_idx]
+    mov     [fwd_ref_patches + rax*8], rbx
+    xor     eax, eax
+    call    emit_d
+    inc     qword [fwd_ref_count]
+    pop     rcx                     ; restore arg count
+    ; Emit stack cleanup: add rsp, N*8
+    test    ecx, ecx
+    jz      .pf_at_fwd_done
+    push    rax
+    push    rdx
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xc4
+    call    emit_b
+    mov     edx, ecx
+    shl     edx, 3
+    mov     al, dl
+    call    emit_b
+    pop     rdx
+    pop     rax
+.pf_at_fwd_done:
+    ; Forward ref done — rax has placeholder result (will be overwritten by caller)
+
 .pf_at_done:
     pop     rbx
     ret
@@ -3008,9 +3262,9 @@ parse_factor:
     ret
 
 .fneg_bytes:
-    db 0x66, 0x48, 0x0f, 0x6e, 0xc0    ; movq xmm0, rax
-    db 0x0f, 0x57, 0x05, 0x08, 0x00, 0x00, 0x00  ; xorps xmm0, [rip+8]   — needs sign bit mask
-    ; This is incomplete — for now just negate via integer trick
+    db 0x66, 0x48, 0x0f, 0x6e, 0xc8    ; movq xmm1, xmm0 (save original)
+    db 0x66, 0x0f, 0xef, 0xc0          ; pxor xmm0, xmm0 (zero)
+    db 0xf2, 0x0f, 0x5c, 0xc1          ; subsd xmm0, xmm1 (0 - original)
     db 0x66, 0x48, 0x0f, 0x7e, 0xc0    ; movq rax, xmm0
 
 ; ============================================================
@@ -3098,9 +3352,13 @@ strcpy_64:
     inc     ecx
     jmp     .sc_loop
 .sc_done:
+    ; zero remaining bytes up to position 63
+.sc_zero:
     cmp     ecx, 63
     jge     .sc_nul
     mov     byte [rsi + rcx], 0
+    inc     ecx
+    jmp     .sc_zero
 .sc_nul:
     pop     rbx
     ret
