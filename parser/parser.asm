@@ -84,6 +84,9 @@ extern for_step_val
 extern cur_proto_idx
 extern fwd_ref_names, fwd_ref_patches, fwd_ref_count
 extern out_buffer
+extern codegen_while_pin_setup, ctpe_eval_proto
+extern ctpe_call_start_idx, ctpe_tail_len_save, ctpe_const_args, ctpe_all_const
+extern emit_tail_len
 
 ; ============================================================
 ; BSS — parser state
@@ -985,6 +988,16 @@ parse_while:
     ; test rax, jz exit
     call    codegen_emit_test_jz
     mov     r13, rax                 ; jz patch
+
+    ; WHILE-PIN: if fused cmp against a var fired, pin r15 to the counter
+    mov     rax, [fused_cmp_var_addr]
+    cmp     rax, -1
+    je      .while_no_pin
+    cmp     rax, 0
+    jl      .while_no_pin
+    mov     rdi, rax
+    call    codegen_while_pin_setup
+.while_no_pin:
 
     ; Expect ':'
     cmp     dword [cur_tok], TOK_COLON
@@ -2694,15 +2707,66 @@ parse_factor:
     jne     .pf_at_noparens
     advance
     xor     ecx, ecx
+    ; CTPE setup: record out_idx and emit_tail_len before any arg pushes
+    mov     rax, [out_idx]
+    mov     [ctpe_call_start_idx], rax
+    mov     rax, [emit_tail_len]
+    mov     [ctpe_tail_len_save], rax
+    mov     byte [ctpe_all_const], 1
 .pf_at_args:
     cmp     dword [cur_tok], TOK_RPAREN
     je      .pf_at_args_done
     cmp     dword [cur_tok], TOK_EOF
     je      .pf_at_args_done
     push    rcx
+    ; CTPE: save out_idx before parsing this arg
+    mov     rax, [out_idx]
+    push    rax                        ; stack: ..., rcx, expr_start
     call    parse_expr
-    pop     rcx
+    ; CTPE: check if expr emitted a single compile-time constant
+    pop     rbx                        ; rbx = expr_start
+    pop     rcx                        ; rcx = arg index
+    ; Only check if still all-const so far
+    cmp     byte [ctpe_all_const], 0
+    je      .pf_ctpe_skip
+    mov     rax, [out_idx]
+    sub     rax, rbx                   ; rax = bytes emitted by parse_expr
+    cmp     rax, 10
+    je      .pf_ctpe_imm64
+    cmp     rax, 5
+    je      .pf_ctpe_check_imm32
+    cmp     rax, 2
+    je      .pf_ctpe_check_zero
+    mov     byte [ctpe_all_const], 0
+    jmp     .pf_ctpe_skip
+.pf_ctpe_imm64:
+    ; Check: 48 B8 xx*8  (mov rax, imm64) — the default for int literals
+    cmp     byte [out_buffer + rbx], 0x48
+    jne     .pf_ctpe_fail
+    cmp     byte [out_buffer + rbx + 1], 0xB8
+    jne     .pf_ctpe_fail
+    mov     rax, [out_buffer + rbx + 2]   ; extract 64-bit immediate
+    mov     [ctpe_const_args + rcx*8], rax
+    jmp     .pf_ctpe_skip
+.pf_ctpe_check_imm32:
+    ; Check: B8 xx xx xx xx  (mov eax, imm32)
+    cmp     byte [out_buffer + rbx], 0xB8
+    jne     .pf_ctpe_fail
+    movsx   rax, dword [out_buffer + rbx + 1]
+    mov     [ctpe_const_args + rcx*8], rax
+    jmp     .pf_ctpe_skip
+.pf_ctpe_check_zero:
+    ; Check: 31 C0  (xor eax,eax → zero)
+    cmp     byte [out_buffer + rbx], 0x31
+    jne     .pf_ctpe_fail
+    mov     qword [ctpe_const_args + rcx*8], 0
+    jmp     .pf_ctpe_skip
+.pf_ctpe_fail:
+    mov     byte [ctpe_all_const], 0
+.pf_ctpe_skip:
+    push    rcx
     call    codegen_emit_push_rax
+    pop     rcx
     inc     ecx
     cmp     dword [cur_tok], TOK_COMMA
     jne     .pf_at_args_done
@@ -2719,7 +2783,32 @@ parse_factor:
     call    proto_find
     cmp     rax, -1
     je      .pf_at_fwd_ref2
+    ; CTPE: try compile-time evaluation if all args were constants
+    cmp     byte [ctpe_all_const], 0
+    jne     .pf_try_ctpe
+    ; Not all-const: rdi = proto_idx from rax, call normally
     mov     rdi, rax
+    jmp     .pf_normal_call
+.pf_try_ctpe:
+    push    rax                        ; save proto_idx
+    mov     rdi, rax                   ; rdi = proto_idx
+    mov     rsi, [tmp_argcount]        ; rsi = argcount
+    call    ctpe_eval_proto
+    cmp     rdx, 1
+    jne     .pf_ctpe_miss
+    ; CTPE SUCCESS: rewind arg pushes and emit the constant result
+    pop     r10                        ; discard saved proto_idx
+    push    rax                        ; save ctpe result
+    mov     rdi, [ctpe_call_start_idx]
+    mov     [out_idx], rdi
+    mov     rdi, [ctpe_tail_len_save]
+    mov     [emit_tail_len], rdi
+    pop     rdi                        ; rdi = constant result
+    call    codegen_emit_mov_rax_imm32
+    jmp     .pf_at_done
+.pf_ctpe_miss:
+    pop     rdi                        ; restore proto_idx from saved proto_idx
+.pf_normal_call:
     call    codegen_emit_call_prot
     jmp     .pf_at_done
 

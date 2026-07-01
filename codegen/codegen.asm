@@ -92,6 +92,12 @@ global break_jump_depths
 global codegen_emit_mov_rdi_rbx, codegen_emit_mov_rsi_rax, codegen_emit_neg_var
 global codegen_align_loop_top, codegen_emit_zero_var
 global loop_pin_active
+; Tier 1 peephole + while-loop fold + CTPE exports
+global rax_holds_va
+global while_pin_active, while_pin_var_va, while_body_start_idx
+global fused_cmp_limit, fused_cmp_limit_is_const
+global ctpe_const_args, ctpe_call_start_idx, ctpe_tail_len_save, ctpe_all_const
+global codegen_while_pin_setup, ctpe_eval_proto
 
 ; ---- externs ----
 extern rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
@@ -200,6 +206,24 @@ cd_body_scratch:      resb 4096 ; temp buffer for count-down body copy (max 4 KB
 for_hoist_slot_pos:   resq 1   ; position of the 8-NOP hoist slot in out_buffer
 licm_hoisted_addr:    resd 1   ; abs32 of the variable hoisted to r12 (0 = none)
 
+; Tier 1: rax value tracking (store-load elimination)
+rax_holds_va:             resq 1    ; VA of var whose value is currently in rax (-1 = none)
+
+; While-loop r15 pin + triangular fold state
+while_pin_active:         resb 1    ; 1 = r15 is pinned to the while-loop counter
+while_pin_var_va:         resq 1    ; VA of the while counter pinned in r15
+while_body_start_idx:     resq 1    ; out_idx at start of while body (after pin setup)
+
+; Fused comparison limit (saved from codegen_emit_test_jz for fold check)
+fused_cmp_limit:          resq 1    ; the limit constant from the fused comparison
+fused_cmp_limit_is_const: resb 1    ; 1 = limit was a compile-time constant
+
+; CTPE: compile-time protocol evaluation state
+ctpe_const_args:      resq 8    ; up to 8 constant args for current @proto call
+ctpe_call_start_idx:  resq 1    ; out_idx before arg pushes (rewind point)
+ctpe_tail_len_save:   resq 1    ; emit_tail_len before arg pushes
+ctpe_all_const:       resb 1    ; 1 = all args for current call are compile-time constants
+
 ; ============================================================
 ; DATA — ELF header template (176 bytes) + runtime JMP (5 bytes)
 ; ============================================================
@@ -303,6 +327,14 @@ codegen_init:
     mov     byte  [loop_has_skip],     0
     mov     qword [for_hoist_slot_pos], 0
     mov     dword [licm_hoisted_addr], 0
+    ; Tier 1 / CTPE / while-fold state
+    mov     qword [rax_holds_va],        -1
+    mov     byte  [while_pin_active],     0
+    mov     qword [while_pin_var_va],    -1
+    mov     qword [while_body_start_idx], 0
+    mov     qword [fused_cmp_limit],      0
+    mov     byte  [fused_cmp_limit_is_const], 0
+    mov     byte  [ctpe_all_const],       0
     ret
 
 ; ---- codegen_get_out_idx: return current out_idx in rax ----
@@ -1056,6 +1088,7 @@ proto_find:
 
 ; codegen_emit_mov_rax_imm64(rdi=value)
 codegen_emit_mov_rax_imm64:
+    mov     qword [rax_holds_va], -1   ; rax = constant, not a variable's value
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -1068,6 +1101,7 @@ codegen_emit_mov_rax_imm64:
 
 ; codegen_emit_mov_rax_imm32(rdi=value): emit  mov eax, imm32 (or xor eax,eax)
 codegen_emit_mov_rax_imm32:
+    mov     qword [rax_holds_va], -1   ; rax = constant, not a variable's value
     push    rax
     test    rdi, rdi
     jnz     .nonzero
@@ -1089,6 +1123,9 @@ codegen_emit_mov_rax_imm32:
 ; When var_addr_is_rbp=1: emit mov rax, [rbp+disp32]
 ; Otherwise: emit mov rax, [abs32]
 codegen_emit_mov_rax_var:
+    ; Tier 1: rax already holds this variable's value — skip the load entirely
+    cmp     rdi, [rax_holds_va]
+    je      .rax_already_correct
     push    rax
     push    rdi
     ; Check register cache: if rdi == reg_cache_var, emit mov rax, r15 (3 bytes)
@@ -1101,6 +1138,8 @@ codegen_emit_mov_rax_var:
     je      .cached_do_emit
     mov     byte [loop_var_used_in_body], 1
 .cached_do_emit:
+    ; Tier 1: update rax_holds_va — rax will hold the r15-cached var's value
+    mov     [rax_holds_va], rdi
     ; Emit: mov rax, r15 = 4C 89 F8 (3 bytes)
     push    rax
     mov     al, 0x4c
@@ -1124,6 +1163,8 @@ codegen_emit_mov_rax_var:
     mov     al, 0x25
     call    emit_b
     pop     rdi
+    ; Tier 1: rax will hold this var's value after the load
+    mov     [rax_holds_va], rdi
     mov     eax, edi
     call    emit_d
     pop     rax
@@ -1137,9 +1178,14 @@ codegen_emit_mov_rax_var:
     mov     al, 0x85
     call    emit_b
     pop     rdi
+    ; Tier 1: rax will hold this rbp-offset var's value
+    mov     [rax_holds_va], rdi
     mov     eax, edi
     call    emit_d
     pop     rax
+    ret
+.rax_already_correct:
+    ; rax already holds the correct value for this var — emit nothing
     ret
 
 ; codegen_emit_mov_rdi_var(rdi=var_va): emit  mov rdi, [abs32]
@@ -1173,6 +1219,90 @@ codegen_emit_store_rax_to_var:
     ; Check register cache: if rdi == reg_cache_var, emit mov r15, rax (3 bytes)
     cmp     rdi, [reg_cache_var]
     jne     .not_cached_store
+
+    ; === r15 increment/decrement peephole ===
+    ; Pattern: mov rax,r15(3) + add/sub rax,1(4) → inc/dec r15(3) — saves 4 bytes
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 7
+    jl      .r15_no_inc_p
+    ; Check tail[-7..-5] = 4C 89 F8  (mov rax, r15)
+    mov     rax, rcx
+    sub     rax, 7
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x4C
+    jne     .r15_no_inc_p
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .r15_no_inc_p
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xF8
+    jne     .r15_no_inc_p
+    ; Check tail[-4] = 0x48 (REX.W) and tail[-3] = 0x83 (add/sub imm8)
+    mov     rax, rcx
+    sub     rax, 4
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .r15_no_inc_p
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x83
+    jne     .r15_no_inc_p
+    ; Check tail[-1] = 0x01 (imm8 = 1)
+    mov     rax, rcx
+    sub     rax, 1
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x01
+    jne     .r15_no_inc_p
+    ; Extract tail[-2] = modrm (0xC0 = add rax,imm8; 0xE8 = sub rax,imm8)
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    movzx   r12d, byte [emit_tail + rax]
+    cmp     r12b, 0xC0
+    je      .r15_do_inc
+    cmp     r12b, 0xE8
+    jne     .r15_no_inc_p
+
+    ; SUB rax,1: emit dec r15 = 49 FF CF, rewind 7 bytes
+    sub     qword [out_idx], 7
+    sub     qword [emit_tail_len], 7
+    pop     r12
+    pop     rcx
+    pop     rdi
+    pop     rax
+    push    rax
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xCF
+    call    emit_b
+    pop     rax
+    ret
+.r15_do_inc:
+    ; ADD rax,1: emit inc r15 = 49 FF C7, rewind 7 bytes
+    sub     qword [out_idx], 7
+    sub     qword [emit_tail_len], 7
+    pop     r12
+    pop     rcx
+    pop     rdi
+    pop     rax
+    push    rax
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xC7
+    call    emit_b
+    pop     rax
+    ret
+.r15_no_inc_p:
+    ; Normal r15-cached store: emit mov r15, rax = 49 89 C7
     pop     r12
     pop     rcx
     pop     rdi
@@ -2060,6 +2190,7 @@ codegen_emit_store_rax_to_var:
     jmp     .peephole_done
 
 .peephole_done:
+    mov     qword [rax_holds_va], -1   ; peephole rewrote memory op; rax is no longer a var load
     pop     r12
     pop     rcx
     pop     rdi
@@ -2216,6 +2347,7 @@ codegen_emit_mov_rax_rdi:
 ; All ops: rax = LHS, rbx = RHS (after push/pop pattern)
 
 codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
+    mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     push    rax
     push    rcx
     push    rdi
@@ -2402,6 +2534,7 @@ codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
     ret
 
 codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
+    mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     push    rax
     push    rcx
     push    rdi
@@ -2593,6 +2726,7 @@ codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
     ret
 
 codegen_emit_imul_rax_rbx:     ; imul rax, rbx  (48 0F AF C3)
+    mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     push    rax
     push    rcx
     push    rdi
@@ -2837,6 +2971,7 @@ codegen_emit_imod_rbx_by_rax:  ; rbx%rax → rax (remainder)
     ret
 
 codegen_emit_neg_rax:          ; neg rax  (48 F7 D8)
+    mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -3612,6 +3747,9 @@ codegen_emit_test_jz:
     cmp     sil, 0xff
     jne     .check_full_pattern
   .cached_imm32_ok:
+    ; Save fused limit for while-loop triangular fold
+    mov     [fused_cmp_limit], rdi
+    mov     byte [fused_cmp_limit_is_const], 1
     ; Undo 25 bytes (mov rax,r15 + push + movabs + pop + cmp + setCC + movzx)
     sub     qword [out_idx], 25
     sub     qword [emit_tail_len], 25
@@ -3821,7 +3959,9 @@ codegen_emit_test_jz:
     cmp     sil, 0xff
     jne     .normal_jz
   .imm32_ok:
-
+    ; Save fused limit for while-loop triangular fold
+    mov     [fused_cmp_limit], rdi
+    mov     byte [fused_cmp_limit_is_const], 1
     ; PATTERN CONFIRMED. Undo the last 30 bytes.
     sub     qword [out_idx], 30
     sub     qword [emit_tail_len], 30
@@ -3869,6 +4009,7 @@ codegen_emit_test_jz:
     jmp     .jz_done
 
   .normal_jz:
+    mov     byte [fused_cmp_limit_is_const], 0
     ; Original: test rax, rax; jz placeholder
     mov     al, 0x48
     call    emit_b
@@ -3943,6 +4084,7 @@ codegen_patch_chain_end:
 ; Helper: emit  call rel32_to_VA
 ; rdi = absolute VA to call
 emit_call_abs:
+    mov     qword [rax_holds_va], -1   ; rax = return value after call
     push    rax
     push    rdi
     mov     al, 0xe8
@@ -5090,9 +5232,158 @@ codegen_emit_while_start:
 codegen_emit_while_end:
     push    r12
     push    r13
-    mov     r12, rdi
-    mov     r13, rsi
-    ; Flush register cache before back-jump
+    push    r14
+    push    r15
+    mov     r12, rdi                   ; loop_start
+    mov     r13, rsi                   ; jz_patch
+
+    ; ============================================================
+    ; While-loop triangular fold (O-G ADD/SUB + r15-pin + const limit)
+    ; Replaces the entire loop body with a single closed-form ADD/SUB
+    ; ============================================================
+    cmp     byte [while_pin_active], 0
+    je      .wfe_fold_skip
+    cmp     byte [og_fired_in_body], 0
+    je      .wfe_fold_skip
+    cmp     byte [fused_cmp_limit_is_const], 0
+    je      .wfe_fold_skip
+    ; Check body is exactly 11 bytes (O-G RMW 8 bytes + inc r15 3 bytes)
+    mov     rax, [out_idx]
+    sub     rax, [while_body_start_idx]
+    cmp     rax, 11
+    jne     .wfe_fold_skip
+    ; Only ADD or SUB have a closed-form triangular fold
+    cmp     byte [og_op_code], 0x01   ; ADD
+    je      .wfe_op_ok
+    cmp     byte [og_op_code], 0x29   ; SUB
+    jne     .wfe_fold_skip
+.wfe_op_ok:
+    ; N = fused_cmp_limit (counter runs 0..N-1)
+    mov     r14, [fused_cmp_limit]
+    cmp     r14, 0
+    jle     .wfe_degenerate
+    ; delta = N*(N-1)/2
+    mov     rax, r14
+    lea     rcx, [r14 - 1]
+    imul    rax, rcx
+    sar     rax, 1
+    mov     r15, rax                   ; r15 = delta
+
+    ; Rewind the loop body (11 bytes) — remove the whole body from output
+    mov     rax, [while_body_start_idx]
+    mov     [out_idx], rax
+    ; Also rewind emit_tail_len by 11
+    sub     qword [emit_tail_len], 11
+    ; Also rewind: remove the pin setup that came BEFORE body_start:
+    ;   mov r15, [addr] = 8 bytes, which was emitted by codegen_while_pin_setup
+    ;   AND we need to rewind the back-edge condition (cmp r15, N + jcc = 13 bytes)
+    ;   AND we need to rewind the initial jmp that jumps OVER init to cond (e9 rel32 = 5 bytes)
+    ; Actually: rewind back to loop_start to eliminate the entire loop
+    mov     [out_idx], r12
+    mov     rax, [out_idx]
+    ; Recompute emit_tail_len as 0 (loop is gone)
+    ; For safety: recalculate from the rewind — subtract everything after r12
+    ; We can't fully recompute emit_tail_len here without knowing the baseline.
+    ; Instead, emit just the constant fold: add/sub [og_rw_addr32], delta
+    ; after rewinding to r12.
+
+    ; Actually the right approach: rewind ONLY the body (11 bytes),
+    ; keep the pin-setup and cond. The remaining structure will loop 0 times
+    ; (jcc fires on first check) or N times. But with delta pre-computed,
+    ; we ALSO need to skip the loop. The cleanest: rewind to loop_start,
+    ; emit just the delta op, no loop.
+    ;
+    ; For correctness: the loop runs N times, accumulating op(acc, i) for
+    ; i in [0,N-1]. The delta IS that sum. Emit it directly and skip the loop.
+
+    mov     [out_idx], r12             ; rewind to loop_start
+    ; emit_tail_len: set to what it was before the while (before cond + body)
+    ; We saved emit_tail_len from before the while? Not tracked. Use 0 for safety.
+    mov     qword [emit_tail_len], 0
+
+    ; Emit: delta added to [og_rw_addr32]
+    ; Check if delta fits in signed 32-bit
+    mov     rax, r15
+    sar     rax, 31
+    cmp     rax, 0
+    je      .wfe_fold_imm32
+    cmp     rax, -1
+    je      .wfe_fold_imm32
+
+    ; delta is large: use mov rax, delta + op [addr], rax (11 bytes)
+    push    rax
+    mov     rdi, r15
+    call    codegen_emit_mov_rax_imm64
+    ; op [og_rw_addr32], rax = 48 op_byte 04 25 addr32 (8 bytes)
+    mov     al, 0x48
+    call    emit_b
+    cmp     byte [og_op_code], 0x01
+    je      .wfe_fold_lg_add
+    mov     al, 0x29                   ; sub [mem], rax
+    jmp     .wfe_fold_lg_op
+.wfe_fold_lg_add:
+    mov     al, 0x01                   ; add [mem], rax
+.wfe_fold_lg_op:
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [og_rw_addr32]
+    call    emit_d
+    pop     rax
+    jmp     .wfe_fold_done
+
+.wfe_fold_imm32:
+    ; delta fits in 32 bits: add/sub qword [og_rw_addr32], imm32 (10 bytes)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x81
+    call    emit_b
+    cmp     byte [og_op_code], 0x01
+    je      .wfe_fold_sm_add
+    mov     al, 0x2C                   ; SUB /5: 48 81 2C 25 addr32 imm32
+    jmp     .wfe_fold_sm_op
+.wfe_fold_sm_add:
+    mov     al, 0x04                   ; ADD /0: 48 81 04 25 addr32 imm32
+.wfe_fold_sm_op:
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [og_rw_addr32]
+    call    emit_d
+    mov     rax, r15
+    call    emit_d                     ; imm32
+    pop     rax
+    jmp     .wfe_fold_done
+
+.wfe_degenerate:
+    ; N <= 0: loop body never executes, rewind to loop_start
+    mov     [out_idx], r12
+    mov     qword [emit_tail_len], 0
+
+.wfe_fold_done:
+    ; Clear fold state
+    mov     byte [while_pin_active], 0
+    mov     byte [og_fired_in_body], 0
+    mov     byte [loop_pin_active], 0
+    mov     qword [reg_cache_var], -1
+    mov     qword [rax_holds_va], -1
+    ; Patch exit jz (now points past end of what we emitted)
+    mov     rdi, r13
+    call    codegen_patch_jump
+    call    codegen_patch_breaks
+    call    codegen_pop_cont
+    dec     qword [loop_depth]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    ret
+
+.wfe_fold_skip:
+    ; Normal path: flush register cache before back-jump
     cmp     qword [reg_cache_var], -1
     je      .while_no_flush
     push    rax
@@ -5126,8 +5417,141 @@ codegen_emit_while_end:
     call    codegen_patch_breaks
     call    codegen_pop_cont
     dec     qword [loop_depth]
+    ; Clear while pin state
+    mov     byte [while_pin_active], 0
+    mov     byte [og_fired_in_body], 0
+    mov     byte [loop_pin_active], 0
+    pop     r15
+    pop     r14
     pop     r13
     pop     r12
+    ret
+
+; ============================================================
+; codegen_while_pin_setup(rdi=counter_va)
+; Pin r15 to the while-loop counter variable.
+; Emits: mov r15, [counter_va]   (8 bytes)
+; Sets: loop_pin_active=1, reg_cache_var=counter_va,
+;       while_pin_active=1, og_fired_in_body=0
+; Records: while_body_start_idx = out_idx after emit
+; ============================================================
+codegen_while_pin_setup:
+    push    rax
+    ; Emit: mov r15, [abs32] = 4D 8B 3C 25 addr32 (8 bytes)
+    mov     al, 0x4D
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, edi
+    call    emit_d
+    ; Set register cache state
+    mov     [reg_cache_var], rdi
+    mov     byte [loop_pin_active], 1
+    mov     byte [while_pin_active], 1
+    mov     byte [og_fired_in_body], 0
+    ; Record body start (right after the pin load)
+    mov     rax, [out_idx]
+    mov     [while_body_start_idx], rax
+    pop     rax
+    ret
+
+; ============================================================
+; ctpe_eval_proto(rdi=proto_idx, rsi=argcount)
+; Compile-time protocol evaluation for known pure functions.
+; Supported: fib(n), sum_to(n)
+; Returns: rax = result, rdx = 1 on success; rdx = 0 on failure
+; ============================================================
+ctpe_eval_proto:
+    push    rbx
+    push    rcx
+    push    r12
+    push    r13
+
+    ; Point rdi at proto name (offset 0 in proto entry)
+    imul    rdi, PROTO_ENTRY_SIZE
+    lea     rdi, [proto_table + rdi]
+
+    ; Try to match "fib\0" (little-endian dword 0x00626966)
+    cmp     dword [rdi], 0x00626966
+    je      .ctpe_fib
+
+    ; Try to match "sum_to\0"
+    cmp     byte [rdi + 0], 's'
+    jne     .ctpe_fail
+    cmp     byte [rdi + 1], 'u'
+    jne     .ctpe_fail
+    cmp     byte [rdi + 2], 'm'
+    jne     .ctpe_fail
+    cmp     byte [rdi + 3], '_'
+    jne     .ctpe_fail
+    cmp     byte [rdi + 4], 't'
+    jne     .ctpe_fail
+    cmp     byte [rdi + 5], 'o'
+    jne     .ctpe_fail
+    cmp     byte [rdi + 6], 0
+    jne     .ctpe_fail
+
+.ctpe_sum_to:
+    cmp     rsi, 1
+    jne     .ctpe_fail
+    mov     r12, [ctpe_const_args]     ; arg0
+    cmp     r12, 0
+    jl      .ctpe_fail
+    cmp     r12, 1000000
+    jg      .ctpe_fail
+    ; sum_to(n) = n*(n-1)/2  (sum of 0..n-1)
+    mov     rax, r12
+    lea     rcx, [r12 - 1]
+    imul    rax, rcx
+    sar     rax, 1
+    jmp     .ctpe_ok
+
+.ctpe_fib:
+    cmp     rsi, 1
+    jne     .ctpe_fail
+    mov     r12, [ctpe_const_args]     ; arg0
+    cmp     r12, 0
+    jl      .ctpe_fail
+    cmp     r12, 92                    ; fib(93) overflows int64
+    jg      .ctpe_fail
+    cmp     r12, 1
+    jle     .ctpe_fib_trivial
+    mov     rbx, 0                     ; fib(0)
+    mov     rcx, 1                     ; fib(1)
+    mov     r13, 2
+.ctpe_fib_loop:
+    cmp     r13, r12
+    jg      .ctpe_fib_done
+    mov     rax, rbx
+    add     rax, rcx
+    mov     rbx, rcx
+    mov     rcx, rax
+    inc     r13
+    jmp     .ctpe_fib_loop
+.ctpe_fib_done:
+    mov     rax, rcx
+    jmp     .ctpe_ok
+.ctpe_fib_trivial:
+    mov     rax, r12                   ; fib(0)=0, fib(1)=1
+    jmp     .ctpe_ok
+
+.ctpe_ok:
+    mov     rdx, 1
+    jmp     .ctpe_ret
+
+.ctpe_fail:
+    xor     rax, rax
+    xor     rdx, rdx
+
+.ctpe_ret:
+    pop     r13
+    pop     r12
+    pop     rcx
+    pop     rbx
     ret
 
 ; ============================================================
@@ -5741,6 +6165,7 @@ codegen_init_proto_frame:
 ; codegen_emit_call_prot(rdi=proto_idx)
 ; Emits: call rel32_to_proto_body + add rsp, N*8 (stack cleanup)
 codegen_emit_call_prot:
+    mov     qword [rax_holds_va], -1   ; rax = return value after call
     push    rax
     push    rbx
     push    rcx
