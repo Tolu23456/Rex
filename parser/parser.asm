@@ -1036,6 +1036,12 @@ parse_for:
 
     advance                          ; consume 'for'
 
+    ; Skip optional ':' mutable sigil before loop variable name  (for :i in 0..N:)
+    cmp     dword [cur_tok], TOK_COLON
+    jne     .for_no_mut_sigil
+    advance                          ; consume ':'
+.for_no_mut_sigil:
+
     ; Get loop variable name
     cmp     dword [cur_tok], TOK_IDENT
     jne     .for_done

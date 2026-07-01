@@ -1197,6 +1197,149 @@ codegen_emit_store_rax_to_var:
 
 .check_mem_pattern:
     ; ================================================================
+    ; O-G r15-accum: 20-byte pinned-counter accumulator fold
+    ; Tail: mov rax,[addr](8) + mov r10,rax(3) + mov rax,r15(3)
+    ;       + mov rbx,r10(3) + add rax,rbx(3)
+    ; → add [addr], r15   (8 bytes)
+    ; Enables triangular sum fold when loop_pin_active=1.
+    ; Fires for patterns like: for i in 0..N: total = total + i
+    ; ================================================================
+    cmp     byte [loop_pin_active], 0
+    je      .og_check_11
+
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 20
+    jl      .og_check_11
+
+    ; Check tail[-20..-17] = 48 8B 04 25  (mov rax, [abs32])
+    mov     rax, rcx
+    sub     rax, 20
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 19
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x8B
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 18
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x04
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 17
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x25
+    jne     .og_check_11
+
+    ; Extract load addr32 from out_buffer[out_idx - 16]
+    mov     r12, [out_idx]
+    mov     r12d, dword [out_buffer + r12 - 16]
+    ; Must match store destination (rdi)
+    cmp     r12d, edi
+    jne     .og_check_11
+
+    ; Check tail[-12..-10] = 49 89 C2  (mov r10, rax)
+    mov     rax, rcx
+    sub     rax, 12
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x49
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 11
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 10
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xC2
+    jne     .og_check_11
+
+    ; Check tail[-9..-7] = 4C 89 F8  (mov rax, r15)
+    mov     rax, rcx
+    sub     rax, 9
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x4C
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 8
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 7
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xF8
+    jne     .og_check_11
+
+    ; Check tail[-6..-4] = 4C 89 D3  (mov rbx, r10)
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x4C
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x89
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 4
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xD3
+    jne     .og_check_11
+
+    ; Check tail[-3..-1] = 48 01 D8  (add rax, rbx)
+    mov     rax, rcx
+    sub     rax, 3
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 2
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x01
+    jne     .og_check_11
+
+    mov     rax, rcx
+    sub     rax, 1
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xD8
+    jne     .og_check_11
+
+    ; Matched: roll back 20 bytes, emit  add [addr32], r15
+    ; Encoding: 4C 01 3C 25 addr32  (8 bytes)
+    sub     qword [out_idx], 20
+    sub     qword [emit_tail_len], 20
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r12d
+    call    emit_d
+    ; Signal to for_end: O-G RMW fired, body = 8 bytes, enabling triangular sum fold
+    mov     byte [og_fired_in_body], 1
+    mov     dword [og_rw_addr32], r12d
+    jmp     .peephole_done
+
+.og_check_11:
+    ; ================================================================
     ; O-G: in-place accumulation fusion
     ; Eliminates the load-compute-store triple for result=result OP base
     ; ================================================================
