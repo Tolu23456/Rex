@@ -40,10 +40,11 @@ codegen/codegen.o: codegen/codegen.asm include/rex_defs.inc
 
 test: all
 	@passed=0; failed=0; \
-	for f in tests/*.rex; do \
+	for f in tests/*.rex tests/edge-cases/*.rex; do \
 		[ -f "$$f" ] || continue; \
 		name=$$(basename "$$f" .rex); \
-		exp="tests/$${name}.expected"; \
+		dir=$$(dirname "$$f"); \
+		exp="$${dir}/$${name}.expected"; \
 		[ -f "$$exp" ] || continue; \
 		if ./$(TARGET) "$$f" -o /tmp/rxt 2>/dev/null && \
 		   /tmp/rxt > /tmp/rxt_got 2>/dev/null; then \

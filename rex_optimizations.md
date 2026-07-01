@@ -507,3 +507,49 @@ All five instructions are single-µop.  Zero memory operations in the hot path.
 | After O-F (FLC) | ~1288 ms | rsp-relative frame, `sub rsp; add rsp` |
 | Gain | ~67 ms (~5%) | Stack engine makes `push rbp` near-free; savings mainly from code density |
 | vs C (`gcc -O2`) | ~377 ms | Rex ~3.4× slower; remaining gap is 4 spill/reload ops per call vs C's 0 |
+
+---
+
+## O-H: Constant-Multiply Loop Rolling
+
+**Pattern**: `for i in 0..N: x = x * A` → replace N iterations with `x *= A^N` (A^N computed at compile time via binary ladder).
+
+**Detection**: 15-byte tail peephole at `codegen_emit_store_rax_to_var` detects `mov rax,[x_addr](8) + imul rax,rax,imm32(7)` preceding the store to the same address. Sets `oh_mul_fired_in_body=1`, `oh_mul_addr32`, `oh_mul_const=A`.
+
+**At `for_end`**: Requires `loop_pin_active=1` (O-A), body length exactly 23 bytes, N>0. Binary ladder computes A^N in O(log N) multiplications during codegen. Output rewound to `for_body_start_idx`. Emits 23 bytes (imm32) or 26 bytes (movabs, if A^N > 2^31-1).
+
+**Gain**: Eliminates N-1 iterations, the back-jump, and the loop counter check entirely.
+
+```
+; for i in 0..4: x = x * 3   (A=3, N=4, A^N=81)
+; Loop preamble (dead code, harmless):
+xor r15d, r15d
+jmp .check
+.check: cmp r15, 4 ; jge exit   ← never taken
+; Rolled body (emitted once, executes once):
+mov rax, [x_addr]
+imul rax, rax, 81
+mov [x_addr], rax
+; Loop-var cleanup:
+mov qword [i_addr], 4
+exit:
+```
+
+---
+
+## Loop Rolling: Triangular Sum
+
+**Pattern**: `for i in 0..N: total += i` → replace N iterations with `total += N*(from+to-1)/2`.
+
+**Detection**: O-G ADD+r15 RMW fires at `.og_r15_ok`. If `loop_pin_active=1` and op=ADD, sets `og_fired_in_body=1` and `og_rw_addr32`. At `for_end`: body must be exactly 8 bytes (the 8-byte `4C 01 3C 25 addr32` RMW).
+
+**Formula**: `delta = N*(from+to-1)/2` where N=to-from. Correct for any from/to including negative from.
+
+**Gain**: Replaces N memory-touching loop iterations with a single `add [total], delta` (12 bytes) or `movabs+add` (18 bytes for very large delta).
+
+| Loop | N | Delta | Instruction |
+|------|---|-------|-------------|
+| `for i in 0..8: total += i` | 8 | 28 | `add [total], 28` |
+| `for i in 3..8: total += i` | 5 | 25 | `add [total], 25` |
+| `for i in 0..100: total += i` | 100 | 4950 | `add [total], 4950` |
+

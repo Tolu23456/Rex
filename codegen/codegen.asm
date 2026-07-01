@@ -175,6 +175,16 @@ frame_size_patch_pos: resq 1                    ; out_idx of imm32 in sub rsp, N
 leave_patch_list:   resq 16                     ; up to 16 epilogue patch positions
 leave_patch_cnt:    resq 1                      ; number of epilogue patches
 
+; Loop rolling / O-H state (saved at for_start, consumed at for_end)
+for_from_val:         resq 1    ; from_imm saved by codegen_emit_for_start
+for_to_val:           resq 1    ; to_imm saved by codegen_emit_for_start
+for_body_start_idx:   resq 1    ; out_idx at end of for_start preamble (= body start)
+og_fired_in_body:     resb 1    ; 1 when O-G ADD/r15 RMW fired in current loop body
+og_rw_addr32:         resd 1    ; 32-bit VA of O-G RMW target
+oh_mul_fired_in_body: resb 1    ; 1 when constant imul body detected in current loop
+oh_mul_addr32:        resd 1    ; 32-bit VA of constant-mul target
+oh_mul_const:         resq 1    ; multiplier constant A (64-bit, sign-extended)
+
 ; ============================================================
 ; DATA — ELF header template (176 bytes) + runtime JMP (5 bytes)
 ; ============================================================
@@ -265,6 +275,12 @@ codegen_init:
     mov     byte  [loop_pin_active],   0
     mov     qword [loop_pin_var_va],   -1
     mov     qword [leave_patch_cnt],   0
+    mov     qword [for_from_val],      0
+    mov     qword [for_to_val],        0
+    mov     qword [for_body_start_idx],0
+    mov     byte  [og_fired_in_body],  0
+    mov     byte  [oh_mul_fired_in_body], 0
+    mov     qword [oh_mul_const],      0
     ret
 
 ; ---- codegen_get_out_idx: return current out_idx in rax ----
@@ -1260,6 +1276,14 @@ codegen_emit_store_rax_to_var:
     jmp     .og_sub14_check
 
 .og_r15_ok:
+    ; Track ADD r15 RMW for loop rolling (triangular sum fold)
+    cmp     byte [loop_pin_active], 0
+    je      .og_r15_emit
+    cmp     r9b, 0x01               ; only ADD triggers triangular sum
+    jne     .og_r15_emit
+    mov     byte [og_fired_in_body], 1
+    mov     dword [og_rw_addr32], r12d
+.og_r15_emit:
     ; Roll back 11 bytes (load + 3-byte op), emit OP [abs32], r15
     ; Encoding: 4C [opcode] 3C 25 addr32
     ; REX=4C(W+R), ModRM=3C(mod=00 reg=7=r15%8 rm=4=SIB), SIB=25(idx=none base=disp32)
@@ -1830,6 +1854,61 @@ codegen_emit_store_rax_to_var:
     ret
 
 .abs_store_normal:
+    ; O-H: detect constant-imul body for loop rolling (flag-only, no output change)
+    ; Pattern (15 bytes before this store): mov rax,[addr](8) + imul rax,rax,imm32(7)
+    cmp     byte [loop_pin_active], 0
+    je      .oh_skip
+    mov     rcx, [emit_tail_len]
+    cmp     rcx, 15
+    jl      .oh_skip
+    mov     rax, rcx
+    sub     rax, 15
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .oh_skip
+    mov     rax, rcx
+    sub     rax, 14
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x8B
+    jne     .oh_skip
+    mov     rax, rcx
+    sub     rax, 13
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x04
+    jne     .oh_skip
+    mov     rax, rcx
+    sub     rax, 12
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x25
+    jne     .oh_skip
+    ; tail[-7...-5] = 48 69 C0  (REX + IMUL opcode + ModRM rax*rax)
+    mov     rax, rcx
+    sub     rax, 7
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x48
+    jne     .oh_skip
+    mov     rax, rcx
+    sub     rax, 6
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0x69
+    jne     .oh_skip
+    mov     rax, rcx
+    sub     rax, 5
+    and     rax, 31
+    cmp     byte [emit_tail + rax], 0xC0
+    jne     .oh_skip
+    ; addr32 of load must match this store's destination (edi)
+    mov     r8, [out_idx]
+    mov     r8d, dword [out_buffer + r8 - 11]
+    cmp     r8d, edi
+    jne     .oh_skip
+    ; extract multiplier A from out_buffer[out_idx-4] (imm32, sign-extended)
+    mov     r9, [out_idx]
+    movsx   r9, dword [out_buffer + r9 - 4]
+    mov     byte [oh_mul_fired_in_body], 1
+    mov     dword [oh_mul_addr32], r8d
+    mov     qword [oh_mul_const], r9
+.oh_skip:
     ; absolute mode: 48 89 04 25 addr32
     mov     al, 0x48
     call    emit_b
@@ -3772,6 +3851,13 @@ codegen_emit_for_start:
     mov     qword [loop_pin_var_va], r12
     mov     qword [reg_cache_var], r12
 
+    ; save loop bounds for rolling / O-H folding
+    mov     [for_from_val], r13         ; from_imm
+    mov     [for_to_val],   r14         ; to_imm
+    ; clear rolling flags (fresh body)
+    mov     byte [og_fired_in_body],  0
+    mov     byte [oh_mul_fired_in_body], 0
+
     ; emit: jmp .check  (skip increment on first iteration)
     push    rax
     mov     al, 0xe9
@@ -3843,6 +3929,10 @@ codegen_emit_for_start:
 
     inc     qword [loop_depth]
 
+    ; record body start position (out_idx right after jge placeholder = start of body)
+    mov     r8, [out_idx]
+    mov     [for_body_start_idx], r8
+
     ; return loop_start in rax, jge_patch in rbx
     mov     rax, r15
     mov     rbx, r13
@@ -3854,7 +3944,9 @@ codegen_emit_for_start:
     ret
 
 ; codegen_emit_for_end(rdi=loop_start, rsi=jge_patch, rdx=var_va)
-; Emits back-jump to increment point + patches exit
+; Emits back-jump to increment point + patches exit.
+; Loop rolling: if body is a single O-G ADD-r15 RMW (8 bytes) or a constant-imul
+; body (23 bytes), fold the entire loop into a single compile-time expression.
 codegen_emit_for_end:
     push    r12
     push    r13
@@ -3863,6 +3955,249 @@ codegen_emit_for_end:
     mov     r13, rsi                ; jge_patch offset
     mov     r14, rdx                ; var VA
 
+    ; ================================================================
+    ; Loop Rolling: fold loop into closed-form if conditions met
+    ; Requires: loop_pin_active=1 (static bounds via O-A)
+    ; ================================================================
+    cmp     byte [loop_pin_active], 0
+    je      .fe_normal_backjump
+
+    ; ---- Triangular sum: total += i  →  total += N*(from+to-1)/2 ----
+    ; Fires when: O-G ADD+r15 is the sole body (8 bytes)
+    cmp     byte [og_fired_in_body], 0
+    je      .fe_check_oh_mul
+
+    mov     rax, [out_idx]
+    sub     rax, [for_body_start_idx]
+    cmp     rax, 8
+    jne     .fe_check_oh_mul        ; body has more than just the 8-byte RMW
+
+    ; Compute delta = N*(from+to-1)/2  where N = to-from
+    mov     r10, [for_to_val]
+    mov     r11, [for_from_val]
+    sub     r10, r11                ; r10 = N
+    jle     .fe_normal_backjump     ; N <= 0: degenerate / zero-trip loop
+
+    mov     rax, r10                ; rax = N
+    mov     rcx, [for_from_val]
+    add     rcx, [for_to_val]
+    dec     rcx                     ; rcx = from+to-1
+    imul    rax, rcx               ; rax = N*(from+to-1)  (natural 64-bit mod)
+    sar     rax, 1                  ; delta = N*(from+to-1)/2
+    mov     r10, rax                ; r10 = delta
+
+    ; Rewind to body start (remove O-G RMW from output)
+    mov     rax, [for_body_start_idx]
+    mov     [out_idx], rax
+    sub     qword [emit_tail_len], 8
+
+    ; Emit: add qword [og_rw_addr32], delta
+    ; Check if delta fits in signed imm32
+    mov     rax, r10
+    sar     rax, 31
+    test    rax, rax
+    jz      .roll_tri_small
+    cmp     rax, -1
+    je      .roll_tri_small
+
+.roll_tri_large:
+    ; movabs rax, delta (48 B8 imm64, 10 bytes) + add [addr32], rax (48 01 04 25 addr32, 8 bytes)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xB8
+    call    emit_b
+    mov     rax, r10
+    call    emit_q
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x01
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [og_rw_addr32]
+    call    emit_d
+    pop     rax
+    jmp     .fe_rolling_done
+
+.roll_tri_small:
+    ; add qword [addr32], imm32  =  48 81 04 25 addr32 imm32  (12 bytes)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x81
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [og_rw_addr32]
+    call    emit_d
+    mov     rax, r10
+    call    emit_d              ; imm32 (lower 32 bits of delta)
+    pop     rax
+    jmp     .fe_rolling_done
+
+.fe_check_oh_mul:
+    ; ---- Constant multiply: x *= A (N iters)  →  x *= A^N (1 iter, A^N computed here) ----
+    ; Fires when: oh_mul_fired_in_body=1 and body is exactly 23 bytes
+    cmp     byte [oh_mul_fired_in_body], 0
+    je      .fe_normal_backjump
+
+    mov     rax, [out_idx]
+    sub     rax, [for_body_start_idx]
+    cmp     rax, 23
+    jne     .fe_normal_backjump
+
+    ; Compute A^N via binary ladder (entirely at compile time)
+    mov     r10, [for_to_val]
+    mov     r11, [for_from_val]
+    sub     r10, r11                ; r10 = N
+    jle     .fe_normal_backjump     ; N <= 0: degenerate
+
+    mov     r11, [oh_mul_const]    ; r11 = base A
+    mov     r9, 1                   ; r9  = result (A^0 = 1)
+
+.binary_ladder:
+    test    r10, 1
+    jz      .bl_skip
+    imul    r9, r11                ; result *= base
+.bl_skip:
+    imul    r11, r11               ; base *= base  (base^2, base^4, ...)
+    shr     r10, 1                  ; N >>= 1
+    jnz     .binary_ladder
+    ; r9 = A^N
+
+    ; Rewind to body start (remove 23-byte imul body from output)
+    mov     rax, [for_body_start_idx]
+    mov     [out_idx], rax
+    sub     qword [emit_tail_len], 23
+
+    ; Check if A^N fits in signed imm32
+    mov     rax, r9
+    sar     rax, 31
+    test    rax, rax
+    jz      .oh_mul_small
+    cmp     rax, -1
+    je      .oh_mul_small
+
+.oh_mul_large:
+    ; movabs rax, A^N (10 bytes) + imul rax,[x_addr] (8 bytes) + mov [x_addr],rax (8 bytes) = 26
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xB8
+    call    emit_b
+    mov     rax, r9
+    call    emit_q
+    ; imul rax, [x_addr]  =  48 0F AF 04 25 addr32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xAF
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [oh_mul_addr32]
+    call    emit_d
+    ; mov [x_addr], rax  =  48 89 04 25 addr32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [oh_mul_addr32]
+    call    emit_d
+    pop     rax
+    jmp     .fe_rolling_done
+
+.oh_mul_small:
+    ; mov rax,[x_addr](8) + imul rax,rax,A^N_imm32(7) + mov [x_addr],rax(8) = 23 bytes
+    push    rax
+    ; mov rax, [x_addr]  =  48 8B 04 25 addr32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [oh_mul_addr32]
+    call    emit_d
+    ; imul rax, rax, A^N_imm32  =  48 69 C0 imm32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x69
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    mov     rax, r9
+    call    emit_d
+    ; mov [x_addr], rax  =  48 89 04 25 addr32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [oh_mul_addr32]
+    call    emit_d
+    pop     rax
+    jmp     .fe_rolling_done
+
+.fe_rolling_done:
+    ; Set loop variable to its post-loop value (= to_imm)
+    ; Emits: mov qword [var_va], to  =  48 C7 04 25 var_va32 to_imm32  (10 bytes)
+    push    rax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xC7
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r14d               ; var VA (loop variable address)
+    call    emit_d
+    mov     rax, [for_to_val]
+    call    emit_d                  ; to_imm32 (final loop-var value)
+    pop     rax
+
+    ; Clear pin and rolling flags
+    mov     byte [loop_pin_active], 0
+    mov     qword [loop_pin_var_va], -1
+    mov     qword [reg_cache_var], -1
+    mov     byte [og_fired_in_body], 0
+    mov     byte [oh_mul_fired_in_body], 0
+
+    ; Patch jge exit, clean up break/cont stacks, decrement loop depth
+    mov     rdi, r13
+    call    codegen_patch_jump
+    call    codegen_patch_breaks    ; also decrements break_base_depth
+    call    codegen_pop_cont
+    dec     qword [loop_depth]
+
+    mov     qword [for_step_val], 1
+    pop     r14
+    pop     r13
+    pop     r12
+    ret
+
+    ; ================================================================
+    ; Normal (non-rolled) loop end: emit back-jump + flush r15
+    ; ================================================================
+.fe_normal_backjump:
     ; back-jump to increment point (not condition check)
     push    rax
     mov     al, 0xe9
@@ -3904,6 +4239,9 @@ codegen_emit_for_end:
     mov     qword [reg_cache_var], -1
 
 .for_end_no_flush:
+    ; clear rolling flags for next loop
+    mov     byte [og_fired_in_body], 0
+    mov     byte [oh_mul_fired_in_body], 0
     ; reset step
     mov     qword [for_step_val], 1
 

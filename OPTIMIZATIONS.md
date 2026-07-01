@@ -249,3 +249,57 @@ objdump -b binary -m i386:x86-64 -D --start-address=0x26de --stop-address=0x2720
 9. **The runtime preserves callee-saved registers** (r12-r15). The runtime function at 0xb5 (print int) only clobbers rax, rcx, rdx, rsi, rdi, r8-r10. This means r12-r15 are safe for register caching.
 
 10. **Don't stop at "good enough."** 8.4x slower than C is not good enough. The target is hardware-limit speed. Keep pushing.
+
+---
+
+## O-H: Constant-Multiply Loop Rolling (Binary Ladder)
+
+**Status**: ✅ Implemented
+
+**What it does**: When the entire loop body is `x = x * A` (A constant, detected by a 15-byte peephole `mov rax,[x]` + `imul rax,rax,imm32`), the compiler computes `A^N` at compile time using a binary ladder (repeated squaring) and replaces all N iterations with a single `x *= A^N`.
+
+**Example**:
+```
+for i in 0..4:
+    :x = x * 3
+```
+Emits: `imul rax, rax, 81` (3^4 = 81 computed at compile time). 0 loop iterations at runtime.
+
+**Conditions**:
+- `loop_pin_active = 1` (static bounds, O-A must have fired)
+- Entire body is exactly 23 bytes: `mov rax,[x]`(8) + `imul rax,rax,A_imm32`(7) + `mov [x],rax`(8)
+- A fits in signed imm32 (detected at store time via 15-byte tail peephole)
+- N = to - from > 0
+
+**Implementation**: BSS flags `oh_mul_fired_in_body`, `oh_mul_addr32`, `oh_mul_const` set at store time. At `for_end`, binary ladder computes A^N at codegen time; output is rewound to `for_body_start_idx` and the single multiply instruction is emitted. Loop var is set to its final value (to) via `mov qword [i_addr], to`.
+
+---
+
+## Loop Rolling: Triangular Sum Fold
+
+**Status**: ✅ Implemented
+
+**What it does**: When the entire loop body is `total += i` (where `i` is the pinned loop counter `r15`, detected by O-G ADD+r15 RMW = 8 bytes), the sum Σ(i, from, to-1) is computed at compile time as `N*(from+to-1)/2` and emitted as a single `add [total], delta` instruction.
+
+**Example**:
+```
+for i in 0..8:
+    :total = total + i
+```
+Emits: `add qword [total], 28` (N=8, delta=8*7/2=28). 0 loop iterations at runtime.
+
+**Formula**: `delta = N * (from + to - 1) / 2` where N = to - from. Works for any from/to (including negative from, non-zero from).
+
+**Conditions**:
+- `loop_pin_active = 1` (O-A fired)
+- `og_fired_in_body = 1` with op=ADD (0x01) — tracked at `.og_r15_ok` when `loop_pin_active=1`
+- Body is exactly 8 bytes (the O-G `4C 01 3C 25 addr32` instruction)
+- N > 0
+
+**Encoding**: If delta fits in signed imm32: `48 81 04 25 addr32 delta_imm32` (12 bytes). Otherwise: `movabs rax, delta` (10) + `add [addr32], rax` (8) = 18 bytes.
+
+Both O-H and Loop Rolling:
+- Clear `loop_pin_active`, `og_fired_in_body`, `oh_mul_fired_in_body` after folding
+- Emit `mov qword [loop_var], to` to set loop variable to correct post-loop value
+- Still call `codegen_patch_jump` and `codegen_patch_breaks` to handle `jge exit` and `stop` jumps
+- Skip the back-jump entirely (no `jmp .increment` emitted)
