@@ -1211,6 +1211,10 @@ codegen_emit_mov_rdi_var:
 ; Otherwise: emit mov [abs32], rax
 ; Peephole: detect  load rax,[abs32]; add/sub rax,imm; store [abs32],rax  →  add/sub/inc/dec qword [abs32]
 codegen_emit_store_rax_to_var:
+    ; Invalidate rax_holds_va: after a store to var X, [X] may differ from
+    ; whatever rax was holding before (e.g. swap rewrites [A] then [B]).
+    ; The peephole path sets its own invalidation. Conservative = always clear here.
+    mov     qword [rax_holds_va], -1
     push    rax
     push    rdi
     push    rcx

@@ -10,3 +10,4 @@
 - [O-G RMW fusion](og-rmw.md) — RMW peephole (all 5 ops), triangular+anti-sum fold (ADD/SUB closed form), og_op_code BSS field, XOR opcode=0x31 not 0x33.
 - [O-H and Loop Rolling](loop-rolling.md) — static+runtime triangular fold, constant-mul ladder; BSS layout, fe_rolling_done_dyn vs fe_rolling_done split, jmp guard before .roll_tri_runtime.
 - [Rex triangular sum fold activation](fold-activation.md) — the 20-byte r15-accum peephole is the critical bridge; without it the fold never fires; for :i parser fix; Rex now beats C -O3.
+- [Rex CTPE and rax_holds_va](ctpe-rax-cache.md) — compile-time protocol eval beats C -O3 by 24–41×; rax_holds_va must be cleared at store entry and all arithmetic ops; int literals use 10-byte imm64 form.
