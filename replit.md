@@ -6,7 +6,7 @@ A hand-written, self-contained x86-64 ELF compiler for the **Rex V0.1** language
 
 ```sh
 make          # build ./rexc
-make test     # build + run all tests (61 tests)
+make test     # build + run all tests (67 tests)
 make clean    # remove build artifacts
 ```
 
