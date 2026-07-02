@@ -5,6 +5,50 @@
 bits 64
 %include "rex_defs.inc"
 
+; ============================================================
+; O-I: CTPE generic IR opcode constants
+; O-J: Constant Propagation
+; O-K: Dead Store Elimination
+; ============================================================
+%define IR_IMOV64   0x01    ; irax = imm64   (op + 8 bytes)
+%define IR_IARG     0x02    ; irax = args[b] (op + 1 byte arg index)
+%define IR_ILOAD    0x03    ; irax = locals[w] (op + 2 byte var idx)
+%define IR_ISTORE   0x04    ; locals[w] = irax  (op + 2 byte var idx)
+%define IR_IPUSH    0x05    ; istack[top++] = irax
+%define IR_IPOPX    0x06    ; irbx = istack[--top]
+%define IR_IMRAX    0x07    ; irbx = irax
+%define IR_IADD     0x08    ; irax = irbx + irax
+%define IR_ISUB     0x09    ; irax = irbx - irax
+%define IR_IMUL     0x0A    ; irax = irbx * irax
+%define IR_IDIV     0x0B    ; irax = irbx / irax (signed)
+%define IR_IMOD     0x0C    ; irax = irbx % irax
+%define IR_INEG     0x0D    ; irax = -irax
+%define IR_IINC     0x0E    ; locals[w]++  (op + 2 byte var idx)
+%define IR_IDEC     0x0F    ; locals[w]--  (op + 2 byte var idx)
+%define IR_IJMP     0x10    ; ip += rel32  (op + 4 bytes)
+%define IR_IJZ      0x11    ; if irax==0: ip+=rel32  (op + 4 bytes)
+%define IR_IJNZ     0x12    ; if irax!=0: ip+=rel32  (op + 4 bytes)
+%define IR_ICMPEQ   0x13    ; irax = (irbx==irax)?1:0
+%define IR_ICMPNE   0x14    ; irax = (irbx!=irax)?1:0
+%define IR_ICMPLT   0x15    ; irax = (irbx<irax)?1:0
+%define IR_ICMPGT   0x16    ; irax = (irbx>irax)?1:0
+%define IR_ICMPLE   0x17    ; irax = (irbx<=irax)?1:0
+%define IR_ICMPGE   0x18    ; irax = (irbx>=irax)?1:0
+%define IR_IRET     0x19    ; return irax
+%define IR_IABORT   0x1A    ; cannot fold (impure op)
+%define IR_IAND     0x1B    ; irax = irbx & irax
+%define IR_IOR      0x1C    ; irax = irbx | irax
+%define IR_IXOR     0x1D    ; irax = irbx ^ irax
+%define IR_ISHL     0x1E    ; irax = irbx << (irax & 63)
+%define IR_ISHR     0x1F    ; irax = irbx >> (irax & 63) arithmetic
+%define IR_IBNOT    0x20    ; irax = ~irax
+%define IR_ICAL     0x21    ; call proto  (op + 8-byte proto_idx + 1-byte argcnt)
+
+%define CTPE_IR_BUF_SIZE    65536   ; 64 KB IR buffer
+%define CTPE_PATCH_MAX      64      ; max pending jump patches during recording
+%define CTPE_ISTACK_DEPTH   64      ; max evaluation stack depth
+%define CTPE_CALL_DEPTH_MAX 16      ; max recursive CTPE interpreter depth
+
 ; ---- exports ----
 global emit_b, emit_d, emit_q, emit_blob, emit_blob_v2
 global var_add, var_find, get_var_va
@@ -98,6 +142,12 @@ global while_pin_active, while_pin_var_va, while_body_start_idx
 global fused_cmp_limit, fused_cmp_limit_is_const
 global ctpe_const_args, ctpe_call_start_idx, ctpe_tail_len_save, ctpe_all_const
 global codegen_while_pin_setup, ctpe_eval_proto
+; O-I/O-J/O-K new exports
+global ctpe_recording, ctpe_ir_aborted, ctpe_ir_buf, ctpe_ir_out_idx
+global proto_ir_offsets, proto_ir_lens
+global cp_known, cp_vals, rax_is_const, rax_const_val
+global dse_pending, dse_store_pos
+global ctpe_interp, ctpe_ir_emit_b, dse_flush_all, cp_flush_all
 
 ; ---- externs ----
 extern rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
@@ -223,6 +273,42 @@ ctpe_const_args:      resq 8    ; up to 8 constant args for current @proto call
 ctpe_call_start_idx:  resq 1    ; out_idx before arg pushes (rewind point)
 ctpe_tail_len_save:   resq 1    ; emit_tail_len before arg pushes
 ctpe_all_const:       resb 1    ; 1 = all args for current call are compile-time constants
+
+; ============================================================
+; O-I: CTPE generic IR recording state
+; ============================================================
+ctpe_recording:           resb 1                   ; 1 = currently recording a proto's IR
+ctpe_ir_aborted:          resb 1                   ; 1 = proto contains impure op, cannot fold
+ctpe_ir_buf:              resb CTPE_IR_BUF_SIZE    ; flat IR bytecode buffer (64 KB)
+ctpe_ir_out_idx:          resq 1                   ; write cursor into ctpe_ir_buf
+proto_ir_offsets:         resq PROTO_MAX           ; ir_out_idx at start of each proto's IR
+proto_ir_lens:            resq PROTO_MAX           ; IR byte-length of each proto (0 = none)
+ctpe_cur_proto_idx_save:  resq 1                   ; proto_idx currently being recorded
+ctpe_skip_idiv_ir:        resb 1                   ; set by imod to suppress idiv's own IR emit
+ctpe_call_depth:          resb 1                   ; recursion depth of ctpe_interp
+
+; Jump patch mapping: x86 out_buffer offset → IR buffer offset
+ctpe_patch_x86:           resq CTPE_PATCH_MAX
+ctpe_patch_ir:            resq CTPE_PATCH_MAX
+ctpe_patch_cnt:           resq 1
+
+; BSS-based evaluation istack (used by ctpe_interp)
+ctpe_istack:              resq CTPE_ISTACK_DEPTH
+ctpe_istack_top:          resq 1
+
+; ============================================================
+; O-J: Constant Propagation
+; ============================================================
+cp_known:                 resb VAR_MAX             ; 1 = cp_vals[i] holds a known constant
+cp_vals:                  resq VAR_MAX             ; the compile-time constants
+rax_is_const:             resb 1                   ; 1 = rax currently holds rax_const_val
+rax_const_val:            resq 1                   ; value when rax_is_const=1
+
+; ============================================================
+; O-K: Dead Store Elimination
+; ============================================================
+dse_pending:              resb VAR_MAX             ; 1 = uncommitted store to var[i]
+dse_store_pos:            resq VAR_MAX             ; out_buffer offset of that store (8 bytes)
 
 ; ============================================================
 ; DATA — ELF header template (176 bytes) + runtime JMP (5 bytes)
@@ -6952,4 +7038,727 @@ codegen_write_code:
     mov     rsi, out_buffer
     mov     rdx, [out_idx]
     syscall
+    ret
+
+; ===========================================================================
+; O-I: CTPE Generic Interpreter + IR Recording Helpers
+; O-J: Constant Propagation helpers
+; O-K: Dead Store Elimination helpers
+; ===========================================================================
+
+; ============================================================
+; ctpe_ir_emit_b(rdi=byte): emit 1 byte to ctpe_ir_buf[ctpe_ir_out_idx]
+; Preserves ALL registers. Sets ctpe_ir_aborted on overflow.
+; ============================================================
+ctpe_ir_emit_b:
+    push    rax
+    push    rdi
+    mov     rax, [ctpe_ir_out_idx]
+    cmp     rax, CTPE_IR_BUF_SIZE - 16
+    jge     .cib_overflow
+    mov     [ctpe_ir_buf + rax], dil
+    inc     qword [ctpe_ir_out_idx]
+    pop     rdi
+    pop     rax
+    ret
+.cib_overflow:
+    mov     byte [ctpe_ir_aborted], 1
+    pop     rdi
+    pop     rax
+    ret
+
+; ============================================================
+; ctpe_ir_emit_w(rdi=word): emit 2 bytes (little-endian) to ctpe_ir_buf
+; ============================================================
+ctpe_ir_emit_w:
+    push    rax
+    push    rdi
+    mov     rax, [ctpe_ir_out_idx]
+    cmp     rax, CTPE_IR_BUF_SIZE - 16
+    jge     .ciw_overflow
+    mov     [ctpe_ir_buf + rax], di
+    add     qword [ctpe_ir_out_idx], 2
+    pop     rdi
+    pop     rax
+    ret
+.ciw_overflow:
+    mov     byte [ctpe_ir_aborted], 1
+    pop     rdi
+    pop     rax
+    ret
+
+; ============================================================
+; ctpe_ir_emit_q(rdi=qword): emit 8 bytes to ctpe_ir_buf
+; ============================================================
+ctpe_ir_emit_q:
+    push    rax
+    push    rdi
+    mov     rax, [ctpe_ir_out_idx]
+    cmp     rax, CTPE_IR_BUF_SIZE - 16
+    jge     .ciq_overflow
+    mov     [ctpe_ir_buf + rax], rdi
+    add     qword [ctpe_ir_out_idx], 8
+    pop     rdi
+    pop     rax
+    ret
+.ciq_overflow:
+    mov     byte [ctpe_ir_aborted], 1
+    pop     rdi
+    pop     rax
+    ret
+
+; ============================================================
+; ctpe_ir_emit_d(rdi=dword): emit 4 bytes to ctpe_ir_buf (jump placeholders)
+; ============================================================
+ctpe_ir_emit_d:
+    push    rax
+    push    rdi
+    mov     rax, [ctpe_ir_out_idx]
+    cmp     rax, CTPE_IR_BUF_SIZE - 16
+    jge     .cid_overflow
+    mov     [ctpe_ir_buf + rax], edi
+    add     qword [ctpe_ir_out_idx], 4
+    pop     rdi
+    pop     rax
+    ret
+.cid_overflow:
+    mov     byte [ctpe_ir_aborted], 1
+    pop     rdi
+    pop     rax
+    ret
+
+; ============================================================
+; ctpe_ir_find_var_idx_from_rbp(rdi=rbp_offset) -> rax = var_idx or -1
+; Reverse-lookup: find var_table index whose rbp offset matches rdi.
+; ============================================================
+ctpe_ir_find_var_idx_from_rbp:
+    push    rbx
+    push    rcx
+    xor     ecx, ecx
+.fvr_scan:
+    cmp     rcx, VAR_MAX
+    jge     .fvr_not_found
+    cmp     [var_rbp_offsets + rcx*8], rdi
+    je      .fvr_found
+    inc     rcx
+    jmp     .fvr_scan
+.fvr_found:
+    mov     rax, rcx
+    pop     rcx
+    pop     rbx
+    ret
+.fvr_not_found:
+    mov     rax, -1
+    pop     rcx
+    pop     rbx
+    ret
+
+; ============================================================
+; ctpe_ir_find_param_pos(rdi=var_idx) -> rax = param position (0..N-1) or -1
+; Checks if var_idx is a param of the currently-recording proto.
+; ============================================================
+ctpe_ir_find_param_pos:
+    push    rbx
+    push    rcx
+    push    rdx
+    mov     rax, [ctpe_cur_proto_idx_save]
+    imul    rax, PROTO_ENTRY_SIZE
+    lea     rax, [proto_table + rax]
+    movzx   ecx, byte [rax + PROTO_PARAMCNT_OFF]
+    lea     rax, [rax + PROTO_PARAMS_OFF]
+    xor     edx, edx
+.fpp_scan:
+    cmp     rdx, rcx
+    jge     .fpp_not_found
+    movzx   ebx, byte [rax + rdx]
+    cmp     rbx, rdi
+    je      .fpp_found
+    inc     rdx
+    jmp     .fpp_scan
+.fpp_found:
+    mov     rax, rdx
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    ret
+.fpp_not_found:
+    mov     rax, -1
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    ret
+
+; ============================================================
+; dse_flush_all: clear all dse_pending entries (all regs preserved)
+; ============================================================
+dse_flush_all:
+    push    rdi
+    push    rcx
+    push    rax
+    lea     rdi, [dse_pending]
+    xor     eax, eax
+    mov     ecx, VAR_MAX
+    rep     stosb
+    pop     rax
+    pop     rcx
+    pop     rdi
+    ret
+
+; ============================================================
+; cp_flush_all: clear all cp_known + rax_is_const (all regs preserved)
+; ============================================================
+cp_flush_all:
+    push    rdi
+    push    rcx
+    push    rax
+    lea     rdi, [cp_known]
+    xor     eax, eax
+    mov     ecx, VAR_MAX
+    rep     stosb
+    mov     byte [rax_is_const], 0
+    pop     rax
+    pop     rcx
+    pop     rdi
+    ret
+
+; ============================================================
+; codegen_emit_test_jnz: emit  test rax,rax; jnz placeholder
+; Used for while-loop back-edge condition check.
+; ============================================================
+codegen_emit_test_jnz:
+    push    rax
+    push    rbx
+    ; test rax, rax  =  48 85 C0
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    mov     al, 0xc0
+    call    emit_b
+    ; jnz rel32  =  0F 85 placeholder
+    mov     al, 0x0f
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    mov     rax, [out_idx]
+    xor     ebx, ebx
+    call    emit_d
+    ; === O-I IR hook: emit IR_IJNZ + record patch mapping ===
+    cmp     byte [ctpe_recording], 0
+    je      .jnz_no_ir
+    push    rdi
+    ; x86 patch pos = out_idx - 4 (placeholder just emitted)
+    mov     rdi, [out_idx]
+    sub     rdi, 4
+    ; Record in patch table
+    mov     rbx, [ctpe_patch_cnt]
+    cmp     rbx, CTPE_PATCH_MAX - 1
+    jge     .jnz_patch_full
+    mov     [ctpe_patch_x86 + rbx*8], rdi
+    mov     rdi, IR_IJNZ
+    call    ctpe_ir_emit_b
+    mov     rdi, [ctpe_ir_out_idx]
+    mov     [ctpe_patch_ir + rbx*8], rdi
+    inc     qword [ctpe_patch_cnt]
+    xor     edi, edi
+    call    ctpe_ir_emit_d
+.jnz_patch_full:
+    call    dse_flush_all
+    pop     rdi
+.jnz_no_ir:
+    pop     rbx
+    pop     rax
+    ret
+
+; ===========================================================================
+; ctpe_interp(rdi=proto_idx, rsi=argcount, rdx=args_ptr)
+; Generic compile-time protocol interpreter.
+; Returns: rax = result, rdx = 1 on success; rdx = 0 on failure.
+; ===========================================================================
+ctpe_interp:
+    ; Depth limit check
+    movzx   eax, byte [ctpe_call_depth]
+    cmp     al, CTPE_CALL_DEPTH_MAX
+    jge     .ci_fail_early
+
+    inc     byte [ctpe_call_depth]
+
+    ; Check proto has IR
+    cmp     qword [proto_ir_lens + rdi*8], 0
+    je      .ci_fail_dec
+
+    ; Save callee-saved + working registers
+    push    rbp
+    push    rbx
+    push    rcx
+    push    r8
+    push    r9
+    push    r10
+    push    r11
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    ; r15 = proto_idx, r14 = args_ptr, r13 = argcount
+    mov     r15, rdi
+    mov     r14, rdx
+    mov     r13, rsi
+
+    ; r12 = IR start pointer (into ctpe_ir_buf)
+    mov     r12, [proto_ir_offsets + r15*8]
+    lea     r12, [ctpe_ir_buf + r12]
+
+    ; r11 = IR end pointer
+    mov     r11, [proto_ir_lens + r15*8]
+    add     r11, r12
+
+    ; r9 = step budget
+    mov     r9, 2000000
+
+    ; Allocate locals on stack: VAR_MAX slots × 8 bytes = 2048 bytes
+    sub     rsp, 2048
+    mov     r8, rsp
+
+    ; Zero-init locals
+    push    rdi
+    push    rcx
+    push    rax
+    mov     rdi, r8
+    xor     eax, eax
+    mov     ecx, 256
+    rep     stosq
+    pop     rax
+    pop     rcx
+    pop     rdi
+
+    ; Pre-load parameters: locals[param_var_idx] = args[i]
+    mov     rax, r15
+    imul    rax, PROTO_ENTRY_SIZE
+    lea     rax, [proto_table + rax]
+    movzx   ecx, byte [rax + PROTO_PARAMCNT_OFF]
+    lea     rax, [rax + PROTO_PARAMS_OFF]
+    push    rdx
+    xor     edx, edx
+.ci_param_init:
+    cmp     rdx, rcx
+    jge     .ci_param_done
+    movzx   ebp, byte [rax + rdx]  ; var_idx for param[rdx]
+    push    rsi
+    mov     rsi, [r14 + rdx*8]     ; args[rdx]
+    mov     [r8 + rbp*8], rsi
+    pop     rsi
+    inc     rdx
+    jmp     .ci_param_init
+.ci_param_done:
+    pop     rdx
+
+    xor     ebx, ebx   ; irax = 0
+    xor     ecx, ecx   ; irbx = 0
+
+    ; ===== Interpreter main loop =====
+.ci_loop:
+    cmp     r12, r11
+    jge     .ci_fail_locals
+
+    dec     r9
+    jz      .ci_fail_locals
+
+    movzx   eax, byte [r12]
+    inc     r12
+
+    cmp     al, IR_IPUSH
+    je      .op_ipush
+    cmp     al, IR_IADD
+    je      .op_iadd
+    cmp     al, IR_IMOV64
+    je      .op_imov64
+    cmp     al, IR_IPOPX
+    je      .op_ipopx
+    cmp     al, IR_IRET
+    je      .op_iret
+    cmp     al, IR_IARG
+    je      .op_iarg
+    cmp     al, IR_ILOAD
+    je      .op_iload
+    cmp     al, IR_ISTORE
+    je      .op_istore
+    cmp     al, IR_ISUB
+    je      .op_isub
+    cmp     al, IR_IMUL
+    je      .op_imul
+    cmp     al, IR_IDIV
+    je      .op_idiv
+    cmp     al, IR_IMOD
+    je      .op_imod
+    cmp     al, IR_INEG
+    je      .op_ineg
+    cmp     al, IR_IINC
+    je      .op_iinc
+    cmp     al, IR_IDEC
+    je      .op_idec
+    cmp     al, IR_IJMP
+    je      .op_ijmp
+    cmp     al, IR_IJZ
+    je      .op_ijz
+    cmp     al, IR_IJNZ
+    je      .op_ijnz
+    cmp     al, IR_ICMPEQ
+    je      .op_icmpeq
+    cmp     al, IR_ICMPNE
+    je      .op_icmpne
+    cmp     al, IR_ICMPLT
+    je      .op_icmplt
+    cmp     al, IR_ICMPGT
+    je      .op_icmpgt
+    cmp     al, IR_ICMPLE
+    je      .op_icmple
+    cmp     al, IR_ICMPGE
+    je      .op_icmpge
+    cmp     al, IR_IMRAX
+    je      .op_imrax
+    cmp     al, IR_IAND
+    je      .op_iand
+    cmp     al, IR_IOR
+    je      .op_ior
+    cmp     al, IR_IXOR
+    je      .op_ixor
+    cmp     al, IR_ISHL
+    je      .op_ishl
+    cmp     al, IR_ISHR
+    je      .op_ishr
+    cmp     al, IR_IBNOT
+    je      .op_ibnot
+    cmp     al, IR_ICAL
+    je      .op_ical
+    jmp     .ci_fail_locals   ; unknown / IR_IABORT
+
+.op_imov64:
+    mov     rbx, [r12]
+    add     r12, 8
+    jmp     .ci_loop
+
+.op_iarg:
+    movzx   eax, byte [r12]
+    inc     r12
+    cmp     rax, r13
+    jge     .ci_fail_locals
+    mov     rbx, [r14 + rax*8]
+    jmp     .ci_loop
+
+.op_iload:
+    movzx   eax, word [r12]
+    add     r12, 2
+    cmp     rax, VAR_MAX
+    jge     .ci_fail_locals
+    mov     rbx, [r8 + rax*8]
+    jmp     .ci_loop
+
+.op_istore:
+    movzx   eax, word [r12]
+    add     r12, 2
+    cmp     rax, VAR_MAX
+    jge     .ci_fail_locals
+    mov     [r8 + rax*8], rbx
+    jmp     .ci_loop
+
+.op_ipush:
+    mov     rax, [ctpe_istack_top]
+    cmp     rax, CTPE_ISTACK_DEPTH - 1
+    jge     .ci_fail_locals
+    mov     [ctpe_istack + rax*8], rbx
+    inc     qword [ctpe_istack_top]
+    jmp     .ci_loop
+
+.op_ipopx:
+    mov     rax, [ctpe_istack_top]
+    dec     rax
+    js      .ci_fail_locals
+    mov     rcx, [ctpe_istack + rax*8]
+    mov     [ctpe_istack_top], rax
+    jmp     .ci_loop
+
+.op_imrax:
+    mov     rcx, rbx
+    jmp     .ci_loop
+
+.op_iadd:
+    add     rbx, rcx
+    jmp     .ci_loop
+
+.op_isub:
+    ; irax = irbx - irax  (rcx=irbx, rbx=irax)
+    sub     rcx, rbx
+    mov     rbx, rcx
+    jmp     .ci_loop
+
+.op_imul:
+    imul    rbx, rcx
+    jmp     .ci_loop
+
+.op_idiv:
+    test    rbx, rbx
+    jz      .ci_fail_locals
+    mov     rax, rcx
+    cqo
+    idiv    rbx
+    mov     rbx, rax
+    jmp     .ci_loop
+
+.op_imod:
+    test    rbx, rbx
+    jz      .ci_fail_locals
+    mov     rax, rcx
+    cqo
+    idiv    rbx
+    mov     rbx, rdx
+    jmp     .ci_loop
+
+.op_ineg:
+    neg     rbx
+    jmp     .ci_loop
+
+.op_iinc:
+    movzx   eax, word [r12]
+    add     r12, 2
+    cmp     rax, VAR_MAX
+    jge     .ci_fail_locals
+    inc     qword [r8 + rax*8]
+    jmp     .ci_loop
+
+.op_idec:
+    movzx   eax, word [r12]
+    add     r12, 2
+    cmp     rax, VAR_MAX
+    jge     .ci_fail_locals
+    dec     qword [r8 + rax*8]
+    jmp     .ci_loop
+
+.op_ijmp:
+    movsx   rax, dword [r12]
+    add     r12, 4
+    add     r12, rax
+    jmp     .ci_loop
+
+.op_ijz:
+    movsx   rax, dword [r12]
+    add     r12, 4
+    test    rbx, rbx
+    jnz     .ci_loop
+    add     r12, rax
+    jmp     .ci_loop
+
+.op_ijnz:
+    movsx   rax, dword [r12]
+    add     r12, 4
+    test    rbx, rbx
+    jz      .ci_loop
+    add     r12, rax
+    jmp     .ci_loop
+
+.op_icmpeq:
+    cmp     rcx, rbx
+    sete    bl
+    movzx   rbx, bl
+    jmp     .ci_loop
+
+.op_icmpne:
+    cmp     rcx, rbx
+    setne   bl
+    movzx   rbx, bl
+    jmp     .ci_loop
+
+.op_icmplt:
+    cmp     rcx, rbx
+    setl    bl
+    movzx   rbx, bl
+    jmp     .ci_loop
+
+.op_icmpgt:
+    cmp     rcx, rbx
+    setg    bl
+    movzx   rbx, bl
+    jmp     .ci_loop
+
+.op_icmple:
+    cmp     rcx, rbx
+    setle   bl
+    movzx   rbx, bl
+    jmp     .ci_loop
+
+.op_icmpge:
+    cmp     rcx, rbx
+    setge   bl
+    movzx   rbx, bl
+    jmp     .ci_loop
+
+.op_iand:
+    and     rbx, rcx
+    jmp     .ci_loop
+
+.op_ior:
+    or      rbx, rcx
+    jmp     .ci_loop
+
+.op_ixor:
+    xor     rbx, rcx
+    jmp     .ci_loop
+
+.op_ishl:
+    ; irax = irbx << (irax & 63)   rbx=shift_amt, rcx=value
+    mov     r10, rcx
+    mov     rcx, rbx
+    and     rcx, 63
+    mov     rbx, r10
+    sal     rbx, cl
+    jmp     .ci_loop
+
+.op_ishr:
+    mov     r10, rcx
+    mov     rcx, rbx
+    and     rcx, 63
+    mov     rbx, r10
+    sar     rbx, cl
+    jmp     .ci_loop
+
+.op_ibnot:
+    not     rbx
+    jmp     .ci_loop
+
+.op_iret:
+    mov     rax, rbx
+    mov     rdx, 1
+    jmp     .ci_success
+
+.op_ical:
+    ; IR: proto_idx(8 bytes) + argcnt(1 byte)
+    mov     r10, [r12]          ; target proto_idx
+    movzx   ebp, byte [r12+8]   ; argcnt
+    add     r12, 9
+
+    ; Check target has IR
+    cmp     qword [proto_ir_lens + r10*8], 0
+    je      .ci_fail_locals
+
+    ; Push interpreter state onto x86 stack (11 items = 88 bytes)
+    push    r12     ; IP (advanced past ICAL)
+    push    r11     ; IP end
+    push    r10     ; target proto_idx
+    push    rbp     ; argcnt temp
+    push    r9      ; step counter
+    push    r8      ; locals base
+    push    r15     ; current proto_idx
+    push    r14     ; args_ptr
+    push    r13     ; arg count (current call)
+    push    rbx     ; irax
+    push    rcx     ; irbx
+
+    ; Get first arg index in ctpe_istack
+    mov     rax, [ctpe_istack_top]
+    sub     rax, rbp            ; first arg index = top - argcnt
+    jl      .ical_underflow
+
+    ; Allocate forward args array on x86 stack
+    sub     rsp, 64             ; max 8 args
+
+    ; fwd_args[i] = ctpe_istack[rax + i]
+    lea     r11, [ctpe_istack + rax*8]
+    xor     ecx, ecx
+.ical_fwd:
+    cmp     rcx, rbp
+    jge     .ical_fwd_done
+    mov     r12, [r11 + rcx*8]
+    mov     [rsp + rcx*8], r12
+    inc     rcx
+    jmp     .ical_fwd
+.ical_fwd_done:
+
+    ; Decrement ctpe_istack_top by argcnt
+    mov     rax, [ctpe_istack_top]
+    sub     rax, rbp
+    mov     [ctpe_istack_top], rax
+
+    ; Call ctpe_interp(target_proto_idx, argcnt, fwd_args_ptr)
+    mov     rdi, r10            ; target proto_idx
+    mov     rsi, rbp            ; argcnt
+    mov     rdx, rsp            ; fwd_args
+    call    ctpe_interp
+
+    test    rdx, rdx
+    jz      .ical_nested_fail
+
+    mov     r10, rax            ; save result
+
+    ; Restore state
+    add     rsp, 64
+    pop     rcx     ; irbx
+    pop     rbx     ; irax (overwritten below)
+    pop     r13
+    pop     r14
+    pop     r15
+    pop     r8
+    pop     r9
+    pop     rbp     ; discard (argcnt slot)
+    pop     rax     ; discard (target proto_idx slot)
+    pop     r11
+    pop     r12
+
+    mov     rbx, r10    ; irax = result
+    jmp     .ci_loop
+
+.ical_nested_fail:
+    add     rsp, 64
+.ical_underflow:
+    pop     rcx
+    pop     rbx
+    pop     r13
+    pop     r14
+    pop     r15
+    pop     r8
+    pop     r9
+    pop     rbp
+    pop     rax     ; discard
+    pop     r11
+    pop     r12
+    jmp     .ci_fail_locals
+
+.ci_success:
+    add     rsp, 2048
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r8
+    pop     rcx
+    pop     rbx
+    pop     rbp
+    dec     byte [ctpe_call_depth]
+    ret
+
+.ci_fail_locals:
+    xor     eax, eax
+    xor     edx, edx
+    add     rsp, 2048
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r8
+    pop     rcx
+    pop     rbx
+    pop     rbp
+    dec     byte [ctpe_call_depth]
+    ret
+
+.ci_fail_dec:
+    dec     byte [ctpe_call_depth]
+.ci_fail_early:
+    xor     eax, eax
+    xor     edx, edx
     ret
