@@ -72,6 +72,7 @@ global codegen_emit_mov_rax_imm64
 global codegen_emit_mov_rax_var
 global codegen_emit_store_rax_to_var
 global codegen_cache_var_begin, codegen_cache_var_end
+global codegen_ra_pin, codegen_ra_unpin, codegen_ra_push_r14
 global codegen_emit_leave_placeholder
 global reg_cache_var, var_rbp_offsets
 global emit_tail, emit_tail_len
@@ -212,8 +213,15 @@ var_rbp_offsets:    resq VAR_MAX                ; rbp-relative offset for each v
 proto_local_offset: resq 1                      ; next rbp offset for locals (negative, starts at -8)
 cmp_fused_cc:       resb 1                      ; temp: inverse CC byte for fused comparison
 ; Register cache: when a variable is "cached" in a register, loads/stores use the register
-reg_cache_var:      resq 1                      ; var_index of cached variable (-1 = none)
+reg_cache_var:      resq 1                      ; var_index cached in r15 (-1 = none)
 reg_cache_reg:      resb 1                      ; register code: 1=rcx, 2=rdx, 3=rsi, 4=rdi
+
+; O-I/O-J/O-K: Multi-register variable cache (Phase 2A)
+; Up to 4 variables cached in callee-saved registers: r15, r14, r13, r12
+ra_var:             resq 4                      ; var_index cached in each register (-1 = none)
+ra_reg:             resb 4                      ; register code for each slot
+ra_count:           resq 1                      ; number of currently cached variables
+ra_hoist_slot_pos:  resq 1                      ; position of r14 NOP placeholder (for patching)
 ; When a while-loop comparison is fused to cmp [abs32], N, this stores the abs32 address
 fused_cmp_var_addr: resq 1                      ; -1 = no fused comparison
 
@@ -286,6 +294,9 @@ proto_ir_lens:            resq PROTO_MAX           ; IR byte-length of each prot
 ctpe_cur_proto_idx_save:  resq 1                   ; proto_idx currently being recorded
 ctpe_skip_idiv_ir:        resb 1                   ; set by imod to suppress idiv's own IR emit
 ctpe_call_depth:          resb 1                   ; recursion depth of ctpe_interp
+
+; O-I: var_idx tracking for IR recording (set by get_var_va)
+ctpe_current_var_idx:     resw 1                   ; current var_idx for IR emission
 
 ; Jump patch mapping: x86 out_buffer offset → IR buffer offset
 ctpe_patch_x86:           resq CTPE_PATCH_MAX
@@ -421,6 +432,13 @@ codegen_init:
     mov     qword [fused_cmp_limit],      0
     mov     byte  [fused_cmp_limit_is_const], 0
     mov     byte  [ctpe_all_const],       0
+    ; Multi-register variable cache initialization
+    mov     qword [ra_var + 0*8],  -1     ; r15 slot: empty
+    mov     qword [ra_var + 1*8],  -1     ; r14 slot: empty
+    mov     qword [ra_var + 2*8],  -1     ; r13 slot: empty
+    mov     qword [ra_var + 3*8],  -1     ; r12 slot: empty
+    mov     qword [ra_count],      0
+    mov     qword [ra_hoist_slot_pos], 0
     ret
 
 ; ---- codegen_get_out_idx: return current out_idx in rax ----
@@ -687,6 +705,205 @@ codegen_cache_var_end:
     ret
 
 ; ============================================================
+; Multi-register variable cache pin/unpin (Phase 2A)
+; ============================================================
+
+; codegen_ra_pin(rdi=slot, rsi=var_va, rdx=reg_code)
+; Pin a variable to a callee-saved register.
+; Emits: push reg + mov reg, [abs32]
+; Updates ra_var[slot], ra_reg[slot], ra_count++
+codegen_ra_pin:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdi
+    push    rsi
+    push    rdx
+
+    ; Save state
+    mov     rax, rdi                ; rax = slot
+    mov     rbx, rsi                ; rbx = var_va
+    mov     rcx, rdx                ; rcx = reg_code (14, 13, or 12)
+
+    ; Update ra_var and ra_reg
+    mov     [ra_var + rax*8], rbx
+    mov     [ra_reg + rax], cl
+    inc     qword [ra_count]
+
+    ; Emit push reg
+    ; r14: 41 56, r13: 41 55, r12: 41 54
+    mov     al, 0x41
+    call    emit_b
+    cmp     cl, 14
+    je      .ra_pin_push_r14
+    cmp     cl, 13
+    je      .ra_pin_push_r13
+    ; r12: push = 54
+    mov     al, 0x54
+    call    emit_b
+    jmp     .ra_pin_push_done
+.ra_pin_push_r14:
+    mov     al, 0x56
+    call    emit_b
+    jmp     .ra_pin_push_done
+.ra_pin_push_r13:
+    mov     al, 0x55
+    call    emit_b
+.ra_pin_push_done:
+
+    ; Emit mov reg, [abs32]
+    ; r14: 4C 8B 34 25 addr32
+    ; r13: 4C 8B 2C 25 addr32
+    ; r12: 4C 8B 24 25 addr32
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x8b
+    call    emit_b
+    cmp     cl, 14
+    je      .ra_pin_mov_r14
+    cmp     cl, 13
+    je      .ra_pin_mov_r13
+    ; r12: ModRM = 24
+    mov     al, 0x24
+    call    emit_b
+    jmp     .ra_pin_mov_done
+.ra_pin_mov_r14:
+    mov     al, 0x34
+    call    emit_b
+    jmp     .ra_pin_mov_done
+.ra_pin_mov_r13:
+    mov     al, 0x2c
+    call    emit_b
+.ra_pin_mov_done:
+    mov     al, 0x25
+    call    emit_b
+    ; Emit addr32
+    pop     rdx
+    pop     rsi
+    pop     rdi
+    mov     eax, esi                ; eax = var_va (low 32 bits)
+    call    emit_d
+
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
+; codegen_ra_unpin(rdi=slot, rsi=var_va)
+; Unpin a variable from its register.
+; Emits: mov [abs32], reg + pop reg
+; Updates ra_var[slot] = -1, ra_count--
+codegen_ra_unpin:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdi
+    push    rsi
+
+    ; Save state
+    mov     rax, rdi                ; rax = slot
+    mov     rbx, rsi                ; rbx = var_va
+
+    ; Load reg_code from ra_reg[slot]
+    movzx   ecx, byte [ra_reg + rax]
+
+    ; Emit mov [abs32], reg
+    ; r14: 4C 89 34 25 addr32
+    ; r13: 4C 89 2C 25 addr32
+    ; r12: 4C 89 24 25 addr32
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    cmp     cl, 14
+    je      .ra_unpin_mov_r14
+    cmp     cl, 13
+    je      .ra_unpin_mov_r13
+    ; r12: ModRM = 24
+    mov     al, 0x24
+    call    emit_b
+    jmp     .ra_unpin_mov_done
+.ra_unpin_mov_r14:
+    mov     al, 0x34
+    call    emit_b
+    jmp     .ra_unpin_mov_done
+.ra_unpin_mov_r13:
+    mov     al, 0x2c
+    call    emit_b
+.ra_unpin_mov_done:
+    mov     al, 0x25
+    call    emit_b
+    ; Emit addr32
+    mov     eax, ebx                ; eax = var_va (low 32 bits)
+    call    emit_d
+
+    ; Emit pop reg
+    ; r14: 41 5E, r13: 41 5D, r12: 41 5C
+    mov     al, 0x41
+    call    emit_b
+    cmp     cl, 14
+    je      .ra_unpin_pop_r14
+    cmp     cl, 13
+    je      .ra_unpin_pop_r13
+    ; r12: pop = 5C
+    mov     al, 0x5c
+    call    emit_b
+    jmp     .ra_unpin_pop_done
+.ra_unpin_pop_r14:
+    mov     al, 0x5e
+    call    emit_b
+    jmp     .ra_unpin_pop_done
+.ra_unpin_pop_r13:
+    mov     al, 0x5d
+    call    emit_b
+.ra_unpin_pop_done:
+
+    ; Update ra_var and ra_count
+    pop     rsi
+    pop     rdi
+    mov     rax, rdi
+    mov     qword [ra_var + rax*8], -1
+    dec     qword [ra_count]
+
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
+; codegen_ra_push_r14: Emit push r14 + 8-NOP placeholder for accumulator pinning
+; Called BEFORE while-loop condition check to ensure r15 is saved before loop body
+codegen_ra_push_r14:
+    push    rax
+    ; Emit: push r14 = 41 56
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x56
+    call    emit_b
+    ; Record position of 8-NOP placeholder for mov r14, [acc_addr]
+    mov     rax, [out_idx]
+    mov     [ra_hoist_slot_pos], rax
+    ; Emit 8 NOPs as placeholder for mov r14, [acc_addr]
+    push    rcx
+    xor     ecx, ecx
+.ra_push_nop_loop:
+    cmp     ecx, 8
+    jge     .ra_push_nop_done
+    push    rax
+    mov     al, 0x90
+    call    emit_b
+    pop     rax
+    inc     ecx
+    jmp     .ra_push_nop_loop
+.ra_push_nop_done:
+    pop     rcx
+    ; Set ra_var[1] = 0 (placeholder) so O-G fold knows r14 is pinned
+    mov     qword [ra_var + 1*8], 0
+    mov     byte [ra_reg + 1], 14
+    mov     qword [ra_count], 1
+    pop     rax
+    ret
+
+; ============================================================
 ; Emit helpers
 ; ============================================================
 emit_b:
@@ -927,6 +1144,8 @@ emit_blob_v2:
 ; When in_proto_frame: returns rbp-relative offset from var_rbp_offsets
 ; Otherwise: returns VAR_STORAGE_BASE + idx*64
 get_var_va:
+    ; O-I: save var_idx for IR recording
+    mov     word [ctpe_current_var_idx], di
     test    byte [in_proto_frame], 1
     jnz     .rbp_mode
     shl     rdi, 6              ; idx * 64
@@ -1175,6 +1394,15 @@ proto_find:
 ; codegen_emit_mov_rax_imm64(rdi=value)
 codegen_emit_mov_rax_imm64:
     mov     qword [rax_holds_va], -1   ; rax = constant, not a variable's value
+    ; O-I: emit IR_IMOV64 if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_imm64
+    push    rdi
+    mov     rdi, IR_IMOV64
+    call    ctpe_ir_emit_b          ; emit opcode, preserves rdi
+    pop     rdi
+    call    ctpe_ir_emit_q          ; emit 8-byte value
+.no_ir_imm64:
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -1188,6 +1416,16 @@ codegen_emit_mov_rax_imm64:
 ; codegen_emit_mov_rax_imm32(rdi=value): emit  mov eax, imm32 (or xor eax,eax)
 codegen_emit_mov_rax_imm32:
     mov     qword [rax_holds_va], -1   ; rax = constant, not a variable's value
+    ; O-I: emit IR_IMOV64 if recording (zero-extend imm32 to 64-bit)
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_imm32
+    push    rdi
+    mov     rdi, IR_IMOV64
+    call    ctpe_ir_emit_b
+    pop     rdi
+    movsxd  rdi, edi               ; sign-extend imm32 to 64-bit
+    call    ctpe_ir_emit_q
+.no_ir_imm32:
     push    rax
     test    rdi, rdi
     jnz     .nonzero
@@ -1209,6 +1447,18 @@ codegen_emit_mov_rax_imm32:
 ; When var_addr_is_rbp=1: emit mov rax, [rbp+disp32]
 ; Otherwise: emit mov rax, [abs32]
 codegen_emit_mov_rax_var:
+    ; O-I: emit IR_ILOAD if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_load
+    push    rdi
+    push    rsi
+    mov     rdi, IR_ILOAD
+    call    ctpe_ir_emit_b
+    movzx   edi, word [ctpe_current_var_idx]
+    call    ctpe_ir_emit_w
+    pop     rsi
+    pop     rdi
+.no_ir_load:
     ; Tier 1: rax already holds this variable's value — skip the load entirely
     cmp     rdi, [rax_holds_va]
     je      .rax_already_correct
@@ -1237,6 +1487,66 @@ codegen_emit_mov_rax_var:
     pop     rax
     ret
   .not_cached:
+    ; Phase 2A: Check multi-register cache (r14, r13, r12)
+    cmp     qword [ra_count], 0
+    je      .check_abs_load
+    push    rcx
+    push    rdx
+    xor     ecx, ecx               ; slot index = 0
+.ra_check_loop:
+    cmp     ecx, 4
+    jge     .ra_check_done
+    cmp     rdi, [ra_var + rcx*8]  ; compare with cached var
+    je      .ra_found
+    inc     ecx
+    jmp     .ra_check_loop
+.ra_found:
+    ; Variable is in a register — emit mov rax, reg (3 bytes)
+    pop     rdx
+    pop     rcx
+    pop     rdi
+    pop     rax
+    mov     [rax_holds_va], rdi
+    ; Emit: mov rax, reg based on ra_reg[ecx]
+    push    rax
+    movzx   edx, byte [ra_reg + ecx]
+    ; r14 = 4C 89 F0, r13 = 4C 89 E8, r12 = 4C 89 E0
+    cmp     dl, 14
+    je      .ra_load_r14
+    cmp     dl, 13
+    je      .ra_load_r13
+    ; r12: 4C 89 E0
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xe0
+    call    emit_b
+    jmp     .ra_load_done
+.ra_load_r14:
+    ; r14: 4C 89 F0
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xf0
+    call    emit_b
+    jmp     .ra_load_done
+.ra_load_r13:
+    ; r13: 4C 89 E8
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xe8
+    call    emit_b
+.ra_load_done:
+    pop     rax
+    ret
+.ra_check_done:
+    pop     rdx
+    pop     rcx
+.check_abs_load:
     test    byte [var_addr_is_rbp], 1
     jnz     .rbp_load
     ; absolute mode: 48 8B 04 25 addr32
@@ -1297,10 +1607,21 @@ codegen_emit_mov_rdi_var:
 ; Otherwise: emit mov [abs32], rax
 ; Peephole: detect  load rax,[abs32]; add/sub rax,imm; store [abs32],rax  →  add/sub/inc/dec qword [abs32]
 codegen_emit_store_rax_to_var:
-    ; Invalidate rax_holds_va: after a store to var X, [X] may differ from
-    ; whatever rax was holding before (e.g. swap rewrites [A] then [B]).
-    ; The peephole path sets its own invalidation. Conservative = always clear here.
+    ; Invalidate rax_holds_va: after a store, the fused-comparison peephole
+    ; needs fresh loads in emit_tail to detect patterns. Conservative clear.
     mov     qword [rax_holds_va], -1
+    ; O-I: emit IR_ISTORE if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_store
+    push    rdi
+    push    rsi
+    mov     rdi, IR_ISTORE
+    call    ctpe_ir_emit_b
+    movzx   edi, word [ctpe_current_var_idx]
+    call    ctpe_ir_emit_w
+    pop     rsi
+    pop     rdi
+.no_ir_store:
     push    rax
     push    rdi
     push    rcx
@@ -1407,7 +1728,67 @@ codegen_emit_store_rax_to_var:
     pop     rax
     ret
   .not_cached_store:
+    ; Phase 2A: Check multi-register cache (r14, r13, r12) for store
+    cmp     qword [ra_count], 0
+    je      .check_abs_store
+    push    rcx
+    push    rdx
+    xor     ecx, ecx               ; slot index = 0
+.ra_store_check:
+    cmp     ecx, 4
+    jge     .ra_store_done
+    cmp     rdi, [ra_var + rcx*8]  ; compare with cached var
+    je      .ra_store_found
+    inc     ecx
+    jmp     .ra_store_check
+.ra_store_found:
+    ; Variable is in a register — emit mov reg, rax (3 bytes)
+    pop     rdx
+    pop     rcx
+    pop     r12
+    pop     rcx
+    pop     rdi
+    pop     rax
+    ; Emit: mov reg, rax based on ra_reg[ecx]
+    push    rax
+    movzx   edx, byte [ra_reg + ecx]
+    cmp     dl, 14
+    je      .ra_store_r14
+    cmp     dl, 13
+    je      .ra_store_r13
+    ; r12: 4C 89 E0
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xe0
+    call    emit_b
+    jmp     .ra_store_done2
+.ra_store_r14:
+    ; r14: 4C 89 F0
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xf0
+    call    emit_b
+    jmp     .ra_store_done2
+.ra_store_r13:
+    ; r13: 4C 89 E8
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xe8
+    call    emit_b
+.ra_store_done2:
+    pop     rax
+    ret
+.ra_store_done:
+    pop     rdx
+    pop     rcx
 
+.check_abs_store:
     test    byte [var_addr_is_rbp], 1
     jnz     .rbp_store
 
@@ -1606,6 +1987,22 @@ codegen_emit_store_rax_to_var:
 
     ; Matched: roll back 20 bytes, emit  OP [addr32], r15
     ; Encoding: 4C [opcode] 3C 25 addr32  (8 bytes)
+    ; Phase 2A: If r14 is pinned to accumulator, emit OP r14, r15 instead (3 bytes)
+    cmp     qword [ra_count], 0
+    je      .og20_emit_mem
+    cmp     byte [ra_reg + 1], 14
+    jne     .og20_emit_mem
+    ; r14 is pinned to accumulator — emit OP r14, r15 (3 bytes: 4D opcode F7)
+    sub     qword [out_idx], 20
+    sub     qword [emit_tail_len], 20
+    mov     al, 0x4D                ; REX.W+R for r14
+    call    emit_b
+    mov     al, r9b                 ; opcode (add/sub)
+    call    emit_b
+    mov     al, 0xFE                ; ModRM: r14, r15 (20-byte pattern)
+    call    emit_b
+    jmp     .og20_emit_done
+.og20_emit_mem:
     sub     qword [out_idx], 20
     sub     qword [emit_tail_len], 20
     mov     al, 0x4C
@@ -1618,6 +2015,7 @@ codegen_emit_store_rax_to_var:
     call    emit_b
     mov     eax, r12d
     call    emit_d
+.og20_emit_done:
     ; Signal to for_end: O-G RMW fired, body = 8 bytes
     mov     byte [og_fired_in_body], 1
     mov     byte [og_op_code], r9b
@@ -1720,6 +2118,22 @@ codegen_emit_store_rax_to_var:
     ; Roll back 11 bytes (load + 3-byte op), emit OP [abs32], r15
     ; Encoding: 4C [opcode] 3C 25 addr32
     ; REX=4C(W+R), ModRM=3C(mod=00 reg=7=r15%8 rm=4=SIB), SIB=25(idx=none base=disp32)
+    ; Phase 2A: If r14 is pinned to accumulator, emit OP r14, r15 instead (3 bytes)
+    cmp     qword [ra_count], 0
+    je      .og_r15_emit_mem
+    cmp     byte [ra_reg + 1], 14
+    jne     .og_r15_emit_mem
+    ; r14 is pinned to accumulator — emit OP r14, r15 (3 bytes: 4D opcode F7)
+    sub     qword [out_idx], 11
+    sub     qword [emit_tail_len], 11
+    mov     al, 0x4D                ; REX.W+R for r14
+    call    emit_b
+    mov     al, r9b                 ; opcode (add/sub)
+    call    emit_b
+    mov     al, 0xFE                ; ModRM: r14, r15 (11-byte pattern)
+    call    emit_b
+    jmp     .og_r15_emit_done
+.og_r15_emit_mem:
     sub     qword [out_idx], 11
     sub     qword [emit_tail_len], 11
     mov     al, 0x4C
@@ -1732,6 +2146,7 @@ codegen_emit_store_rax_to_var:
     call    emit_b
     mov     eax, r12d
     call    emit_d
+.og_r15_emit_done:
     jmp     .peephole_done
 
 .og_try_rbx:
@@ -2377,6 +2792,14 @@ codegen_emit_store_rax_to_var:
 
 ; Emit push rax
 codegen_emit_push_rax:
+    ; O-I: emit IR_IMRAX (save irax to irbx) if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_push
+    push    rdi
+    mov     rdi, IR_IMRAX
+    call    ctpe_ir_emit_b
+    pop     rdi
+.no_ir_push:
     push    rax
     mov     al, 0x50
     call    emit_b
@@ -2438,6 +2861,14 @@ codegen_emit_mov_rax_rdi:
 
 codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
+    ; O-I: emit IR_IADD if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_add
+    push    rdi
+    mov     rdi, IR_IADD
+    call    ctpe_ir_emit_b
+    pop     rdi
+.no_ir_add:
     push    rax
     push    rcx
     push    rdi
@@ -2625,6 +3056,14 @@ codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
 
 codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
+    ; O-I: emit IR_ISUB if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_sub
+    push    rdi
+    mov     rdi, IR_ISUB
+    call    ctpe_ir_emit_b
+    pop     rdi
+.no_ir_sub:
     push    rax
     push    rcx
     push    rdi
@@ -2817,6 +3256,14 @@ codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
 
 codegen_emit_imul_rax_rbx:     ; imul rax, rbx  (48 0F AF C3)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
+    ; O-I: emit IR_IMUL if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_mul
+    push    rdi
+    mov     rdi, IR_IMUL
+    call    ctpe_ir_emit_b
+    pop     rdi
+.no_ir_mul:
     push    rax
     push    rcx
     push    rdi
@@ -3062,6 +3509,14 @@ codegen_emit_imod_rbx_by_rax:  ; rbx%rax → rax (remainder)
 
 codegen_emit_neg_rax:          ; neg rax  (48 F7 D8)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
+    ; O-I: emit IR_INEG if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_neg
+    push    rdi
+    mov     rdi, IR_INEG
+    call    ctpe_ir_emit_b
+    pop     rdi
+.no_ir_neg:
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -3661,6 +4116,45 @@ codegen_emit_cmp_setcc:
     call    emit_b
     mov     al, 0x0f            ; setCC prefix
     call    emit_b
+    pop     rax
+    ; O-I: emit IR_ICMPxx if recording
+    push    rax
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_cmp
+    push    rdi
+    cmp     al, 0x9C            ; setl → IR_ICMPLT
+    jne     .cmp_not_lt
+    mov     rdi, IR_ICMPLT
+    jmp     .cmp_emit
+.cmp_not_lt:
+    cmp     al, 0x9F            ; setg → IR_ICMPGT
+    jne     .cmp_not_gt
+    mov     rdi, IR_ICMPGT
+    jmp     .cmp_emit
+.cmp_not_gt:
+    cmp     al, 0x94            ; sete → IR_ICMPEQ
+    jne     .cmp_not_eq
+    mov     rdi, IR_ICMPEQ
+    jmp     .cmp_emit
+.cmp_not_eq:
+    cmp     al, 0x95            ; setne → IR_ICMPNE
+    jne     .cmp_not_ne
+    mov     rdi, IR_ICMPNE
+    jmp     .cmp_emit
+.cmp_not_ne:
+    cmp     al, 0x9E            ; setle → IR_ICMPLE
+    jne     .cmp_not_le
+    mov     rdi, IR_ICMPLE
+    jmp     .cmp_emit
+.cmp_not_le:
+    cmp     al, 0x9D            ; setge → IR_ICMPGE
+    jne     .cmp_no_emit
+    mov     rdi, IR_ICMPGE
+.cmp_emit:
+    call    ctpe_ir_emit_b
+.cmp_no_emit:
+    pop     rdi
+.no_ir_cmp:
     pop     rax
     call    emit_b              ; setCC byte
     mov     al, 0xc0            ; al
@@ -4275,6 +4769,29 @@ codegen_emit_for_start:
     mov     byte [loop_has_skip], 0
     mov     dword [licm_hoisted_addr], 0
     push    rax
+    ; Phase 2A: Push r14 for accumulator pinning (2 bytes) + 8 NOPs placeholder
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x56
+    call    emit_b
+    ; Record position of 8-NOP placeholder for mov r14, [acc_addr]
+    mov     rax, [out_idx]
+    mov     [ra_hoist_slot_pos], rax
+    ; Emit 8 NOPs as placeholder for mov r14, [acc_addr]
+    push    rcx
+    xor     ecx, ecx
+.for_ra_nop_loop:
+    cmp     ecx, 8
+    jge     .for_ra_nop_done
+    push    rax
+    mov     al, 0x90
+    call    emit_b
+    pop     rax
+    inc     ecx
+    jmp     .for_ra_nop_loop
+.for_ra_nop_done:
+    pop     rcx
+    ; LICM hoist slot (8 NOPs)
     mov     al, 0x90                ; NOP × 8 (hoist slot placeholder)
     call    emit_b
     call    emit_b
@@ -5109,6 +5626,30 @@ codegen_emit_for_end:
     ; Normal (non-rolled) loop end: emit back-jump + flush r15
     ; ================================================================
 .fe_normal_backjump:
+    ; Phase 2A: Patch r14 NOP placeholder with actual mov r14, [acc_addr]
+    cmp     byte [og_fired_in_body], 0
+    je      .fe_no_ra_patch
+    push    rax
+    push    rbx
+    push    rcx
+    mov     rax, [ra_hoist_slot_pos]
+    lea     rbx, [out_buffer + rax]
+    ; Emit: 4C 8B 34 25 addr32 (mov r14, [abs32]) = 8 bytes
+    mov     byte [rbx + 0], 0x4c
+    mov     byte [rbx + 1], 0x8b
+    mov     byte [rbx + 2], 0x34
+    mov     byte [rbx + 3], 0x25
+    mov     ecx, dword [og_rw_addr32]
+    mov     dword [rbx + 4], ecx
+    ; Set ra_var[1] = og_rw_addr32, ra_reg[1] = 14, ra_count++
+    mov     rax, [og_rw_addr32]
+    mov     qword [ra_var + 1*8], rax
+    mov     byte [ra_reg + 1], 14
+    inc     qword [ra_count]
+    pop     rcx
+    pop     rbx
+    pop     rax
+.fe_no_ra_patch:
     ; back-jump to increment point (not condition check)
     push    rax
     mov     al, 0xe9
@@ -5118,7 +5659,33 @@ codegen_emit_for_end:
     sub     rax, 4
     call    emit_d
     pop     rax
-
+    ; Phase 2A: Flush r14 accumulator after loop exits
+    cmp     byte [og_fired_in_body], 0
+    je      .fe_no_ra_flush
+    push    rax
+    push    rdi
+    ; Emit: mov [og_rw_addr32], r14 = 4C 89 34 25 addr32 (8 bytes)
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [og_rw_addr32]
+    call    emit_d
+    ; Emit: pop r14 = 41 5E (2 bytes)
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5e
+    call    emit_b
+    pop     rdi
+    pop     rax
+    ; Clear ra_var[1]
+    mov     qword [ra_var + 1*8], -1
+    dec     qword [ra_count]
+.fe_no_ra_flush:
     ; patch jge exit
     mov     rdi, r13
     call    codegen_patch_jump
@@ -5492,6 +6059,31 @@ codegen_emit_while_end:
     pop     rdi
     pop     rax
 .while_no_flush:
+    ; Phase 2A: Patch r14 NOP placeholder with actual mov r14, [acc_addr]
+    cmp     byte [og_fired_in_body], 0
+    je      .no_ra_patch
+    ; Patch the 8-NOP placeholder at ra_hoist_slot_pos
+    push    rax
+    push    rbx
+    push    rcx
+    mov     rax, [ra_hoist_slot_pos]
+    lea     rbx, [out_buffer + rax]
+    ; Emit: 4C 8B 34 25 addr32 (mov r14, [abs32]) = 8 bytes
+    mov     byte [rbx + 0], 0x4c        ; REX.W+R
+    mov     byte [rbx + 1], 0x8b        ; MOV
+    mov     byte [rbx + 2], 0x34        ; ModRM for r14
+    mov     byte [rbx + 3], 0x25        ; SIB
+    mov     ecx, dword [og_rw_addr32]
+    mov     dword [rbx + 4], ecx        ; addr32
+    ; Set ra_var[1] = og_rw_addr32, ra_reg[1] = 14, ra_count++
+    mov     rax, [og_rw_addr32]
+    mov     qword [ra_var + 1*8], rax
+    mov     byte [ra_reg + 1], 14
+    inc     qword [ra_count]
+    pop     rcx
+    pop     rbx
+    pop     rax
+.no_ra_patch:
     ; emit: jmp back to loop_start
     push    rax
     mov     al, 0xe9
@@ -5501,6 +6093,33 @@ codegen_emit_while_end:
     sub     rax, 4
     call    emit_d
     pop     rax
+    ; Phase 2A: Flush r14 accumulator AFTER back-jump (exit jump target lands here)
+    cmp     byte [og_fired_in_body], 0
+    je      .no_ra_flush
+    push    rax
+    push    rdi
+    ; Emit: mov [og_rw_addr32], r14 = 4C 89 34 25 addr32 (8 bytes)
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, dword [og_rw_addr32]
+    call    emit_d
+    ; Emit: pop r14 = 41 5E (2 bytes)
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5e
+    call    emit_b
+    pop     rdi
+    pop     rax
+    ; Clear ra_var[1]
+    mov     qword [ra_var + 1*8], -1
+    dec     qword [ra_count]
+.no_ra_flush:
     ; patch exit jz
     mov     rdi, r13
     call    codegen_patch_jump
@@ -6108,6 +6727,13 @@ codegen_emit_prot_start:
     mov     byte [in_proto_frame], 1
     mov     qword [proto_local_offset], -8
 
+    ; O-I: Start IR recording for this protocol
+    mov     byte [ctpe_recording], 1
+    mov     byte [ctpe_ir_aborted], 0
+    mov     rax, [ctpe_ir_out_idx]
+    mov     [proto_ir_offsets + rcx*8], rax
+    mov     [ctpe_cur_proto_idx_save], rcx
+
     pop     rdx
     pop     rcx
     pop     rbx
@@ -6197,6 +6823,17 @@ codegen_emit_prot_end:
 
     ; Clear frame mode
     mov     byte [in_proto_frame], 0
+
+    ; O-I: Finish IR recording for this protocol
+    mov     byte [ctpe_recording], 0
+    mov     rcx, [ctpe_cur_proto_idx_save]
+    cmp     byte [ctpe_ir_aborted], 0
+    jne     .pe_ir_done
+    ; Store IR length = ctpe_ir_out_idx - proto_ir_offsets[proto_idx]
+    mov     rax, [ctpe_ir_out_idx]
+    sub     rax, [proto_ir_offsets + rcx*8]
+    mov     [proto_ir_lens + rcx*8], rax
+  .pe_ir_done:
 
     pop     rdx
     pop     rcx
@@ -6462,6 +7099,19 @@ codegen_emit_seq_cap:   ; rdi = var_va → rax = cap
 ; Inc / Dec / Swap / Abs / Typeof
 ; ============================================================
 codegen_emit_inc_var:   ; rdi = var_va
+    mov     qword [rax_holds_va], -1   ; inc modifies memory directly, rax no longer valid
+    ; O-I: emit IR_IINC if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_inc
+    push    rdi
+    push    rsi
+    mov     rdi, IR_IINC
+    call    ctpe_ir_emit_b
+    movzx   edi, word [ctpe_current_var_idx]
+    call    ctpe_ir_emit_w
+    pop     rsi
+    pop     rdi
+.no_ir_inc:
     push    rax
     push    rdi
     mov     al, 0x48
@@ -6479,6 +7129,19 @@ codegen_emit_inc_var:   ; rdi = var_va
     ret
 
 codegen_emit_dec_var:   ; rdi = var_va
+    mov     qword [rax_holds_va], -1   ; dec modifies memory directly, rax no longer valid
+    ; O-I: emit IR_IDEC if recording
+    cmp     byte [ctpe_recording], 0
+    je      .no_ir_dec
+    push    rdi
+    push    rsi
+    mov     rdi, IR_IDEC
+    call    ctpe_ir_emit_b
+    movzx   edi, word [ctpe_current_var_idx]
+    call    ctpe_ir_emit_w
+    pop     rsi
+    pop     rdi
+.no_ir_dec:
     push    rax
     push    rdi
     mov     al, 0x48
@@ -6854,6 +7517,7 @@ codegen_emit_mov_rsi_rax:
 
 ; codegen_emit_neg_var(rdi=var_va): emit neg qword [var_va]  (48 F7 1C 25 <va>)
 codegen_emit_neg_var:
+    mov     qword [rax_holds_va], -1   ; neg modifies memory directly, rax no longer valid
     push    rax
     push    rdi
     mov     al, 0x48

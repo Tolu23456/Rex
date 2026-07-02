@@ -84,8 +84,10 @@ extern for_step_val
 extern cur_proto_idx
 extern fwd_ref_names, fwd_ref_patches, fwd_ref_count
 extern out_buffer
-extern codegen_while_pin_setup, ctpe_eval_proto
+extern codegen_while_pin_setup, ctpe_eval_proto, ctpe_interp
+extern codegen_ra_push_r14
 extern ctpe_call_start_idx, ctpe_tail_len_save, ctpe_const_args, ctpe_all_const
+extern proto_ir_lens
 extern emit_tail_len
 
 ; ============================================================
@@ -966,7 +968,11 @@ parse_while:
 
     advance                          ; consume 'while'
 
-    ; Save loop start (before condition)
+    ; Phase 2A: Emit push r14 + NOP placeholder BEFORE loop_start is saved
+    ; This ensures back-jump goes to condition check, not push r14
+    call    codegen_ra_push_r14
+
+    ; Save loop start (after push r14, before condition)
     call    codegen_get_out_idx
     mov     r12, rax                 ; loop start
 
@@ -2808,6 +2814,32 @@ parse_factor:
     jmp     .pf_at_done
 .pf_ctpe_miss:
     pop     rdi                        ; restore proto_idx from saved proto_idx
+    ; O-I: try generic CTPE interpreter if protocol has IR recorded
+    cmp     qword [proto_ir_lens + rdi*8], 0
+    je      .pf_normal_call
+    ; Protocol has IR — try interpreting it
+    push    rdi
+    push    rsi
+    mov     rdi, rdi                   ; rdi = proto_idx
+    mov     rsi, [tmp_argcount]        ; rsi = argcount
+    lea     rdx, [ctpe_const_args]     ; rdx = args_ptr
+    call    ctpe_interp
+    cmp     rdx, 1
+    jne     .pf_interp_miss
+    ; Generic CTPE SUCCESS: rewind arg pushes and emit the constant result
+    pop     rsi
+    pop     rdi                        ; discard saved proto_idx
+    push    rax                        ; save ctpe result
+    mov     rdi, [ctpe_call_start_idx]
+    mov     [out_idx], rdi
+    mov     rdi, [ctpe_tail_len_save]
+    mov     [emit_tail_len], rdi
+    pop     rdi                        ; rdi = constant result
+    call    codegen_emit_mov_rax_imm32
+    jmp     .pf_at_done
+.pf_interp_miss:
+    pop     rsi
+    pop     rdi                        ; restore proto_idx
 .pf_normal_call:
     call    codegen_emit_call_prot
     jmp     .pf_at_done
