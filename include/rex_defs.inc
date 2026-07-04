@@ -310,3 +310,9 @@
 %define LOOP_STACK_MAX      32
 %define SCOPE_STACK_MAX     64
 %define FWD_REF_MAX         128
+
+; ----------------------------------------------------------------
+; Register Allocator
+; ----------------------------------------------------------------
+%define RA_NONE             0xFF   ; slot sentinel: variable not register-allocated
+%define RA_POOL             4      ; number of RA registers: R8..R11
