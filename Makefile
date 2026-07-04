@@ -6,7 +6,8 @@ LFLAGS  = -static
 
 BIN_DEPS = runtime/rt_pri.bin runtime/rt_prs.bin runtime/rt_prb.bin \
            runtime/rt_prf.bin runtime/rt_prc.bin runtime/rt_sip.bin \
-           runtime/rt_alc.bin runtime/rt_prq.bin runtime/rt_str_cat.bin
+           runtime/rt_alc.bin runtime/rt_prq.bin runtime/rt_str.bin \
+           runtime/rt_inp.bin runtime/rt_str_cat.bin
 
 OBJ = main/main.o lexer/lexer.o parser/parser.o \
       codegen/codegen.o runtime/runtime.o

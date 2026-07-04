@@ -69,7 +69,7 @@ rt_prf_blob:
 
 .int_done:
     inc     r9                  ; r9 = first digit
-    lea     rcx, [rsp + 73]     ; one past NUL
+    lea     rcx, [rsp + 72]     ; stop at NUL (do not include it)
     sub     rcx, r9             ; length
     mov     rax, SYS_write
     mov     rdi, 1

@@ -1066,9 +1066,25 @@ emit_blob:
     push    rax
     push    rdx
     mov     rdx, rcx            ; save byte count
+    ; Bounds check: out_idx + rcx <= OUT_BUF_SIZE
+    mov     rdi, [out_idx]
+    add     rdi, rcx
+    cmp     rdi, OUT_BUF_SIZE
+    ja      .emit_blob_ov
     mov     rdi, [out_idx]
     lea     rdi, [out_buffer + rdi]
     rep     movsb
+    jmp     .emit_blob_ok
+.emit_blob_ov:
+    mov     rax, SYS_write
+    mov     rdi, 2
+    lea     rsi, [err_buf_ov]
+    mov     rdx, 28
+    syscall
+    mov     rax, SYS_exit
+    mov     rdi, 1
+    syscall
+.emit_blob_ok:
     mov     rdi, [out_idx]
     add     rdi, rdx
     mov     [out_idx], rdi
@@ -1106,11 +1122,27 @@ emit_blob_v2:
     push    rcx
     push    rax
     push    rdx
+    ; Bounds check: out_idx + rdx <= OUT_BUF_SIZE
+    mov     rdi, [out_idx]
+    add     rdi, rdx
+    cmp     rdi, OUT_BUF_SIZE
+    ja      .emit_blob_v2_ov
     mov     rcx, rdx
     mov     rdi, out_buffer
     add     rdi, [out_idx]
     rep     movsb
     add     [out_idx], rdx
+    jmp     .emit_blob_v2_ok
+.emit_blob_v2_ov:
+    mov     rax, SYS_write
+    mov     rdi, 2
+    lea     rsi, [err_buf_ov]
+    mov     rdx, 28
+    syscall
+    mov     rax, SYS_exit
+    mov     rdi, 1
+    syscall
+.emit_blob_v2_ok:
     ; Update emit_tail with emitted bytes
     mov     rax, [out_idx]
     sub     rax, rdx            ; rax = start offset in out_buffer
@@ -2399,12 +2431,12 @@ codegen_emit_store_rax_to_var:
     cmp     r8d, -128
     jl      .abs_store_normal
 
-    ; add qword [abs32], imm8 = 48 83 00 addr32 imm8 (9 bytes)
+    ; add qword [abs32], imm8 = 48 83 04 25 addr32 imm8 (9 bytes)
     mov     al, 0x48
     call    emit_b
     mov     al, 0x83
     call    emit_b
-    mov     al, 0x00             ; /0 = add
+    mov     al, 0x04             ; /0 = add, mod=00 rm=4 (SIB)
     call    emit_b
     mov     al, 0x25             ; SIB: [disp32]
     call    emit_b
@@ -2477,12 +2509,12 @@ codegen_emit_store_rax_to_var:
     cmp     r8d, -128
     jl      .abs_store_normal
 
-    ; sub qword [abs32], imm8 = 48 83 28 addr32 imm8 (9 bytes)
+    ; sub qword [abs32], imm8 = 48 83 2C 25 addr32 imm8 (9 bytes)
     mov     al, 0x48
     call    emit_b
     mov     al, 0x83
     call    emit_b
-    mov     al, 0x28            ; /5 = sub
+    mov     al, 0x2C            ; /5 = sub, mod=00 rm=4 (SIB)
     call    emit_b
     mov     al, 0x25
     call    emit_b
@@ -3925,36 +3957,43 @@ codegen_emit_shr:   ; rbx >> rax → rax
 ; ============================================================
 ; Boolean operations
 ; ============================================================
-codegen_emit_and_bool: ; boolean AND: 0 or 1
+codegen_emit_and_bool: ; tri-state boolean AND
     push    rsi
     push    rcx
     lea     rsi, [rel .and_code]
-    mov     edx, 14
+    mov     edx, 24
     call    emit_blob_v2
     pop     rcx
     pop     rsi
     ret
 .and_code:
-    db 0x48, 0x85, 0xDB               ; test rbx, rbx
-    db 0x0F, 0x95, 0xC1               ; setnz cl
-    db 0x48, 0x85, 0xC0               ; test rax, rax
-    db 0x0F, 0x95, 0xC0               ; setnz al
-    db 0x20, 0xC8                     ; and al, cl
-    db 0x48, 0x0F, 0xB6, 0xC0        ; movzx rax, al
+    db 0x48, 0x89, 0xC1               ; mov rcx, rax (save RHS)
+    db 0x48, 0x09, 0xD9               ; or rcx, rbx  (LHS | RHS)
+    db 0x48, 0x83, 0xF9, 0xFF        ; cmp rcx, -1
+    db 0x74, 0x05                     ; je .false (skip and+jmp)
+    db 0x48, 0x21, 0xD8               ; and rax, rbx (result = LHS & RHS)
+    db 0xEB, 0x07                     ; jmp .done
+    db 0x48, 0xC7, 0xC0              ; mov rax, -1 (false)
+    db 0xFF, 0xFF, 0xFF, 0xFF
 
-codegen_emit_or_bool:  ; boolean OR: 0 or 1
+codegen_emit_or_bool:  ; tri-state boolean OR
     push    rsi
     push    rcx
     lea     rsi, [rel .or_code]
-    mov     edx, 14
+    mov     edx, 24
     call    emit_blob_v2
     pop     rcx
     pop     rsi
     ret
 .or_code:
-    db 0x48, 0x09, 0xD8               ; or rax, rbx
-    db 0x0F, 0x95, 0xC0               ; setnz al
-    db 0x48, 0x0F, 0xB6, 0xC0        ; movzx rax, al
+    db 0x48, 0x83, 0xFB, 0x01        ; cmp rbx, 1
+    db 0x74, 0x0B                     ; je .true (skip to mov rax,1)
+    db 0x48, 0x83, 0xF8, 0x01        ; cmp rax, 1
+    db 0x74, 0x05                     ; je .true (skip to mov rax,1)
+    db 0x48, 0x09, 0xD8               ; or rax, rbx (result = LHS | RHS)
+    db 0xEB, 0x07                     ; jmp .done
+    db 0x48, 0xC7, 0xC0              ; mov rax, 1 (true)
+    db 0x01, 0x00, 0x00, 0x00
     pop     rcx
     pop     rsi
     ; Fall through to emit individual bytes
@@ -4325,10 +4364,10 @@ codegen_emit_test_jz:
     mov     [fused_cmp_var_addr], rax
     ; Check fits in signed 32 bits
     mov     rsi, rdi
-    sar     rsi, 31
-    cmp     sil, 0
+    sar     rsi, 32
+    test    rsi, rsi
     je      .cached_imm32_ok
-    cmp     sil, 0xff
+    cmp     rsi, -1
     jne     .check_full_pattern
   .cached_imm32_ok:
     ; Save fused limit for while-loop triangular fold
@@ -4537,10 +4576,10 @@ codegen_emit_test_jz:
 
     ; Check if imm64 fits in signed 32 bits
     mov     rsi, rdi
-    sar     rsi, 31
-    cmp     sil, 0
+    sar     rsi, 32
+    test    rsi, rsi
     je      .imm32_ok
-    cmp     sil, 0xff
+    cmp     rsi, -1
     jne     .normal_jz
   .imm32_ok:
     ; Save fused limit for while-loop triangular fold
@@ -4646,6 +4685,8 @@ codegen_patch_chain_end:
     push    rbx
     push    rcx
     mov     rbx, [chain_base_depth]
+    test    rbx, rbx
+    jz      .done                      ; nothing to patch
     dec     rbx
     mov     rbx, [chain_base_stack + rbx*8]  ; load saved end_jump_depth
     mov     rcx, [end_jump_depth]
@@ -5686,9 +5727,16 @@ codegen_emit_for_end:
     mov     qword [ra_var + 1*8], -1
     dec     qword [ra_count]
 .fe_no_ra_flush:
-    ; patch jge exit
+    ; patch jge exit to land on the pop r14 we're about to emit
     mov     rdi, r13
     call    codegen_patch_jump
+    ; Emit pop r14 to balance push r14 from codegen_ra_push_r14
+    push    rax
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5e
+    call    emit_b
+    pop     rax
 
     ; patch all break jumps for this loop
     call    codegen_patch_breaks
@@ -6120,9 +6168,16 @@ codegen_emit_while_end:
     mov     qword [ra_var + 1*8], -1
     dec     qword [ra_count]
 .no_ra_flush:
-    ; patch exit jz
+    ; patch exit jz to land on the pop r14 we're about to emit
     mov     rdi, r13
     call    codegen_patch_jump
+    ; Emit pop r14 to balance push r14 from codegen_ra_push_r14
+    push    rax
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5e
+    call    emit_b
+    pop     rax
     call    codegen_patch_breaks
     call    codegen_pop_cont
     dec     qword [loop_depth]
@@ -7008,12 +7063,9 @@ codegen_emit_seq_push:  ; rdi = var_va
     mov     edx, 4
     call    emit_blob_v2
     ; store + inc
-    pop     rax                         ; restore value
-    push    rax
     lea     rsi, [rel .store_inc]
     mov     edx, 8
     call    emit_blob_v2
-    pop     rax
     pop     rcx
     pop     rsi
     pop     r12
@@ -7045,7 +7097,7 @@ codegen_emit_seq_pop:   ; rdi = var_va → result in rax
     call    emit_d
     pop     rax
     lea     rsi, [rel .pop_code]
-    mov     edx, 14
+    mov     edx, 13
     call    emit_blob_v2
     pop     rcx
     pop     rsi

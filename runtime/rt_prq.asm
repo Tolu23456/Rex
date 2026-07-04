@@ -20,10 +20,10 @@ rt_prq_blob:
 
     ; find length
     xor     eax, eax
-    mov     rcx, 0x7fffffff
+    mov     rcx, -1
     repne   scasb
-    not     ecx
-    dec     ecx                 ; ecx = strlen
+    not     rcx
+    dec     rcx                 ; rcx = strlen
 
     ; write to stderr (fd=2)
     mov     rax, 1
@@ -94,6 +94,11 @@ rt_dict_set:
     mov     r14, rdx            ; key len
     mov     r15, rcx            ; value
 
+    ; capacity check: if len >= cap, return dict ptr without inserting
+    mov     rcx, [r12 + 8]     ; len
+    cmp     rcx, [r12]         ; len vs cap
+    jae     .table_full
+
     ; hash the key
     mov     rdi, r13
     mov     rsi, r14
@@ -162,6 +167,16 @@ rt_dict_set:
     pop     rbx
     ret
 
+.table_full:
+    mov     rax, r12            ; return dict ptr unchanged
+    add     rsp, 8
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
 ; strcmp helper: rdi=s1, rsi=s2 → rax=0 if equal
 .strcmp_rdi_rsi:
 .cmp_loop:
@@ -191,6 +206,7 @@ rt_dict_get:
     push    r12
     push    r13
     push    r14
+    push    r15
 
     mov     r12, rdi            ; dict ptr
     mov     r13, rsi            ; key ptr
@@ -206,6 +222,8 @@ rt_dict_get:
     mov     rcx, [r12]
     xor     edx, edx
     div     rcx                 ; rdx = slot
+
+    mov     r15, [r12]          ; r15 = cap (probe counter limit)
 
 .get_probe:
     mov     r8, rdx
@@ -226,6 +244,7 @@ rt_dict_get:
     jnz     .get_next
 
     mov     rax, [r9 + 16]      ; found!
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
@@ -233,6 +252,8 @@ rt_dict_get:
     ret
 
 .get_next:
+    dec     r15
+    jz      .not_found
     inc     rdx
     mov     rcx, [r12]
     cmp     rdx, rcx

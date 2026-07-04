@@ -1327,14 +1327,20 @@ parse_prot:
     ; param: type name
     ; type keyword
     call    tok_to_type_code         ; rax = type
+    push    rax                      ; save type code before advance clobbers rax
     advance
     ; name
     cmp     dword [cur_tok], TOK_IDENT
-    jne     .prot_params_done
-
+    jne     .prot_param_bad_name
+    pop     rax                      ; restore type code
     lea     rdi, [tok_ident]
     movzx   rsi, al
     call    var_add                  ; add param as local var
+    jmp     .prot_param_added
+.prot_param_bad_name:
+    pop     rax                      ; discard saved type code
+    jmp     .prot_params_done        ; skip param handling if name is missing
+.prot_param_added:
 
     ; Save var index in rbx (callee-saved, preserved across advance)
     mov     rbx, rax
@@ -1370,8 +1376,14 @@ parse_prot:
     cmp     dword [cur_tok], TOK_ARROW
     jne     .prot_no_ret
     advance
-    call    tok_to_type_code         ; consume return type
+    call    tok_to_type_code         ; rax = return type code
+    push    rax                      ; save return type before advance
     advance
+    pop     rax                      ; restore return type
+    ; Store return type in proto table
+    mov     rcx, r12
+    imul    rcx, PROTO_ENTRY_SIZE
+    mov     [proto_table + rcx + PROTO_RETTYPE_OFF], al
 .prot_no_ret:
 
     ; Expect ':'
@@ -2484,14 +2496,17 @@ parse_term:
     jmp     .term_loop
 
 .do_mod:
-    ; Save LHS const state
+    ; Save LHS const state on stack (nested expr must not corrupt)
+    push    qword [expr_const_val]
     mov     al, [expr_is_const]
-    mov     [lhs_is_const], al
-    mov     rax, [expr_const_val]
-    mov     [lhs_const_val], rax
+    push    rax
     call    codegen_emit_push_rax
     advance
     call    parse_factor
+    ; Restore LHS const state
+    pop     rax
+    mov     [lhs_is_const], al
+    pop     qword [lhs_const_val]
     cmp     byte [lhs_is_const], 0
     je      .do_mod_not_const
     cmp     byte [expr_is_const], 0
@@ -2560,6 +2575,7 @@ parse_factor:
     mov     rdi, [cur_tok_val]
     call    codegen_emit_mov_rax_imm64
     mov     byte [cur_type], TYPE_FLOAT
+    mov     byte [expr_is_const], 0  ; floats cannot be folded with ints
     advance
     pop     rbx
     ret
@@ -3479,7 +3495,7 @@ strcpy_64:
     ; zero remaining bytes up to position 63
 .sc_zero:
     cmp     ecx, 63
-    jge     .sc_nul
+    jg      .sc_nul
     mov     byte [rsi + rcx], 0
     inc     ecx
     jmp     .sc_zero

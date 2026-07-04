@@ -173,7 +173,7 @@ _start:
     mov     rax, SYS_write
     mov     rdi, 2
     lea     rsi, [usage_msg]
-    mov     rdx, 40
+    mov     rdx, 37
     syscall
     mov     rax, SYS_exit
     mov     rdi, 1

@@ -45,7 +45,7 @@ rt_alc_blob:
     lea     rsi, [rel .oom_msg]
     mov     rax, SYS_write
     mov     rdi, 2
-    mov     rdx, 20
+    mov     rdx, 19
     syscall
     mov     rax, SYS_exit
     mov     rdi, 1

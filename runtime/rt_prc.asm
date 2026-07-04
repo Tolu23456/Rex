@@ -134,7 +134,7 @@ rt_prc_blob:
     jnz     .pf_il
 .pf_idone:
     inc     r9
-    lea     rcx, [rbp + 61]
+    lea     rcx, [rbp + 60]     ; stop at NUL (do not include it)
     sub     rcx, r9
     mov     rax, SYS_write
     mov     rdi, 1
