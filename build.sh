@@ -28,6 +28,7 @@ $NASM -f bin -I include/ -o runtime/rt_str_cat.bin runtime/rt_str_cat.asm
 echo "Assembling compiler modules..."
 $NASM -f elf64 -I include/ -o runtime/runtime.o  runtime/runtime.asm
 $NASM -f elf64 -I include/ -o codegen/codegen.o   codegen/codegen.asm
+$NASM -f elf64 -I include/ -o codegen/ra.o        codegen/ra.asm
 $NASM -f elf64 -I include/ -o lexer/lexer.o       lexer/lexer.asm
 $NASM -f elf64 -I include/ -o parser/parser.o     parser/parser.asm
 $NASM -f elf64 -I include/ -o main/main.o         main/main.asm
@@ -36,7 +37,7 @@ $NASM -f elf64 -I include/ -o main/main.o         main/main.asm
 echo "Linking..."
 $LD -static -o rexc \
     main/main.o lexer/lexer.o parser/parser.o \
-    codegen/codegen.o runtime/runtime.o
+    codegen/codegen.o codegen/ra.o runtime/runtime.o
 
 echo "=== Build complete: ./rexc ==="
 

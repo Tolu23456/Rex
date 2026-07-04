@@ -12,6 +12,7 @@ extern parse_program
 extern codegen_init, codegen_finish
 extern codegen_write_headers, codegen_write_runtime, codegen_write_code
 extern cur_tok
+extern ra_prescan, ra_linear_scan, ra_emit_init
 
 ; ============================================================
 ; BSS
@@ -113,6 +114,14 @@ _start:
     mov     rax, 3                  ; SYS_close
     mov     rdi, [src_file_fd]
     syscall
+
+    ; Register allocator: prescan source for variable usage
+    lea     rdi, [src_buffer]
+    mov     rsi, [src_size]
+    call    ra_prescan
+
+    ; Register allocator: linear scan allocation
+    call    ra_linear_scan
 
     ; Open output file
     mov     rax, 2                  ; SYS_open

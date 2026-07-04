@@ -154,6 +154,10 @@ global ctpe_interp, ctpe_ir_emit_b, dse_flush_all, cp_flush_all
 extern rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
 extern rt_prc_data, rt_sip_data, rt_alc_data, rt_prq_data
 extern rt_str_data, rt_inp_data, rt_str_cat_data
+; Register allocator (codegen/ra.asm)
+extern ra_alloc_reg, ra_slot_var_va, ra_alloc_done
+extern ra_on_var_add, ra_load_modrm, ra_store_modrm
+extern ra_emit_spill_all, ra_emit_restore_all
 
 ; ============================================================
 ; BSS — compiler state
@@ -215,6 +219,7 @@ cmp_fused_cc:       resb 1                      ; temp: inverse CC byte for fuse
 ; Register cache: when a variable is "cached" in a register, loads/stores use the register
 reg_cache_var:      resq 1                      ; var_index cached in r15 (-1 = none)
 reg_cache_reg:      resb 1                      ; register code: 1=rcx, 2=rdx, 3=rsi, 4=rdi
+reg_cache_dirty:    resb 1                      ; 1 = cached var was written (needs flush before back-jump)
 
 ; O-I/O-J/O-K: Multi-register variable cache (Phase 2A)
 ; Up to 4 variables cached in callee-saved registers: r15, r14, r13, r12
@@ -397,6 +402,7 @@ codegen_init:
     mov     qword [prot_body_depth],0
     mov     qword [reg_cache_var],  -1         ; no cached variable
     mov     byte  [reg_cache_reg],  0
+    mov     byte  [reg_cache_dirty], 0         ; cache not dirty
     mov     qword [fused_cmp_var_addr], -1
     mov     qword [jump_patch_depth],  0
     mov     qword [end_jump_depth],    0
@@ -681,6 +687,7 @@ codegen_cache_var_begin:
 ; codegen_cache_var_end(rdi=var_va): uncache variable, emit mov [addr], r15 + pop r15
 codegen_cache_var_end:
     mov     qword [reg_cache_var], -1
+    mov     byte [reg_cache_dirty], 0
     ; Emit: mov [abs32], r15 + pop r15
     push    rax
     push    rdi
@@ -896,10 +903,10 @@ codegen_ra_push_r14:
     jmp     .ra_push_nop_loop
 .ra_push_nop_done:
     pop     rcx
-    ; Set ra_var[1] = 0 (placeholder) so O-G fold knows r14 is pinned
-    mov     qword [ra_var + 1*8], 0
-    mov     byte [ra_reg + 1], 14
-    mov     qword [ra_count], 1
+    ; Do NOT set ra_var/ra_count here — they will be set by
+    ; codegen_while_pin_setup or the O-G fold patch if needed.
+    ; Setting ra_count=1 here corrupts the RA cache lookup for all
+    ; variables parsed between here and the fold.
     pop     rax
     ret
 
@@ -1189,7 +1196,7 @@ get_var_va:
     mov     byte [var_addr_is_rbp], 1
     ret
 
-; var_add(rdi=name_ptr, rsi=type) → rax=index (-1 if full)
+; var_add(rdi=name_ptr, rsi=type, rdx=scope) → rax=index (-1 if full)
 var_add:
     push    rbx
     push    rcx
@@ -1226,6 +1233,10 @@ var_add:
     mov     cl, [rsp + 8]       ; original rsi = type (low byte)
     mov     [rbx + VAR_TYPE_OFF], cl
 
+    ; set scope
+    mov     cl, [rsp + 16]      ; original rdx = scope (low byte)
+    mov     [rbx + VAR_SCOPE_OFF], cl
+
     ; set is_init = 0, is_mutable = 0 initially
     mov     byte [rbx + VAR_INIT_OFF], 0
     mov     byte [rbx + VAR_MUT_OFF], 0
@@ -1242,6 +1253,15 @@ var_add:
     pop     rdx
     pop     rcx
     pop     rbx
+
+    ; Notify register allocator: ra_on_var_add(var_idx, name_ptr)
+    mov     r8, rax             ; r8 = var_idx (saved)
+    mov     r9, rdi             ; r9 = name_ptr (restored from pop)
+    mov     rdi, r8             ; rdi = var_idx
+    mov     rsi, r9             ; rsi = name_ptr
+    push    rax
+    call    ra_on_var_add
+    pop     rax
     ret
 
 .full:
@@ -1578,6 +1598,39 @@ codegen_emit_mov_rax_var:
 .ra_check_done:
     pop     rdx
     pop     rcx
+.check_ra_load:
+    ; [S1] Check R8-R11 linear scan allocation for load
+    cmp     byte [ra_alloc_done], 0
+    je      .check_abs_load
+    ; Skip if rbp-relative (protocol locals can't use RA)
+    cmp     byte [var_addr_is_rbp], 0
+    jne     .check_abs_load
+    ; Convert var_va to var_idx: (var_va - VAR_STORAGE_BASE) >> 6
+    mov     rax, rdi
+    sub     rax, VAR_STORAGE_BASE
+    jl      .check_abs_load
+    test    eax, 63
+    jnz     .check_abs_load
+    shr     rax, 6
+    cmp     rax, 256
+    jge     .check_abs_load
+    movzx   ecx, byte [ra_alloc_reg + rax]
+    cmp     cl, RA_NONE
+    je      .check_abs_load
+    ; Variable is in RA register — emit mov rax, RN (3 bytes)
+    pop     rdi
+    pop     rax
+    mov     [rax_holds_va], rdi
+    push    rax
+    movzx   edx, byte [ra_load_modrm + rcx]
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, dl
+    call    emit_b
+    pop     rax
+    ret
 .check_abs_load:
     test    byte [var_addr_is_rbp], 1
     jnz     .rbp_load
@@ -1662,6 +1715,8 @@ codegen_emit_store_rax_to_var:
     ; Check register cache: if rdi == reg_cache_var, emit mov r15, rax (3 bytes)
     cmp     rdi, [reg_cache_var]
     jne     .not_cached_store
+    ; Mark cache as dirty (variable was written)
+    mov     byte [reg_cache_dirty], 1
 
     ; === r15 increment/decrement peephole ===
     ; Pattern: mov rax,r15(3) + add/sub rax,1(4) → inc/dec r15(3) — saves 4 bytes
@@ -1819,6 +1874,39 @@ codegen_emit_store_rax_to_var:
 .ra_store_done:
     pop     rdx
     pop     rcx
+
+.check_ra_store:
+    ; [S1] Check R8-R11 linear scan allocation for store
+    cmp     byte [ra_alloc_done], 0
+    je      .check_abs_store
+    ; Skip if rbp-relative
+    cmp     byte [var_addr_is_rbp], 0
+    jne     .check_abs_store
+    ; Convert var_va to var_idx
+    mov     rax, rdi
+    sub     rax, VAR_STORAGE_BASE
+    jl      .check_abs_store
+    test    eax, 63
+    jnz     .check_abs_store
+    shr     rax, 6
+    cmp     rax, 256
+    jge     .check_abs_store
+    movzx   ecx, byte [ra_alloc_reg + rax]
+    cmp     cl, RA_NONE
+    je      .check_abs_store
+    ; Variable is in RA register — emit mov RN, rax (3 bytes)
+    pop     rdi
+    pop     rax
+    push    rax
+    movzx   edx, byte [ra_store_modrm + rcx]
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, dl
+    call    emit_b
+    pop     rax
+    ret
 
 .check_abs_store:
     test    byte [var_addr_is_rbp], 1
@@ -5347,6 +5435,7 @@ codegen_emit_for_end:
     mov     byte [loop_pin_active], 0
     mov     qword [loop_pin_var_va], -1
     mov     qword [reg_cache_var], -1
+    mov     byte [reg_cache_dirty], 0
     mov     byte [og_fired_in_body], 0
     mov     byte [og_op_code], 0
     mov     byte [oh_mul_fired_in_body], 0
@@ -5643,6 +5732,7 @@ codegen_emit_for_end:
     mov     byte [loop_pin_active], 0
     mov     qword [loop_pin_var_va], -1
     mov     qword [reg_cache_var], -1
+    mov     byte [reg_cache_dirty], 0
     mov     byte [og_fired_in_body], 0
     mov     byte [og_op_code], 0
     mov     byte [oh_mul_fired_in_body], 0
@@ -5746,7 +5836,10 @@ codegen_emit_for_end:
     ; O-A: flush r15 to [var_va] if pin is active for this var
     cmp     byte [loop_pin_active], 0
     je      .for_end_no_flush
-    ; emit: mov [var_va], r15  (4D 89 3C 25 addr32)
+    ; Check if variable uses rbp-relative addressing (protocol frame)
+    cmp     byte [var_addr_is_rbp], 0
+    jne     .for_end_flush_rbp
+    ; emit: mov [abs32], r15  (4D 89 3C 25 addr32)
     push    rax
     mov     al, 0x4d
     call    emit_b
@@ -5759,10 +5852,25 @@ codegen_emit_for_end:
     mov     eax, r14d
     call    emit_d
     pop     rax
+    jmp     .for_end_flush_done
+.for_end_flush_rbp:
+    ; emit: mov [rbp+disp32], r15  (4C 89 7D disp32)
+    push    rax
+    mov     al, 0x4c
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x7d
+    call    emit_b
+    mov     eax, r14d
+    call    emit_d
+    pop     rax
+.for_end_flush_done:
     ; clear pin
     mov     byte [loop_pin_active], 0
     mov     qword [loop_pin_var_va], -1
     mov     qword [reg_cache_var], -1
+    mov     byte [reg_cache_dirty], 0
 
 .for_end_no_flush:
     ; clear rolling flags for next loop
@@ -6074,6 +6182,7 @@ codegen_emit_while_end:
     mov     byte [og_fired_in_body], 0
     mov     byte [loop_pin_active], 0
     mov     qword [reg_cache_var], -1
+    mov     byte [reg_cache_dirty], 0
     mov     qword [rax_holds_va], -1
     ; Patch exit jz (now points past end of what we emitted)
     mov     rdi, r13
@@ -6088,8 +6197,10 @@ codegen_emit_while_end:
     ret
 
 .wfe_fold_skip:
-    ; Normal path: flush register cache before back-jump
+    ; Normal path: flush register cache before back-jump only if dirty
     cmp     qword [reg_cache_var], -1
+    je      .while_no_flush
+    cmp     byte [reg_cache_dirty], 0
     je      .while_no_flush
     push    rax
     push    rdi
@@ -6185,6 +6296,7 @@ codegen_emit_while_end:
     mov     byte [while_pin_active], 0
     mov     byte [og_fired_in_body], 0
     mov     byte [loop_pin_active], 0
+    mov     byte [reg_cache_dirty], 0
     pop     r15
     pop     r14
     pop     r13
@@ -6214,6 +6326,7 @@ codegen_while_pin_setup:
     call    emit_d
     ; Set register cache state
     mov     [reg_cache_var], rdi
+    mov     byte [reg_cache_dirty], 0           ; cache is clean (just loaded)
     mov     byte [loop_pin_active], 1
     mov     byte [while_pin_active], 1
     mov     byte [og_fired_in_body], 0

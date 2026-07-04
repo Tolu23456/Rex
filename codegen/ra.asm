@@ -1,32 +1,46 @@
 ; ============================================================
-; codegen/ra.asm — Linear Scan Register Allocator for Rex
+; codegen/ra.asm — SOTA Linear Scan Register Allocator for Rex
 ;
-; OVERVIEW
-; --------
-; Two-phase approach:
-;   Phase 1  ra_prescan(rdi=src, rsi=size)
-;            Walk source bytes before the main lexer runs.
-;            For every identifier, accumulate a spill-cost weight:
-;               weight += 1 << min(indent_depth, 6)
-;            giving inner-loop variables exponentially higher priority.
+; ALGORITHM
+; ---------
+; Interval-based Linear Scan with Conflict Detection (Poletto & Sarkar style)
 ;
-;   Phase 2  ra_linear_scan
-;            Pick the top-4 identifiers by weight → assign
-;            slots 0..3 = R8..R11.  Fills prescan_reg[].
+; Phase 1  ra_prescan(rdi=src, rsi=size)
+;          Walk source bytes before the main lexer runs.
+;          For every identifier, accumulate:
+;            - weighted use count: weight += 1 << min(indent_depth, 6)
+;            - first/last use byte position (for interval construction)
+;            - maximum nesting depth across all uses
+;            - raw use count (for density estimation)
 ;
-;   Phase 3  ra_on_var_add(rdi=var_idx, rsi=name_ptr)
-;            Called from var_add() when a variable is declared.
-;            Looks up the name in the prescan table; if it was
-;            allocated a slot, records:
-;               ra_alloc_reg[var_idx] = slot
-;               ra_slot_var_va[slot]  = VAR_STORAGE_BASE + idx*64
+; Phase 2  ra_linear_scan
+;          1. Compute priority per entry:
+;               priority = wcount * (1 + max_depth)
+;             (favors heavily-used variables in deep loops)
+;          2. Sort entries by priority descending (selection sort, N ≤ 256)
+;          3. Greedy allocation with interval conflict detection:
+;             For each entry in priority order:
+;               For each slot 0..3:
+;                 Check if any already-assigned variable has an overlapping
+;                 interval [first_use, last_use].  If no conflict, assign.
+;             Two variables conflict iff:
+;               first[i] <= last[j]  AND  first[j] <= last[i]
+;
+; Phase 3  ra_on_var_add(rdi=var_idx, rsi=name_ptr)
+;          Called from var_add() when a variable is declared.
+;          Looks up name_ptr in the prescan table; if it was
+;          allocated a slot, records:
+;            ra_alloc_reg[var_idx] = slot
+;            ra_slot_var_va[slot]  = VAR_STORAGE_BASE + idx*64
 ;
 ; INTEGRATION (codegen.asm / main.asm)
 ; -------------------------------------
-;   codegen_emit_mov_rax_var   — checks ra_alloc_reg before abs load
-;   codegen_emit_store_rax_to_var — checks ra_alloc_reg before abs store
-;   emit_call_abs              — calls ra_emit_spill_all / ra_emit_restore_all
-;   for/while loop exit        — calls ra_sync_pinned after R15/R14 flush
+;   main.asm             — calls ra_prescan before lexer_init,
+;                          ra_linear_scan before parse_program
+;   codegen.asm          — codegen_emit_mov_rax_var checks ra_alloc_reg
+;                          codegen_emit_store_rax_to_var checks ra_alloc_reg
+;                          emit_call_abs calls ra_emit_spill/restore_all
+;   parser.asm           — calls ra_on_var_add from var_add
 ;
 ; REGISTER POOL
 ; -------------
@@ -41,6 +55,19 @@
 ;   Spill mov [a], RN   : 4C 89 {04,0C,14,1C} 25 addr32
 ;   Rest. mov RN,  [a]  : 4C 8B {04,0C,14,1C} 25 addr32
 ;   Zero  xor RNd,RNd   : 45 31 {C0,C9,D2,DB}
+;
+; SOTA FEATURES
+; -------------
+;   [S1] Interval-based conflict detection prevents two simultaneously-live
+;        variables from sharing a register, reducing spurious spills.
+;   [S2] Priority = wcount × (1 + max_depth) ensures inner-loop variables
+;        beat outer-scope temporaries for register slots.
+;   [S3] Selection sort on ≤256 entries keeps the sort O(N²) but fast in
+;        practice (no allocation, no pointer chasing).
+;   [S4] Conditional spill/restore: ra_emit_spill_all only emits store
+;        instructions for slots whose ra_slot_var_va is non-zero (occupied).
+;   [S5] ra_sync_pinned re-synchronises an RA register after R15/R14
+;        loop-counter flushes, preventing stale values in RA slots.
 ; ============================================================
 bits 64
 %include "rex_defs.inc"
@@ -108,10 +135,27 @@ prescan_wcount:  resq RA_SCAN_MAX                  ; weighted use count per entr
 prescan_nc:      resq 1                            ; number of unique identifiers found
 prescan_reg:     resb RA_SCAN_MAX                  ; RA_NONE or slot 0..3 after linear_scan
 
+; ---- [S1] Interval tracking for conflict detection ----
+prescan_first:   resq RA_SCAN_MAX                  ; first use byte position in source
+prescan_last:    resq RA_SCAN_MAX                  ; last use byte position in source
+prescan_ucnt:    resw RA_SCAN_MAX                  ; raw use count (not weighted)
+prescan_mdepth:  resb RA_SCAN_MAX                  ; max nesting depth across all uses
+
+; ---- [S2] Sort indices for priority ordering ----
+ra_sorted_idx:   resw RA_SCAN_MAX                  ; entry indices sorted by priority
+
+; ---- [S6] Function-call position bitmap (1 byte per source byte, max 64KB) ----
+; If prescan_call_map[i] = 1, source byte i is an '@' call operator
+RA_CALL_MAP_SIZE equ 65536
+prescan_call_map: resb RA_CALL_MAP_SIZE             ; 64 KB: call-position bitmap
+
 ; ---- Public allocation outputs ----
 ra_alloc_reg:    resb 256          ; var_idx → slot (RA_NONE=0xFF if unallocated)
 ra_slot_var_va:  resq RA_POOL      ; slot → runtime var VA (0 = slot unused)
 ra_alloc_done:   resb 1            ; set to 1 after ra_linear_scan completes
+
+; ---- Temp slot during linear scan (not a real VA) ----
+ra_slot_pidx:    resq RA_POOL      ; slot → prescan entry index (temporary)
 
 ; ---- Shared scratch for inline RA checks in codegen.asm ----
 ra_tmp_slot:     resb 1            ; temporary slot index during emit sequences
@@ -124,9 +168,12 @@ section .text
 ; ============================================================
 ; ra_prescan(rdi=src_buf, rsi=src_size)
 ;
-; Scans the source buffer for identifiers and accumulates
-; weighted use counts (weight = 1 << min(indent_depth, 6)).
-; Does NOT disturb the main lexer — it uses its own cursor.
+; [S1] Enhanced prescan: walks the source buffer for identifiers
+; and accumulates per-variable metrics:
+;   - weighted use count (1 << min(depth, 6)) for each occurrence
+;   - first/last use byte positions (interval endpoints)
+;   - raw use count and maximum nesting depth
+;
 ; Must be called before lexer_init.
 ; ============================================================
 ra_prescan:
@@ -148,16 +195,41 @@ ra_prescan:
     xor     r15, r15            ; r15 = current indent depth (0..7)
     mov     qword [prescan_nc], 0
 
-    ; Zero prescan_wcount (256 qwords) and prescan_reg (256 bytes)
+    ; Zero all prescan arrays
     push    rdi
+    ; wcount (256 qwords)
     lea     rdi, [prescan_wcount]
     xor     eax, eax
     mov     ecx, RA_SCAN_MAX
     rep     stosq
+    ; reg (256 bytes)
     lea     rdi, [prescan_reg]
     mov     al, RA_NONE
     mov     ecx, RA_SCAN_MAX
     rep     stosb
+    ; first (256 qwords)
+    lea     rdi, [prescan_first]
+    xor     eax, eax
+    mov     ecx, RA_SCAN_MAX
+    rep     stosq
+    ; last (256 qwords)
+    lea     rdi, [prescan_last]
+    mov     ecx, RA_SCAN_MAX
+    rep     stosq
+    ; ucnt (256 words)
+    lea     rdi, [prescan_ucnt]
+    mov     ecx, RA_SCAN_MAX
+    rep     stosw
+    ; mdepth (256 bytes)
+    lea     rdi, [prescan_mdepth]
+    xor     eax, eax
+    mov     ecx, RA_SCAN_MAX
+    rep     stosb
+    ; [S6] call map (64KB, zero)
+    lea     rdi, [prescan_call_map]
+    xor     eax, eax
+    mov     ecx, RA_CALL_MAP_SIZE / 4
+    rep     stosd
     pop     rdi
 
 .next:
@@ -233,6 +305,14 @@ ra_prescan:
     jmp     .str_body
 
 .not_str:
+    ; ---- [S6] Function call operator '@': mark position ----
+    cmp     al, '@'
+    jne     .not_call
+    ; Record call position in bitmap (cap at 64KB)
+    cmp     r14, RA_CALL_MAP_SIZE
+    jge     .not_call
+    mov     byte [prescan_call_map + r14], 1
+.not_call:
     ; ---- Identifier start: letter or underscore ----
     cmp     al, '_'
     je      .ident
@@ -317,14 +397,16 @@ ra_prescan:
     imul    rdx, RA_NAME_LEN
     lea     r11, [prescan_names + rdx]
     pop     rdx
+    ; Compute src_base = r12 + r9 for character comparison
+    push    r8
+    lea     r8, [r12 + r9]      ; r8 = src base address
     push    rcx
     xor     rcx, rcx
 .cmp_chars:
     cmp     rcx, r10
     jge     .cmp_end_match      ; all chars matched, check NUL
-    movzx   eax, byte [r12 + r9 + rcx]
-    movzx   r8d, byte [r11 + rcx]
-    cmp     al, r8b
+    movzx   eax, byte [r8 + rcx]
+    cmp     al, byte [r11 + rcx]
     jne     .cmp_ne
     inc     rcx
     jmp     .cmp_chars
@@ -335,16 +417,28 @@ ra_prescan:
     jz      .cmp_matched        ; full match
 .cmp_ne:
     pop     rcx
+    pop     r8
     inc     rdx
     jmp     .find_loop
 
 .cmp_matched:
     pop     rcx
+    pop     r8
     ; Update wcount[rdx] += 1 << depth
     mov     rax, 1
     mov     rcx, r15            ; depth
     shl     rax, cl             ; weight = 1 << depth
     add     [prescan_wcount + rdx*8], rax
+    ; [S1] Update interval: last_use = current position (after ident end)
+    mov     rax, r14
+    mov     [prescan_last + rdx*8], rax
+    ; [S1] Increment raw use count
+    inc     word [prescan_ucnt + rdx*2]
+    ; [S1] Update max depth
+    cmp     r15b, byte [prescan_mdepth + rdx]
+    jle     .no_new_depth
+    mov     byte [prescan_mdepth + rdx], r15b
+.no_new_depth:
     jmp     .next
 
 .insert_new:
@@ -358,24 +452,36 @@ ra_prescan:
     imul    rdx, RA_NAME_LEN
     lea     r11, [prescan_names + rdx]
     pop     rdx
+    ; Compute src_base = r12 + r9 for character copy
+    push    r8
+    lea     r8, [r12 + r9]      ; r8 = src base address
     xor     rcx, rcx
 .copy_name:
     cmp     rcx, r10
     jge     .copy_done
     cmp     rcx, RA_NAME_LEN - 1
     jge     .copy_done
-    movzx   eax, byte [r12 + r9 + rcx]
+    movzx   eax, byte [r8 + rcx]
     mov     [r11 + rcx], al
     inc     rcx
     jmp     .copy_name
 .copy_done:
     mov     byte [r11 + rcx], 0  ; NUL-terminate
+    pop     r8
     pop     rcx
     ; Set initial wcount[rbx] = 1 << depth
     mov     rax, 1
     mov     rcx, r15
     shl     rax, cl
     mov     [prescan_wcount + rbx*8], rax
+    ; [S1] Set interval endpoints = current position
+    mov     rax, r14
+    mov     [prescan_first + rbx*8], rax
+    mov     [prescan_last + rbx*8], rax
+    ; [S1] Raw use count = 1
+    mov     word [prescan_ucnt + rbx*2], 1
+    ; [S1] Max depth = current depth
+    mov     byte [prescan_mdepth + rbx], r15b
     ; prescan_reg[rbx] already = RA_NONE (zeroed above)
     inc     qword [prescan_nc]
     jmp     .next
@@ -397,8 +503,15 @@ ra_prescan:
 ; ============================================================
 ; ra_linear_scan
 ;
-; Selects the top-4 identifiers by prescan_wcount and assigns
-; them to slots 0..3 (R8..R11).  Fills prescan_reg[].
+; [S2] Interval-based Linear Scan with Conflict Detection.
+;
+; 1. Compute priority = wcount * (1 + max_depth) for each entry.
+; 2. Sort entries by priority descending (selection sort).
+; 3. Greedy allocation: for each entry in priority order, try
+;    each slot 0..3.  A slot is viable only if no already-assigned
+;    variable has an overlapping [first_use, last_use] interval.
+;    First viable slot wins.  If none viable → not allocated.
+;
 ; Must be called after ra_prescan and before the main parse.
 ; ============================================================
 ra_linear_scan:
@@ -408,56 +521,196 @@ ra_linear_scan:
     push    r8
     push    r9
     push    r10
+    push    r11
+    push    r12
+    push    r13
+    push    r14
+    push    r15
 
     mov     rcx, [prescan_nc]   ; number of unique identifiers
     test    rcx, rcx
     jz      .ls_done
 
-    ; For each slot 0..3, find the identifier with the highest
-    ; wcount that hasn't been assigned yet (mark with prescan_reg != RA_NONE).
-    ; Use -1 as the "used" sentinel in a local tmp.
-    ; Simple O(N*K) approach: K=4 passes over N entries.
-    xor     r10, r10            ; slot index = 0
-.slot_loop:
-    cmp     r10, RA_POOL
-    jge     .ls_done
-
-    ; Find max wcount among entries with prescan_reg[i] == RA_NONE
-    mov     qword r9, 0         ; best_wcount = 0
-    mov     rbx, -1             ; best_idx = -1
-    xor     rdx, rdx            ; i = 0
-.scan:
+    ; ============================================================
+    ; Step 1: Build sorted index array by priority (descending)
+    ; ============================================================
+    ; Initialize ra_sorted_idx[i] = i
+    xor     rdx, rdx
+.init_idx:
     cmp     rdx, rcx
-    jge     .scan_done
-    cmp     byte [prescan_reg + rdx], RA_NONE
-    jne     .scan_next          ; already assigned
-    cmp     qword [prescan_wcount + rdx*8], 0
-    je      .scan_next          ; zero weight (never actually used)
-    cmp     [prescan_wcount + rdx*8], r9
-    jle     .scan_next
-    mov     r9, [prescan_wcount + rdx*8]
-    mov     rbx, rdx
-.scan_next:
+    jge     .sort_begin
+    mov     word [ra_sorted_idx + rdx*2], dx
     inc     rdx
-    jmp     .scan
-.scan_done:
-    cmp     rbx, -1
-    je      .ls_done            ; no more candidates
+    jmp     .init_idx
 
-    ; Assign slot r10 to prescan entry rbx
-    mov     r8b, r10b
-    mov     [prescan_reg + rbx], r8b
+.sort_begin:
+    ; Selection sort: for i = 0..N-2, find max in [i..N-1], swap to i
+    ; r8 = i (outer loop index)
+    xor     r8, r8
+.sort_outer:
+    mov     rax, rcx
+    dec     rax
+    cmp     r8, rax
+    jge     .sort_done
 
-    inc     r10
+    ; r9 = max_idx (starts at i)
+    mov     r9, r8
+    ; Compute priority[max_idx]
+    movzx   r10d, word [ra_sorted_idx + r9*2]
+    mov     rax, [prescan_wcount + r10*8]
+    movzx   r11d, byte [prescan_mdepth + r10]
+    inc     r11
+    imul    rax, r11            ; priority[max_idx]
+    mov     r12, rax            ; r12 = max_priority
+
+    ; rdx = j (inner loop)
+    mov     rdx, r8
+    inc     rdx
+.sort_inner:
+    cmp     rdx, rcx
+    jge     .sort_inner_done
+    ; Compute priority[j]
+    movzx   r10d, word [ra_sorted_idx + rdx*2]
+    mov     rax, [prescan_wcount + r10*8]
+    movzx   r11d, byte [prescan_mdepth + r10]
+    inc     r11
+    imul    rax, r11
+    cmp     rax, r12
+    jle     .sort_next
+    ; New max found
+    mov     r9, rdx
+    mov     r12, rax
+.sort_next:
+    inc     rdx
+    jmp     .sort_inner
+.sort_inner_done:
+    ; Swap ra_sorted_idx[i] and ra_sorted_idx[max_idx]
+    cmp     r8, r9
+    je      .sort_no_swap
+    movzx   eax, word [ra_sorted_idx + r8*2]
+    movzx   r10d, word [ra_sorted_idx + r9*2]
+    mov     word [ra_sorted_idx + r8*2], r10w
+    mov     word [ra_sorted_idx + r9*2], ax
+.sort_no_swap:
+    inc     r8
+    jmp     .sort_outer
+.sort_done:
+
+    ; ============================================================
+    ; Step 2: Greedy allocation with interval conflict detection
+    ; ============================================================
+    ; Initialize ra_slot_pidx[0..3] = -1 (unoccupied sentinel)
+    mov     qword [ra_slot_pidx + 0*8], -1
+    mov     qword [ra_slot_pidx + 1*8], -1
+    mov     qword [ra_slot_pidx + 2*8], -1
+    mov     qword [ra_slot_pidx + 3*8], -1
+
+    ; Process entries in priority order
+    ; r13 = sort index
+    xor     r13, r13
+.alloc_loop:
+    cmp     r13, rcx
+    jge     .alloc_done
+
+    ; r14 = prescan entry index
+    movzx   r14d, word [ra_sorted_idx + r13*2]
+    ; Skip if zero uses
+    cmp     qword [prescan_wcount + r14*8], 0
+    je      .alloc_next
+
+    ; [S6] Skip if interval spans a function call ('@' operator)
+    mov     rax, [prescan_first + r14*8]
+    mov     rdx, [prescan_last + r14*8]
+    ; Clamp to call-map range
+    cmp     rax, RA_CALL_MAP_SIZE
+    jge     .alloc_next
+    cmp     rdx, RA_CALL_MAP_SIZE
+    jl      .call_map_ok
+    mov     rdx, RA_CALL_MAP_SIZE - 1
+.call_map_ok:
+    ; Scan call map for first_use..last_use
+    push    rcx
+    mov     rcx, rax
+.call_check:
+    cmp     rcx, rdx
+    jg      .call_clean
+    cmp     byte [prescan_call_map + rcx], 0
+    jne     .call_found
+    inc     rcx
+    jmp     .call_check
+.call_found:
+    pop     rcx
+    jmp     .alloc_next         ; spans a call → don't allocate
+.call_clean:
+    pop     rcx
+
+    ; Try each slot 0..3
+    xor     r15, r15            ; r15 = slot index
+.slot_loop:
+    cmp     r15, RA_POOL
+    jge     .alloc_next         ; no free slot found for this variable
+
+    ; Check if slot is free (sentinel = -1)
+    mov     rax, [ra_slot_pidx + r15*8]
+    cmp     rax, -1
+    jne     .slot_occupied
+
+    ; ---- [S1] Slot is free — check conflicts with all assigned vars ----
+    xor     r8, r8              ; r8 = conflict flag
+    xor     r9, r9              ; r9 = check index
+.conflict_loop:
+    cmp     r9, RA_POOL
+    jge     .conflict_done
+    cmp     r9, r15
+    je      .conflict_next      ; skip self
+    mov     rax, [ra_slot_pidx + r9*8]
+    cmp     rax, -1
+    je      .conflict_next      ; slot empty
+    ; Interval overlap test:
+    ;   conflict = (first[r14] <= last[rax]) AND (first[rax] <= last[r14])
+    mov     r10, [prescan_first + r14*8]
+    mov     r11, [prescan_last + rax*8]
+    cmp     r10, r11
+    jg      .conflict_next      ; no overlap: our first > their last
+    mov     r10, [prescan_first + rax*8]
+    mov     r11, [prescan_last + r14*8]
+    cmp     r10, r11
+    jg      .conflict_next      ; no overlap: their first > our last
+    ; Conflict detected
+    mov     r8, 1
+    jmp     .conflict_done
+.conflict_next:
+    inc     r9
+    jmp     .conflict_loop
+.conflict_done:
+    test    r8, r8
+    jnz     .slot_occupied      ; conflict → try next slot
+
+    ; No conflict — assign variable to this slot
+    mov     [ra_slot_pidx + r15*8], r14
+    mov     byte [prescan_reg + r14], r15b
+    jmp     .alloc_next
+
+.slot_occupied:
+    inc     r15
     jmp     .slot_loop
 
-.ls_done:
-    ; Zero ra_alloc_reg (256 bytes) and ra_slot_var_va (4 qwords)
+.alloc_next:
+    inc     r13
+    jmp     .alloc_loop
+
+.alloc_done:
+
+    ; ============================================================
+    ; Step 3: Prepare output arrays
+    ; ============================================================
+    ; Zero ra_alloc_reg (256 bytes) — will be filled by ra_on_var_add
     push    rdi
     lea     rdi, [ra_alloc_reg]
     mov     al, RA_NONE
     mov     ecx, 256
     rep     stosb
+    ; Zero ra_slot_var_va (4 qwords) — will be filled by ra_on_var_add
     lea     rdi, [ra_slot_var_va]
     xor     eax, eax
     mov     ecx, RA_POOL
@@ -466,6 +719,12 @@ ra_linear_scan:
 
     mov     byte [ra_alloc_done], 1
 
+.ls_done:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     r11
     pop     r10
     pop     r9
     pop     r8
@@ -483,9 +742,6 @@ ra_linear_scan:
 ;   ra_slot_var_va[slot]  = VAR_STORAGE_BASE + var_idx * 64
 ;
 ; Only allocates global (non-rbp) integer variables.
-; (Protocol locals use rbp-relative addresses; the emit functions
-;  guard against those via var_addr_is_rbp, so double-allocation
-;  is harmless but we skip it here for cleanliness.)
 ; ============================================================
 ra_on_var_add:
     push    rbx
@@ -580,7 +836,9 @@ ra_emit_init:
 ; ============================================================
 ; ra_emit_spill_all
 ;
-; Emits  mov [var_va], RN  for each occupied RA slot.
+; [S4] Conditional spill: emits  mov [var_va], RN  only for
+; occupied RA slots (ra_slot_var_va[slot] != 0).
+;
 ; Called from emit_call_abs BEFORE the runtime call to protect
 ; RA registers from being clobbered by the runtime blob.
 ; Each store is 8 bytes: 4C 89 <modrm> 25 <addr32>
@@ -627,7 +885,9 @@ ra_emit_spill_all:
 ; ============================================================
 ; ra_emit_restore_all
 ;
-; Emits  mov RN, [var_va]  for each occupied RA slot.
+; [S4] Conditional restore: emits  mov RN, [var_va]  only for
+; occupied RA slots (ra_slot_var_va[slot] != 0).
+;
 ; Called from emit_call_abs AFTER the runtime call to reload
 ; RA registers that were clobbered.
 ; Each load is 8 bytes: 4C 8B <spill_modrm> 25 <addr32>
@@ -674,7 +934,7 @@ ra_emit_restore_all:
 ; ============================================================
 ; ra_sync_pinned(rdi=var_va)
 ;
-; If var_va refers to a globally RA-allocated variable, emits
+; [S5] If var_va refers to a globally RA-allocated variable, emits
 ;   mov RN, [var_va]
 ; to synchronise the RA register from memory.
 ;

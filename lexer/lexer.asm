@@ -72,6 +72,7 @@ kwds:
     db  3, "cap",         TOK_CAP
     db  4, "swap",        TOK_SWAP
     db  6, "typeof",      TOK_TYPEOF
+    db  5, "scope",       TOK_SCOPE
     db  3, "abs",         TOK_ABS
     db  6, "assert",      TOK_ASSERT
     db  11, "unreachable", TOK_UNREACHABLE
@@ -1015,32 +1016,68 @@ scan_operator:
 .c4:
     cmp     al, '*'
     jne     .c5
+    cmp     cl, '='
+    je      .stareq
     mov     dword [cur_tok], TOK_STAR
+    jmp     .single
+.stareq:
+    mov     dword [cur_tok], TOK_STAR_EQ
+    inc     r12
     jmp     .single
 .c5:
     cmp     al, '/'
     jne     .c6
+    cmp     cl, '='
+    je      .slasheq
     mov     dword [cur_tok], TOK_SLASH
+    jmp     .single
+.slasheq:
+    mov     dword [cur_tok], TOK_SLASH_EQ
+    inc     r12
     jmp     .single
 .c6:
     cmp     al, '%'
     jne     .c7
+    cmp     cl, '='
+    je      .percenteq
     mov     dword [cur_tok], TOK_PERCENT
+    jmp     .single
+.percenteq:
+    mov     dword [cur_tok], TOK_PERCENT_EQ
+    inc     r12
     jmp     .single
 .c7:
     cmp     al, '&'
     jne     .c8
+    cmp     cl, '='
+    je      .ampeq
     mov     dword [cur_tok], TOK_AMP
+    jmp     .single
+.ampeq:
+    mov     dword [cur_tok], TOK_AMP_EQ
+    inc     r12
     jmp     .single
 .c8:
     cmp     al, '|'
     jne     .c9
+    cmp     cl, '='
+    je      .pipeeq
     mov     dword [cur_tok], TOK_PIPE
+    jmp     .single
+.pipeeq:
+    mov     dword [cur_tok], TOK_PIPE_EQ
+    inc     r12
     jmp     .single
 .c9:
     cmp     al, '^'
     jne     .c10
+    cmp     cl, '='
+    je      .careteq
     mov     dword [cur_tok], TOK_CARET
+    jmp     .single
+.careteq:
+    mov     dword [cur_tok], TOK_CARET_EQ
+    inc     r12
     jmp     .single
 .c10:
     cmp     al, '~'
@@ -1148,12 +1185,18 @@ scan_operator:
 
 .plus_check:
     cmp     cl, '+'
-    jne     .single_plus
-    mov     dword [cur_tok], TOK_PLUSPLUS
+    je      .plusplus
+    cmp     cl, '='
+    je      .pluseq
+    mov     dword [cur_tok], TOK_PLUS
+    jmp     .single
+.pluseq:
+    mov     dword [cur_tok], TOK_PLUS_EQ
     inc     r12
     jmp     .single
-.single_plus:
-    mov     dword [cur_tok], TOK_PLUS
+.plusplus:
+    mov     dword [cur_tok], TOK_PLUSPLUS
+    inc     r12
     jmp     .single
 
 .minus_check:
@@ -1161,6 +1204,8 @@ scan_operator:
     je      .arrow
     cmp     cl, '-'
     je      .minusminus
+    cmp     cl, '='
+    je      .minuseq
     mov     dword [cur_tok], TOK_MINUS
     jmp     .single
 .arrow:
@@ -1169,6 +1214,10 @@ scan_operator:
     jmp     .single
 .minusminus:
     mov     dword [cur_tok], TOK_MINUSMINUS
+    inc     r12
+    jmp     .single
+.minuseq:
+    mov     dword [cur_tok], TOK_MINUS_EQ
     inc     r12
     jmp     .single
 

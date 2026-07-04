@@ -95,13 +95,22 @@
 ;   [40]     is_init (byte: 0=uninit, 1=init)
 ;   [41]     is_mutable (byte)
 ;   [42]     type (byte — see TYPE_* below)
-;   [43..63] reserved
+;   [43]     scope (byte — see SCOPE_* below)
+;   [44..63] reserved
 ; ----------------------------------------------------------------
 %define VAR_NAME_OFF        0
 %define VAR_VAL_OFF         32
 %define VAR_INIT_OFF        40
 %define VAR_MUT_OFF         41
 %define VAR_TYPE_OFF        42
+%define VAR_SCOPE_OFF       43
+
+; ----------------------------------------------------------------
+; Scope codes
+; ----------------------------------------------------------------
+%define SCOPE_GLOBAL        0   ; top-level, outside any protocol
+%define SCOPE_LOCAL         1   ; inside a protocol body
+%define SCOPE_BLOCK         2   ; inside a block (if/for/while) with __ prefix
 
 ; ----------------------------------------------------------------
 ; Protocol table entry layout (48 bytes per entry)
@@ -222,7 +231,8 @@
 %define TOK_CAP             79
 %define TOK_SWAP            80
 %define TOK_TYPEOF          81
-%define TOK_ABS             82
+%define TOK_SCOPE           82   ; scope(var) → "global", "local", or "block"
+%define TOK_ABS             83
 %define TOK_ASSERT          83
 %define TOK_UNREACHABLE     84
 %define TOK_MEMO_RESET      85
@@ -258,6 +268,16 @@
 
 ; Flip keyword (in-place bool negation)
 %define TOK_FLIP            105
+
+; Compound assignment operators
+%define TOK_PLUS_EQ         121   ; +=
+%define TOK_MINUS_EQ        122   ; -=
+%define TOK_STAR_EQ         123   ; *=
+%define TOK_SLASH_EQ        124   ; /=
+%define TOK_PERCENT_EQ      125   ; %=
+%define TOK_AMP_EQ          126   ; &=
+%define TOK_PIPE_EQ         127   ; |=
+%define TOK_CARET_EQ        128   ; ^=
 
 ; Legacy: unknown (random bool via rdrand) — kept for dead-code path in parse_factor
 %define TOK_UNKNOWN         99

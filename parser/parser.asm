@@ -127,6 +127,11 @@ err_undecl_prot:    db "rex: undeclared protocol", 0
 err_bad_stmt:       db "rex: unknown statement", 0
 err_no_newline:     db "rex: expected newline", 0
 
+; Scope strings for scope() built-in
+scope_global_str: db "global", 0
+scope_local_str:  db "local", 0
+scope_block_str:  db "block", 0
+
 section .text
 
 ; ============================================================
@@ -604,6 +609,19 @@ parse_decl:
     ; Add to var table
     lea     rdi, [tmp_name]
     movzx   rsi, byte [tmp_type]
+    ; Determine scope: SCOPE_LOCAL if in_proto, else SCOPE_GLOBAL
+    xor     edx, edx                ; edx = SCOPE_GLOBAL (0)
+    cmp     byte [in_proto], 0
+    je      .decl_scope_ok
+    mov     dl, SCOPE_LOCAL         ; edx = SCOPE_LOCAL (1)
+.decl_scope_ok:
+    ; Check for __ prefix → SCOPE_BLOCK
+    cmp     byte [tmp_name], '_'
+    jne     .decl_not_block
+    cmp     byte [tmp_name+1], '_'
+    jne     .decl_not_block
+    mov     dl, SCOPE_BLOCK         ; edx = SCOPE_BLOCK (2)
+.decl_not_block:
     call    var_add
     mov     r13, rax                 ; r13 = var index
 
@@ -679,11 +697,12 @@ parse_decl:
     ret
 
 ; ============================================================
-; parse_infer_decl — "name = expr" (type-inferred declaration)
+; parse_infer_decl — "name = expr" or "name OP= expr" (type-inferred declaration)
 ; ============================================================
 parse_infer_decl:
     push    rbx
     push    r12
+    push    r13
 
     ; Current token is IDENT
     lea     rdi, [tok_ident]
@@ -691,10 +710,45 @@ parse_infer_decl:
     call    strcpy_64
     advance                          ; consume name
 
-    ; Expect '='
+    ; Find variable BEFORE parse_expr
+    lea     rdi, [tmp_name]
+    call    var_find
+    cmp     rax, -1
+    je      .infer_new_var
+
+    ; Variable exists - check for compound assignment
+    mov     r12, rax                 ; r12 = var index
+    mov     eax, [cur_tok]
+    cmp     eax, TOK_EQ
+    je      .infer_simple_assign
+
+    ; Check for compound assignment operators
+    cmp     eax, TOK_PLUS_EQ
+    je      .infer_compound
+    cmp     eax, TOK_MINUS_EQ
+    je      .infer_compound
+    cmp     eax, TOK_STAR_EQ
+    je      .infer_compound
+    cmp     eax, TOK_SLASH_EQ
+    je      .infer_compound
+    cmp     eax, TOK_PERCENT_EQ
+    je      .infer_compound
+    cmp     eax, TOK_AMP_EQ
+    je      .infer_compound
+    cmp     eax, TOK_PIPE_EQ
+    je      .infer_compound
+    cmp     eax, TOK_CARET_EQ
+    je      .infer_compound
+
+    ; Not an assignment, just an identifier statement (e.g., function call)
+    jmp     .infer_done
+
+.infer_new_var:
+    ; New variable - check for simple assignment only
     cmp     dword [cur_tok], TOK_EQ
     jne     .infer_done
 
+.infer_simple_assign:
     advance                          ; consume '='
 
     ; Parse expr
@@ -709,6 +763,12 @@ parse_infer_decl:
     ; Add with inferred type
     lea     rdi, [tmp_name]
     movzx   rsi, byte [cur_type]
+    ; Determine scope: SCOPE_LOCAL if in_proto, else SCOPE_GLOBAL
+    xor     edx, edx                ; edx = SCOPE_GLOBAL (0)
+    cmp     byte [in_proto], 0
+    je      .infer_add_scope_ok
+    mov     dl, SCOPE_LOCAL         ; edx = SCOPE_LOCAL (1)
+.infer_add_scope_ok:
     call    var_add
     mov     r12, rax
     jmp     .infer_store
@@ -729,6 +789,90 @@ parse_infer_decl:
     mov     cl, [cur_type]
     mov     [rax + VAR_TYPE_OFF], cl
     mov     byte [rax + VAR_INIT_OFF], 1
+    jmp     .infer_done
+
+.infer_compound:
+    ; Compound assignment: var OP= expr
+    ; r12 = var index (already set)
+    mov     r13d, [cur_tok]         ; save compound operator
+    advance                          ; consume OP=
+
+    ; Load current value of variable into rax
+    mov     rdi, r12
+    call    get_var_va
+    mov     rdi, rax
+    call    codegen_emit_mov_rax_var
+
+    ; Save LHS in rbx
+    call    codegen_emit_mov_rbx_rax
+
+    ; Parse RHS expression
+    call    parse_expr
+
+    ; Apply operator
+    cmp     r13d, TOK_PLUS_EQ
+    je      .ca_add
+    cmp     r13d, TOK_MINUS_EQ
+    je      .ca_sub
+    cmp     r13d, TOK_STAR_EQ
+    je      .ca_mul
+    cmp     r13d, TOK_SLASH_EQ
+    je      .ca_div
+    cmp     r13d, TOK_PERCENT_EQ
+    je      .ca_mod
+    cmp     r13d, TOK_AMP_EQ
+    je      .ca_and
+    cmp     r13d, TOK_PIPE_EQ
+    je      .ca_or
+    cmp     r13d, TOK_CARET_EQ
+    je      .ca_xor
+    jmp     .infer_done
+
+.ca_add:
+    xchg    rax, rbx
+    call    codegen_emit_add_rax_rbx
+    jmp     .ca_store
+.ca_sub:
+    xchg    rax, rbx
+    call    codegen_emit_sub_rax_rbx
+    jmp     .ca_store
+.ca_mul:
+    xchg    rax, rbx
+    call    codegen_emit_imul_rax_rbx
+    jmp     .ca_store
+.ca_div:
+    xchg    rax, rbx
+    call    codegen_emit_idiv_rbx_by_rax
+    jmp     .ca_store
+.ca_mod:
+    xchg    rax, rbx
+    call    codegen_emit_imod_rbx_by_rax
+    jmp     .ca_store
+.ca_and:
+    xchg    rax, rbx
+    call    codegen_emit_bitwise_and
+    jmp     .ca_store
+.ca_or:
+    xchg    rax, rbx
+    call    codegen_emit_bitwise_or
+    jmp     .ca_store
+.ca_xor:
+    xchg    rax, rbx
+    call    codegen_emit_bitwise_xor
+    jmp     .ca_store
+
+.ca_store:
+    ; Store result back to variable
+    mov     rdi, r12
+    call    get_var_va
+    mov     rdi, rax
+    call    codegen_emit_store_rax_to_var
+
+    ; Update init flag
+    mov     rax, r12
+    shl     rax, 6
+    lea     rax, [var_table + rax]
+    mov     byte [rax + VAR_INIT_OFF], 1
 
 .infer_done:
     cmp     dword [cur_tok], TOK_NEWLINE
@@ -736,16 +880,18 @@ parse_infer_decl:
     advance
 
 .infer_ret:
+    pop     r13
     pop     r12
     pop     rbx
     ret
 
 ; ============================================================
-; parse_assign — ":ident = expr"
+; parse_assign — ":ident = expr" or ":ident OP= expr"
 ; ============================================================
 parse_assign:
     push    rbx
     push    r12
+    push    r13
 
     advance                          ; consume ':'
 
@@ -758,10 +904,32 @@ parse_assign:
     call    strcpy_64
     advance                          ; consume name
 
-    ; Expect '='
-    cmp     dword [cur_tok], TOK_EQ
-    jne     .assign_err
+    ; Check for simple assignment or compound assignment
+    mov     eax, dword [cur_tok]
+    cmp     eax, TOK_EQ
+    je      .simple_assign
 
+    ; Check for compound assignment operators
+    cmp     eax, TOK_PLUS_EQ
+    je      .compound_assign
+    cmp     eax, TOK_MINUS_EQ
+    je      .compound_assign
+    cmp     eax, TOK_STAR_EQ
+    je      .compound_assign
+    cmp     eax, TOK_SLASH_EQ
+    je      .compound_assign
+    cmp     eax, TOK_PERCENT_EQ
+    je      .compound_assign
+    cmp     eax, TOK_AMP_EQ
+    je      .compound_assign
+    cmp     eax, TOK_PIPE_EQ
+    je      .compound_assign
+    cmp     eax, TOK_CARET_EQ
+    je      .compound_assign
+
+    jmp     .assign_err
+
+.simple_assign:
     advance                          ; consume '='
 
     ; Find variable BEFORE parse_expr — parse_expr can overwrite tmp_name
@@ -787,11 +955,104 @@ parse_assign:
     lea     rax, [var_table + rax]
     mov     byte [rax + VAR_INIT_OFF], 1
 
+    jmp     .assign_nl
+
+.compound_assign:
+    ; Compound assignment: :var OP= expr
+    ; Find variable BEFORE parse_expr
+    lea     rdi, [tmp_name]
+    call    var_find
+    cmp     rax, -1
+    je      .assign_err             ; undeclared
+    mov     r12, rax                 ; r12 = var index
+
+    mov     r13d, [cur_tok]         ; save compound operator
+    advance                          ; consume OP=
+
+    ; Load current value of variable into rax
+    mov     rdi, r12
+    call    get_var_va
+    mov     rdi, rax
+    call    codegen_emit_mov_rax_var
+
+    ; Save LHS in rbx
+    call    codegen_emit_mov_rbx_rax
+
+    ; Parse RHS expression
+    call    parse_expr
+
+    ; Apply operator
+    cmp     r13d, TOK_PLUS_EQ
+    je      .ca_add
+    cmp     r13d, TOK_MINUS_EQ
+    je      .ca_sub
+    cmp     r13d, TOK_STAR_EQ
+    je      .ca_mul
+    cmp     r13d, TOK_SLASH_EQ
+    je      .ca_div
+    cmp     r13d, TOK_PERCENT_EQ
+    je      .ca_mod
+    cmp     r13d, TOK_AMP_EQ
+    je      .ca_and
+    cmp     r13d, TOK_PIPE_EQ
+    je      .ca_or
+    cmp     r13d, TOK_CARET_EQ
+    je      .ca_xor
+    jmp     .assign_nl
+
+.ca_add:
+    xchg    rax, rbx
+    call    codegen_emit_add_rax_rbx
+    jmp     .ca_store
+.ca_sub:
+    xchg    rax, rbx
+    call    codegen_emit_sub_rax_rbx
+    jmp     .ca_store
+.ca_mul:
+    xchg    rax, rbx
+    call    codegen_emit_imul_rax_rbx
+    jmp     .ca_store
+.ca_div:
+    xchg    rax, rbx
+    call    codegen_emit_idiv_rbx_by_rax
+    jmp     .ca_store
+.ca_mod:
+    xchg    rax, rbx
+    call    codegen_emit_imod_rbx_by_rax
+    jmp     .ca_store
+.ca_and:
+    xchg    rax, rbx
+    call    codegen_emit_bitwise_and
+    jmp     .ca_store
+.ca_or:
+    xchg    rax, rbx
+    call    codegen_emit_bitwise_or
+    jmp     .ca_store
+.ca_xor:
+    xchg    rax, rbx
+    call    codegen_emit_bitwise_xor
+    jmp     .ca_store
+
+.ca_store:
+    ; Store result back to variable
+    mov     rdi, r12
+    call    get_var_va
+    mov     rdi, rax
+    call    codegen_emit_store_rax_to_var
+
+    ; Update init flag
+    mov     rax, r12
+    shl     rax, 6
+    lea     rax, [var_table + rax]
+    mov     byte [rax + VAR_INIT_OFF], 1
+
+.assign_nl:
     cmp     dword [cur_tok], TOK_NEWLINE
     jne     .assign_ret
     advance
 
 .assign_ret:
+    pop     r13
     pop     r12
     pop     rbx
     ret
@@ -968,8 +1229,7 @@ parse_while:
 
     advance                          ; consume 'while'
 
-    ; Phase 2A: Emit push r14 + NOP placeholder BEFORE loop_start is saved
-    ; This ensures back-jump goes to condition check, not push r14
+    ; Emit push r14 + NOP placeholder BEFORE loop_start is saved
     call    codegen_ra_push_r14
 
     ; Save loop start (after push r14, before condition)
@@ -1116,7 +1376,16 @@ parse_for:
 
     lea     rdi, [tmp_name]
     mov     rsi, TYPE_INT
+    mov     rdx, SCOPE_BLOCK        ; loop variable is block-scoped
     call    var_add
+    ; If inside protocol, assign rbp-relative offset for local
+    cmp     byte [in_proto], 0
+    je      .for_found_var
+    mov     r12, rax                ; save var index
+    mov     rax, [proto_local_offset]
+    mov     [var_rbp_offsets + r12*8], rax
+    sub     qword [proto_local_offset], 8
+    mov     rax, r12                ; restore var index
 
 .for_found_var:
     mov     r12, rax                ; r12 = var index
@@ -1156,7 +1425,16 @@ parse_for:
 
     lea     rdi, [tmp_name]
     mov     rsi, TYPE_INT
+    mov     rdx, SCOPE_BLOCK        ; loop variable is block-scoped
     call    var_add
+    ; If inside protocol, assign rbp-relative offset for local
+    cmp     byte [in_proto], 0
+    je      .for_found_var2
+    mov     rbx, rax                ; save var index
+    mov     rax, [proto_local_offset]
+    mov     [var_rbp_offsets + rbx*8], rax
+    sub     qword [proto_local_offset], 8
+    mov     rax, rbx                ; restore var index
 
 .for_found_var2:
     mov     rbx, rax
@@ -1204,6 +1482,7 @@ parse_for:
     jne     .for_each_found
     lea     rdi, [tmp_name]
     mov     rsi, TYPE_INT
+    mov     rdx, SCOPE_BLOCK        ; loop variable is block-scoped
     call    var_add
 .for_each_found:
     mov     r12, rax
@@ -1226,6 +1505,7 @@ parse_for:
     jne     .for_each_temp_found
     lea     rdi, [rel each_end_name]
     mov     rsi, TYPE_INT
+    mov     rdx, SCOPE_BLOCK        ; temp variable is block-scoped
     call    var_add
 .for_each_temp_found:
     push    rax
@@ -1335,6 +1615,7 @@ parse_prot:
     pop     rax                      ; restore type code
     lea     rdi, [tok_ident]
     movzx   rsi, al
+    mov     rdx, SCOPE_LOCAL         ; protocol parameter is local-scoped
     call    var_add                  ; add param as local var
     jmp     .prot_param_added
 .prot_param_bad_name:
@@ -1965,6 +2246,7 @@ parse_when:
     jne     .when_tmp_found
     lea     rdi, [rel when_tmp_name]
     mov     rsi, TYPE_INT
+    mov     rdx, SCOPE_LOCAL         ; temp variable is local-scoped
     call    var_add
 .when_tmp_found:
     mov     r13, rax
@@ -3370,6 +3652,59 @@ parse_factor:
     ret
 
 .pf_not_typeof:
+    ; scope(var)
+    cmp     eax, TOK_SCOPE
+    jne     .pf_not_scope
+    advance
+    cmp     dword [cur_tok], TOK_LPAREN
+    jne     .pf_scope_np
+    advance
+.pf_scope_np:
+    cmp     dword [cur_tok], TOK_IDENT
+    jne     .pf_scope_default
+    lea     rdi, [tok_ident]
+    call    var_find
+    cmp     rax, -1
+    je      .pf_scope_default
+    ; Get scope from var_table
+    shl     rax, 6
+    lea     rax, [var_table + rax]
+    movzx   r12d, byte [rax + VAR_SCOPE_OFF]  ; save scope in r12 (callee-saved)
+    advance
+    cmp     dword [cur_tok], TOK_RPAREN
+    jne     .pf_scope_nc
+    advance
+.pf_scope_nc:
+    ; Return scope string based on scope code
+    cmp     r12d, SCOPE_GLOBAL
+    je      .pf_scope_global
+    cmp     r12d, SCOPE_LOCAL
+    je      .pf_scope_local
+    ; SCOPE_BLOCK
+    lea     rdi, [scope_block_str]
+    call    codegen_emit_str_rax
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+.pf_scope_global:
+    lea     rdi, [scope_global_str]
+    call    codegen_emit_str_rax
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+.pf_scope_local:
+    lea     rdi, [scope_local_str]
+    call    codegen_emit_str_rax
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+.pf_scope_default:
+    lea     rdi, [scope_global_str]
+    call    codegen_emit_str_rax
+    mov     byte [cur_type], TYPE_STR
+    pop     rbx
+    ret
+.pf_not_scope:
     ; Default: emit 0 for unrecognized factor
     mov     rdi, 0
     call    codegen_emit_mov_rax_imm64

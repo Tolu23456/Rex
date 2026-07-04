@@ -3,6 +3,8 @@ LD      = ld
 NFLAGS  = -f elf64 -I include/
 BFLAGS  = -f bin  -I include/
 LFLAGS  = -static
+PREFIX  ?= /usr/local
+DESTDIR ?=
 
 BIN_DEPS = runtime/rt_pri.bin runtime/rt_prs.bin runtime/rt_prb.bin \
            runtime/rt_prf.bin runtime/rt_prc.bin runtime/rt_sip.bin \
@@ -10,7 +12,7 @@ BIN_DEPS = runtime/rt_pri.bin runtime/rt_prs.bin runtime/rt_prb.bin \
            runtime/rt_inp.bin runtime/rt_str_cat.bin
 
 OBJ = main/main.o lexer/lexer.o parser/parser.o \
-      codegen/codegen.o runtime/runtime.o
+      codegen/codegen.o codegen/ra.o runtime/runtime.o
 
 TARGET = rexc
 
@@ -37,6 +39,9 @@ parser/parser.o: parser/parser.asm include/rex_defs.inc
 	$(NASM) $(NFLAGS) -o $@ $<
 
 codegen/codegen.o: codegen/codegen.asm include/rex_defs.inc
+	$(NASM) $(NFLAGS) -o $@ $<
+
+codegen/ra.o: codegen/ra.asm include/rex_defs.inc
 	$(NASM) $(NFLAGS) -o $@ $<
 
 test: all
@@ -69,4 +74,11 @@ test: all
 clean:
 	rm -f $(OBJ) $(BIN_DEPS) $(TARGET) /tmp/rxt /tmp/rxt_got
 
-.PHONY: all test clean
+install: all
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/rexc
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/rexc
+
+.PHONY: all test clean install uninstall
