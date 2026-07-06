@@ -858,15 +858,27 @@ ir_optimize_pass5:
 .pass5_check_shl:
     movzx   edx, word [rax + IR_OFF_SRC2]
     cmp     edx, 256
-    jae     .pass5_next
+    jae     .pass5_invalidate_dst
     cmp     byte [rsp + 2048 + rdx], 0
-    je      .pass5_next
+    je      .pass5_invalidate_dst
     cmp     qword [rsp + rdx*8], 2
-    jne     .pass5_next
+    jne     .pass5_check_imul3
 
     mov     byte [rax + IR_OFF_OPCODE], IR_BSHL
     mov     word [rax + IR_OFF_SRC2], 0
     mov     qword [rax + IR_OFF_IMM], 1
+    jmp     .pass5_invalidate_dst
+
+.pass5_check_imul3:
+    mov     r8, [rsp + rdx*8]
+    cmp     r8, 1
+    je      .pass5_invalidate_dst
+    mov     r9d, r8d
+    movsxd  r9, r9d
+    cmp     r9, r8
+    jne     .pass5_invalidate_dst
+    mov     word [rax + IR_OFF_SRC2], 0
+    mov     [rax + IR_OFF_IMM], r8
     jmp     .pass5_invalidate_dst
 
 .pass5_invalidate_dst:

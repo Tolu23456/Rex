@@ -107,6 +107,8 @@
 %define IR_CLZ              0x38    ; dst = count leading zeros
 %define IR_CTZ              0x39    ; dst = count trailing zeros
 %define IR_POPCOUNT         0x3A    ; dst = popcount(src1)
+%define IR_TZCNT            0x3B    ; dst = count trailing zeros (tzcnt)
+%define IR_LZCNT            0x3C    ; dst = count leading zeros (lzcnt)
 
 ; ----------------------------------------------------------------
 ; IR Opcodes — Comparison / Boolean (0x41–0x4F)

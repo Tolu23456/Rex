@@ -74,6 +74,9 @@ global ir_emit_loop_top
 global ir_emit_skip
 global ir_emit_err
 global ir_emit_mm_switch
+global ir_emit_tzcnt
+global ir_emit_lzcnt
+global ir_emit_popcnt
 
 ; ============================================================
 ; ir_reset — Reset IR state to initial values
@@ -730,4 +733,52 @@ ir_emit_mm_switch:
     mov [ir_cur_aux], rax
     mov [ir_cur_flags], eax
     mov dil, IR_NOP
+    jmp ir_emit_record
+
+; ============================================================
+; ir_emit_tzcnt — dst = tzcnt(src1)
+; Input: eax = dst, edi = src1
+; ============================================================
+ir_emit_tzcnt:
+    mov word [ir_cur_dst], ax
+    mov word [ir_cur_src1], di
+    xor eax, eax
+    mov byte [ir_cur_type], al
+    mov word [ir_cur_src2], ax
+    mov [ir_cur_imm], rax
+    mov [ir_cur_aux], rax
+    mov [ir_cur_flags], eax
+    mov dil, IR_TZCNT
+    jmp ir_emit_record
+
+; ============================================================
+; ir_emit_lzcnt — dst = lzcnt(src1)
+; Input: eax = dst, edi = src1
+; ============================================================
+ir_emit_lzcnt:
+    mov word [ir_cur_dst], ax
+    mov word [ir_cur_src1], di
+    xor eax, eax
+    mov byte [ir_cur_type], al
+    mov word [ir_cur_src2], ax
+    mov [ir_cur_imm], rax
+    mov [ir_cur_aux], rax
+    mov [ir_cur_flags], eax
+    mov dil, IR_LZCNT
+    jmp ir_emit_record
+
+; ============================================================
+; ir_emit_popcnt — dst = popcount(src1)
+; Input: eax = dst, edi = src1
+; ============================================================
+ir_emit_popcnt:
+    mov word [ir_cur_dst], ax
+    mov word [ir_cur_src1], di
+    xor eax, eax
+    mov byte [ir_cur_type], al
+    mov word [ir_cur_src2], ax
+    mov [ir_cur_imm], rax
+    mov [ir_cur_aux], rax
+    mov [ir_cur_flags], eax
+    mov dil, IR_POPCOUNT
     jmp ir_emit_record

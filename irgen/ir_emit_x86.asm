@@ -248,8 +248,65 @@ ir_emit_x86:
     je      .op_load_global
     cmp     al, IR_STORE_GLOBAL
     je      .op_store_global
+    cmp     al, IR_TZCNT
+    je      .op_tzcnt
+    cmp     al, IR_LZCNT
+    je      .op_lzcnt
+    cmp     al, IR_POPCOUNT
+    je      .op_popcnt
 
     ; Unknown opcode: skip
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_TZCNT: tzcnt rax, rax — F3 48 0F BC C0
+; ============================================================
+.op_tzcnt:
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xBC
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_LZCNT: lzcnt rax, rax — F3 48 0F BD C0
+; ============================================================
+.op_lzcnt:
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xBD
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_POPCOUNT: popcnt rax, rax — F3 48 0F B8 C0
+; ============================================================
+.op_popcnt:
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xB8
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
     inc     r12
     jmp     .p2
 
@@ -463,9 +520,25 @@ ir_emit_x86:
     jmp     .p2
 
 ; ============================================================
-; IR_MUL: pop rbx; imul rax, rbx (5B 48 0F AF C3)
+; IR_MUL: IMUL3 form (src2==0, const in IMM) or stack-based
 ; ============================================================
 .op_mul:
+    cmp     word [r13 + IR_OFF_SRC2], 0
+    jne     .op_mul_stack
+    ; IMUL3 form: imul rax, rax, imm32
+    ; 48 69 C0 imm32
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x69
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    mov     eax, dword [r13 + IR_OFF_IMM]
+    call    emit_d
+    inc     r12
+    jmp     .p2
+
+.op_mul_stack:
     mov     al, 0x5B
     call    emit_b
     mov     al, 0x48
@@ -1259,7 +1332,7 @@ ir_emit_x86:
     cmp     al, IR_SUB
     je      .est_4
     cmp     al, IR_MUL
-    je      .est_5
+    je      .est_mul
     cmp     al, IR_DIV
     je      .est_6
     cmp     al, IR_MOD
@@ -1310,6 +1383,12 @@ ir_emit_x86:
     je      .est_10
     cmp     al, IR_RESERVE
     je      .est_15
+    cmp     al, IR_TZCNT
+    je      .est_5b
+    cmp     al, IR_LZCNT
+    je      .est_5b
+    cmp     al, IR_POPCOUNT
+    je      .est_5b
     ret
 
 .est_0:
@@ -1352,6 +1431,16 @@ ir_emit_x86:
     ret
 .est_25:
     add     qword [out_idx], 25
+    ret
+
+.est_mul:
+    cmp     word [r13 + IR_OFF_SRC2], 0
+    jne     .est_5
+    add     qword [out_idx], 7
+    ret
+
+.est_5b:
+    add     qword [out_idx], 5
     ret
 
 .est_call:
