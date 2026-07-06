@@ -114,6 +114,8 @@ ir_optimize_pass1:
     imul    r9, r10
     jmp     .fold_replace
 .fold_div:
+    test    r10, r10
+    jz      .pass1_next
     mov     r11, rax
     mov     rax, r9
     cqo
@@ -122,6 +124,8 @@ ir_optimize_pass1:
     mov     rax, r11
     jmp     .fold_replace
 .fold_mod:
+    test    r10, r10
+    jz      .pass1_next
     mov     r11, rax
     mov     rax, r9
     cqo
@@ -289,7 +293,30 @@ ir_optimize_pass3:
     cmp     si, word [rdx + IR_OFF_SRC1]
     jne     .pass3_next
 
+    mov     edi, ebx
+    add     edi, 2
+.pass3_check_live:
+    cmp     edi, r13d
+    jae     .pass3_coalesce
+    mov     rax, rdi
+    shl     rax, 5
+    add     rax, r12
+    cmp     word [rax + IR_OFF_SRC1], cx
+    je      .pass3_next
+    cmp     word [rax + IR_OFF_SRC2], cx
+    je      .pass3_next
+    inc     edi
+    jmp     .pass3_check_live
+
+.pass3_coalesce:
+    mov     rax, rbx
+    shl     rax, 5
+    add     rax, r12
     mov     byte [rax + IR_OFF_OPCODE], IR_NOP
+    mov     rdx, rbx
+    inc     rdx
+    shl     rdx, 5
+    add     rdx, r12
     mov     byte [rdx + IR_OFF_OPCODE], IR_NOP
 
 .pass3_next:

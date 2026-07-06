@@ -425,6 +425,8 @@ ir_emit_x86:
     mov     al, 0xD8
     call    emit_b
 
+    mov     al, 0x0F
+    call    emit_b
     movzx   eax, word [r13 + IR_OFF_AUX]
     lea     rcx, [rel .setcc_table]
     movzx   eax, byte [rcx + rax]
@@ -815,7 +817,7 @@ ir_emit_x86:
     movzx   eax, word [r13 + IR_OFF_SRC2]
     shl     eax, 6
     add     eax, VAR_STORAGE_BASE
-    mov     r15d, eax
+    mov     r11d, eax
 
     mov     al, 0x48
     call    emit_b
@@ -836,7 +838,7 @@ ir_emit_x86:
     call    emit_b
     mov     al, 0x25
     call    emit_b
-    mov     eax, r15d
+    mov     eax, r11d
     call    emit_d
 
     mov     al, 0x48
