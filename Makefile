@@ -9,10 +9,11 @@ DESTDIR ?=
 BIN_DEPS = runtime/rt_pri.bin runtime/rt_prs.bin runtime/rt_prb.bin \
            runtime/rt_prf.bin runtime/rt_prc.bin runtime/rt_sip.bin \
            runtime/rt_alc.bin runtime/rt_prq.bin runtime/rt_str.bin \
-           runtime/rt_inp.bin runtime/rt_str_cat.bin
+           runtime/rt_inp.bin runtime/rt_str_cat.bin runtime/rt_strm.bin
 
 OBJ = main/main.o lexer/lexer.o parser/parser.o \
-      codegen/codegen.o codegen/ra.o runtime/runtime.o
+      codegen/codegen.o codegen/ra.o runtime/runtime.o \
+      irgen/irgen.o irgen/ir_passes.o irgen/ir_emit_x86.o irgen/ir_codegen_wrap.o
 
 TARGET = rexc
 
@@ -42,6 +43,18 @@ codegen/codegen.o: codegen/codegen.asm include/rex_defs.inc
 	$(NASM) $(NFLAGS) -o $@ $<
 
 codegen/ra.o: codegen/ra.asm include/rex_defs.inc
+	$(NASM) $(NFLAGS) -o $@ $<
+
+irgen/irgen.o: irgen/irgen.asm include/rex_defs.inc include/rex_ir.inc
+	$(NASM) $(NFLAGS) -o $@ $<
+
+irgen/ir_passes.o: irgen/ir_passes.asm include/rex_defs.inc include/rex_ir.inc
+	$(NASM) $(NFLAGS) -o $@ $<
+
+irgen/ir_emit_x86.o: irgen/ir_emit_x86.asm include/rex_defs.inc include/rex_ir.inc
+	$(NASM) $(NFLAGS) -o $@ $<
+
+irgen/ir_codegen_wrap.o: irgen/ir_codegen_wrap.asm include/rex_defs.inc include/rex_ir.inc
 	$(NASM) $(NFLAGS) -o $@ $<
 
 test: all

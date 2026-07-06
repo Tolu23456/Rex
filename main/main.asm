@@ -13,6 +13,7 @@ extern codegen_init, codegen_finish
 extern codegen_write_headers, codegen_write_runtime, codegen_write_code
 extern cur_tok
 extern ra_prescan, ra_linear_scan, ra_emit_init
+extern ir_reset, ir_optimize_pass1, ir_optimize_pass2, ir_optimize_pass3, ir_optimize_pass4, ir_optimize_pass5
 
 ; ============================================================
 ; BSS
@@ -142,8 +143,18 @@ _start:
     ; Prime lexer (advance to first token)
     call    lex_next
 
-    ; Parse program (drives codegen)
+    ; Reset IR buffer before parsing
+    call    ir_reset
+
+    ; Parse program (emits IR + codegen)
     call    parse_program
+
+    ; Run IR optimization passes (currently stubs)
+    call    ir_optimize_pass1
+    call    ir_optimize_pass2
+    call    ir_optimize_pass3
+    call    ir_optimize_pass4
+    call    ir_optimize_pass5
 
     ; Patch ELF header with final sizes
     mov     rdi, [out_file_fd]

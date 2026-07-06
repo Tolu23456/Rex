@@ -26,6 +26,10 @@ ir_cur_imm:     resq 1
 ir_cur_aux:     resq 1
 ir_cur_flags:   resd 1
 
+global ir_buffer, ir_idx
+global ir_cur_type, ir_cur_dst, ir_cur_src1, ir_cur_src2
+global ir_cur_imm, ir_cur_aux, ir_cur_flags
+
 section .text
 
 global ir_reset

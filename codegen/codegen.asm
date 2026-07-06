@@ -51,6 +51,7 @@ bits 64
 
 ; ---- exports ----
 global emit_b, emit_d, emit_q, emit_blob, emit_blob_v2
+global emit_call_abs
 global var_add, var_find, get_var_va
 global proto_add, proto_find
 global codegen_init, codegen_finish
@@ -68,74 +69,80 @@ global break_base_stack, break_base_depth
 global cont_base_stack, cont_base_depth
 global loop_depth, cur_proto_idx
 global fwd_ref_names, fwd_ref_patches, fwd_ref_count
-global codegen_emit_mov_rax_imm64
-global codegen_emit_mov_rax_var
-global codegen_emit_store_rax_to_var
+global codegen_emit_orig_mov_rax_imm64
+global codegen_emit_orig_mov_rax_var
+global codegen_emit_orig_store_rax_to_var
 global codegen_cache_var_begin, codegen_cache_var_end
 global codegen_ra_pin, codegen_ra_unpin, codegen_ra_push_r14
-global codegen_emit_leave_placeholder
+global codegen_emit_orig_leave_placeholder
 global reg_cache_var, var_rbp_offsets
 global emit_tail, emit_tail_len
 global fused_cmp_var_addr
-global codegen_emit_push_rax, codegen_emit_pop_rbx, codegen_emit_mov_rbx_rax
-global codegen_emit_add_rax_rbx, codegen_emit_sub_rax_rbx
-global codegen_emit_imul_rax_rbx, codegen_emit_idiv_rbx_by_rax
-global codegen_emit_imod_rbx_by_rax, codegen_emit_neg_rax
-global codegen_emit_bitwise_and, codegen_emit_bitwise_or
-global codegen_emit_bitwise_xor, codegen_emit_bitwise_not
-global codegen_emit_shl, codegen_emit_shr
-global codegen_emit_and_bool, codegen_emit_or_bool
-global codegen_emit_not_rax
-global codegen_emit_cmp_setcc
-global codegen_emit_test_jz, codegen_emit_jmp_end
-global codegen_emit_test_jnz
+global codegen_emit_orig_push_rax, codegen_emit_orig_pop_rbx, codegen_emit_orig_mov_rbx_rax
+global codegen_emit_orig_add_rax_rbx, codegen_emit_orig_sub_rax_rbx
+global codegen_emit_orig_imul_rax_rbx, codegen_emit_orig_idiv_rbx_by_rax
+global codegen_emit_orig_imod_rbx_by_rax, codegen_emit_orig_neg_rax
+global codegen_emit_orig_bitwise_and, codegen_emit_orig_bitwise_or
+global codegen_emit_orig_bitwise_xor, codegen_emit_orig_bitwise_not
+global codegen_emit_orig_shl, codegen_emit_orig_shr
+global codegen_emit_orig_and_bool, codegen_emit_orig_or_bool
+global codegen_emit_orig_not_rax
+global codegen_emit_orig_cmp_setcc
+global codegen_emit_orig_test_jz, codegen_emit_orig_jmp_end
+global codegen_emit_orig_test_jnz
 global codegen_patch_jump, codegen_patch_chain_end
-global codegen_emit_call_rt_pri, codegen_emit_call_rt_prs
-global codegen_emit_call_rt_prb, codegen_emit_call_rt_prf
-global codegen_emit_call_rt_prc, codegen_emit_call_rt_err
-global codegen_output_typed, codegen_output_rax
-global codegen_emit_for_start, codegen_emit_for_end
-global codegen_emit_for_start_dyn
-global codegen_emit_while_start, codegen_emit_while_end
-global codegen_emit_break, codegen_patch_breaks
-global codegen_push_cont, codegen_pop_cont, codegen_emit_skip
-global codegen_emit_exit0, codegen_emit_exit1
-global codegen_emit_str_rax
+global codegen_emit_orig_call_rt_pri, codegen_emit_orig_call_rt_prs
+global codegen_emit_orig_call_rt_prb, codegen_emit_orig_call_rt_prf
+global codegen_emit_orig_call_rt_prc, codegen_emit_orig_call_rt_err
+global codegen_output_orig_typed, codegen_output_orig_rax
+global codegen_emit_orig_for_start, codegen_emit_orig_for_end
+global codegen_emit_orig_for_start_dyn
+global codegen_emit_orig_while_start, codegen_emit_orig_while_end
+global codegen_emit_orig_break, codegen_patch_breaks
+global codegen_push_cont, codegen_pop_cont, codegen_emit_orig_skip
+global codegen_emit_orig_exit0, codegen_emit_orig_exit1
+global codegen_emit_orig_str_rax
 global codegen_begin_protos, codegen_end_protos
-global codegen_emit_prot_start, codegen_emit_prot_end
-global codegen_emit_call_prot
+global codegen_emit_orig_prot_start, codegen_emit_orig_prot_end
+global codegen_emit_orig_call_prot
 global codegen_init_proto_frame
 global var_rbp_offsets, proto_local_offset, in_proto_frame
-global codegen_emit_seq_alloc, codegen_emit_seq_push
-global codegen_emit_seq_pop, codegen_emit_seq_len, codegen_emit_seq_cap
-global codegen_emit_inc_var, codegen_emit_dec_var, codegen_emit_swap_vars
-global codegen_emit_abs_rax, codegen_emit_typeof_rax
-global codegen_emit_cvttsd2si_rax, codegen_emit_cvtsi2sd_rax
-global codegen_emit_float_op
-global codegen_emit_movdi_rax, codegen_emit_mov_rdi_rax
-global codegen_emit_unknown_bool, codegen_emit_rdrand_rax
-global codegen_emit_dict_new, codegen_emit_dict_set_raw
-global codegen_emit_dict_get_raw
-global codegen_emit_clock_ms
-global codegen_emit_mov_rax_imm32
-global codegen_emit_mov_rdi_var
+global codegen_emit_orig_seq_alloc, codegen_emit_orig_seq_push
+global codegen_emit_orig_seq_pop, codegen_emit_orig_seq_len, codegen_emit_orig_seq_cap
+global codegen_emit_orig_inc_var, codegen_emit_orig_dec_var, codegen_emit_orig_swap_vars
+global codegen_emit_orig_abs_rax, codegen_emit_orig_typeof_rax
+global codegen_emit_orig_cvttsd2si_rax, codegen_emit_orig_cvtsi2sd_rax
+global codegen_emit_orig_float_op
+global codegen_emit_orig_movdi_rax, codegen_emit_orig_mov_rdi_rax
+global codegen_emit_orig_unknown_bool, codegen_emit_orig_rdrand_rax
+global codegen_emit_orig_dict_new, codegen_emit_orig_dict_set_raw
+global codegen_emit_orig_dict_get_raw
+global codegen_emit_orig_clock_ms
+global codegen_emit_orig_mov_rax_imm32
+global codegen_emit_orig_mov_rdi_var
 global codegen_get_out_idx
-global codegen_emit_call_rt_str, codegen_emit_call_rt_str_bool
-global codegen_emit_call_rt_inp
-global codegen_emit_int_to_bool
-global codegen_emit_trunc_byte
-global codegen_emit_xor_rdi_rdi
+global codegen_emit_orig_call_rt_str, codegen_emit_orig_call_rt_str_bool
+global codegen_emit_orig_call_rt_inp
+global codegen_emit_orig_int_to_bool
+global codegen_emit_orig_trunc_byte
+global codegen_emit_orig_xor_rdi_rdi
 ; Stage-9 / bug-fix emitters
-global codegen_emit_sign_rax, codegen_emit_clz_rax
-global codegen_emit_ceil_rax, codegen_emit_floor_rax, codegen_emit_fract_rax
-global codegen_emit_rdrand64, codegen_emit_hash_rax
-global codegen_emit_carry_rax, codegen_emit_overflow_rax
-global codegen_emit_call_rt_str_cat
-global codegen_emit_seq_subscript, codegen_emit_seq_in
-global codegen_emit_break_n
+global codegen_emit_orig_sign_rax, codegen_emit_orig_clz_rax
+global codegen_emit_orig_ceil_rax, codegen_emit_orig_floor_rax, codegen_emit_orig_fract_rax
+global codegen_emit_orig_rdrand64, codegen_emit_orig_hash_rax
+global codegen_emit_orig_carry_rax, codegen_emit_orig_overflow_rax
+global codegen_emit_orig_call_rt_str_cat
+global codegen_emit_orig_seq_subscript, codegen_emit_orig_seq_in
+global codegen_emit_orig_seq_contains, codegen_emit_orig_seq_sum
+global codegen_emit_orig_seq_min, codegen_emit_orig_seq_max
+global codegen_emit_orig_seq_reverse, codegen_emit_orig_seq_sort
+global codegen_emit_orig_str_upper, codegen_emit_orig_str_lower
+global codegen_emit_orig_str_trim, codegen_emit_orig_str_contains
+global codegen_emit_orig_call_rt_str_len, codegen_emit_orig_call_rt_alc
+global codegen_emit_orig_break_n
 global break_jump_depths
-global codegen_emit_mov_rdi_rbx, codegen_emit_mov_rsi_rax, codegen_emit_neg_var
-global codegen_align_loop_top, codegen_emit_zero_var
+global codegen_emit_orig_mov_rdi_rbx, codegen_emit_orig_mov_rsi_rax, codegen_emit_orig_neg_var
+global codegen_align_loop_top, codegen_emit_orig_zero_var
 global loop_pin_active
 ; Tier 1 peephole + while-loop fold + CTPE exports
 global rax_holds_va
@@ -149,11 +156,26 @@ global proto_ir_offsets, proto_ir_lens
 global cp_known, cp_vals, rax_is_const, rax_const_val
 global dse_pending, dse_store_pos
 global ctpe_interp, ctpe_ir_emit_b, dse_flush_all, cp_flush_all
+; Type method + file I/O + flip emitters
+global codegen_emit_orig_int_min, codegen_emit_orig_int_max, codegen_emit_orig_int_pow
+global codegen_emit_orig_int_popcount, codegen_emit_orig_int_to_bin, codegen_emit_orig_int_to_hex, codegen_emit_orig_int_to_oct
+global codegen_emit_orig_float_sqrt, codegen_emit_orig_float_abs
+global codegen_emit_orig_bool_is_true, codegen_emit_orig_bool_is_false, codegen_emit_orig_bool_is_neutral
+global codegen_emit_orig_bool_is_decided, codegen_emit_orig_bool_flip
+global codegen_emit_orig_char_is_alpha, codegen_emit_orig_char_is_digit
+global codegen_emit_orig_char_is_upper, codegen_emit_orig_char_is_lower
+global codegen_emit_orig_char_to_upper, codegen_emit_orig_char_to_lower
+global codegen_emit_orig_char_to_int, codegen_emit_orig_char_to_str
+global codegen_emit_orig_byte_popcount, codegen_emit_orig_byte_to_int
+global codegen_emit_orig_byte_to_hex, codegen_emit_orig_byte_to_bin
+global codegen_emit_orig_byte_is_zero, codegen_emit_orig_byte_is_ascii
+global codegen_emit_orig_file_open, codegen_emit_orig_file_read, codegen_emit_orig_file_write, codegen_emit_orig_file_close
+global codegen_emit_orig_flip_rax
 
 ; ---- externs ----
 extern rt_pri_data, rt_prs_data, rt_prb_data, rt_prf_data
 extern rt_prc_data, rt_sip_data, rt_alc_data, rt_prq_data
-extern rt_str_data, rt_inp_data, rt_str_cat_data
+extern rt_str_data, rt_inp_data, rt_str_cat_data, rt_strm_data
 ; Register allocator (codegen/ra.asm)
 extern ra_alloc_reg, ra_slot_var_va, ra_alloc_done
 extern ra_on_var_add, ra_load_modrm, ra_store_modrm
@@ -245,8 +267,8 @@ leave_patch_list:   resq 32                     ; up to 32 epilogue patch positi
 leave_patch_cnt:    resq 1                      ; number of epilogue patches
 
 ; Loop rolling / O-H state (saved at for_start, consumed at for_end)
-for_from_val:         resq 1    ; from_imm saved by codegen_emit_for_start
-for_to_val:           resq 1    ; to_imm saved by codegen_emit_for_start
+for_from_val:         resq 1    ; from_imm saved by codegen_emit_orig_for_start
+for_to_val:           resq 1    ; to_imm saved by codegen_emit_orig_for_start
 for_body_start_idx:   resq 1    ; out_idx at end of for_start preamble (= body start)
 og_fired_in_body:     resb 1    ; 1 when O-G ADD/SUB/r15 RMW fired in current loop body
 og_rw_addr32:         resd 1    ; 32-bit VA of O-G RMW target
@@ -277,7 +299,7 @@ while_pin_active:         resb 1    ; 1 = r15 is pinned to the while-loop counte
 while_pin_var_va:         resq 1    ; VA of the while counter pinned in r15
 while_body_start_idx:     resq 1    ; out_idx at start of while body (after pin setup)
 
-; Fused comparison limit (saved from codegen_emit_test_jz for fold check)
+; Fused comparison limit (saved from codegen_emit_orig_test_jz for fold check)
 fused_cmp_limit:          resq 1    ; the limit constant from the fused comparison
 fused_cmp_limit_is_const: resb 1    ; 1 = limit was a compile-time constant
 
@@ -477,7 +499,7 @@ codegen_align_loop_top:
 ; rdi = var VA (absolute 32-bit address)
 ; Replaces the 18-byte movabs+store form for zero initialization.
 ; ============================================================
-codegen_emit_zero_var:
+codegen_emit_orig_zero_var:
     push    rax
     push    rdi
     ; 48 C7 04 25 <addr32> 00 00 00 00
@@ -1443,8 +1465,8 @@ proto_find:
 ; Core code emission
 ; ============================================================
 
-; codegen_emit_mov_rax_imm64(rdi=value)
-codegen_emit_mov_rax_imm64:
+; codegen_emit_orig_mov_rax_imm64(rdi=value)
+codegen_emit_orig_mov_rax_imm64:
     mov     qword [rax_holds_va], -1   ; rax = constant, not a variable's value
     ; O-I: emit IR_IMOV64 if recording
     cmp     byte [ctpe_recording], 0
@@ -1465,8 +1487,8 @@ codegen_emit_mov_rax_imm64:
     pop     rax
     ret
 
-; codegen_emit_mov_rax_imm32(rdi=value): emit  mov eax, imm32 (or xor eax,eax)
-codegen_emit_mov_rax_imm32:
+; codegen_emit_orig_mov_rax_imm32(rdi=value): emit  mov eax, imm32 (or xor eax,eax)
+codegen_emit_orig_mov_rax_imm32:
     mov     qword [rax_holds_va], -1   ; rax = constant, not a variable's value
     ; O-I: emit IR_IMOV64 if recording (zero-extend imm32 to 64-bit)
     cmp     byte [ctpe_recording], 0
@@ -1495,10 +1517,10 @@ codegen_emit_mov_rax_imm32:
     pop     rax
     ret
 
-; codegen_emit_mov_rax_var(rdi=var_va): emit  mov rax, [addr]
+; codegen_emit_orig_mov_rax_var(rdi=var_va): emit  mov rax, [addr]
 ; When var_addr_is_rbp=1: emit mov rax, [rbp+disp32]
 ; Otherwise: emit mov rax, [abs32]
-codegen_emit_mov_rax_var:
+codegen_emit_orig_mov_rax_var:
     ; O-I: emit IR_ILOAD if recording
     cmp     byte [ctpe_recording], 0
     je      .no_ir_load
@@ -1669,8 +1691,8 @@ codegen_emit_mov_rax_var:
     ; rax already holds the correct value for this var — emit nothing
     ret
 
-; codegen_emit_mov_rdi_var(rdi=var_va): emit  mov rdi, [abs32]
-codegen_emit_mov_rdi_var:
+; codegen_emit_orig_mov_rdi_var(rdi=var_va): emit  mov rdi, [abs32]
+codegen_emit_orig_mov_rdi_var:
     push    rax
     push    rdi
     mov     al, 0x48
@@ -1687,11 +1709,11 @@ codegen_emit_mov_rdi_var:
     pop     rax
     ret
 
-; codegen_emit_store_rax_to_var(rdi=var_va): emit  mov [addr], rax
+; codegen_emit_orig_store_rax_to_var(rdi=var_va): emit  mov [addr], rax
 ; When var_addr_is_rbp=1: emit mov [rbp+disp32], rax
 ; Otherwise: emit mov [abs32], rax
 ; Peephole: detect  load rax,[abs32]; add/sub rax,imm; store [abs32],rax  →  add/sub/inc/dec qword [abs32]
-codegen_emit_store_rax_to_var:
+codegen_emit_orig_store_rax_to_var:
     ; Invalidate rax_holds_va: after a store, the fused-comparison peephole
     ; needs fresh loads in emit_tail to detect patterns. Conservative clear.
     mov     qword [rax_holds_va], -1
@@ -2307,7 +2329,7 @@ codegen_emit_store_rax_to_var:
 .og_sub14_check:
     ; --- O-G part 2: 14-byte sub pattern ---
     ; Tail: mov rax,[addr](8) + neg rax(3) + add rax,rbx(3)  →  sub [addr],rbx
-    ; This is the general sub-rbx case from codegen_emit_sub_rax_rbx .sub_normal
+    ; This is the general sub-rbx case from codegen_emit_orig_sub_rax_rbx .sub_normal
     mov     rcx, [emit_tail_len]
     cmp     rcx, 14
     jl      .og_mem16_check
@@ -2911,7 +2933,7 @@ codegen_emit_store_rax_to_var:
     ret
 
 ; Emit push rax
-codegen_emit_push_rax:
+codegen_emit_orig_push_rax:
     ; O-I: emit IR_IMRAX (save irax to irbx) if recording
     cmp     byte [ctpe_recording], 0
     je      .no_ir_push
@@ -2927,7 +2949,7 @@ codegen_emit_push_rax:
     ret
 
 ; Emit mov rbx, rax (save left operand in rbx, avoiding push/pop)
-codegen_emit_mov_rbx_rax:
+codegen_emit_orig_mov_rbx_rax:
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -2939,7 +2961,7 @@ codegen_emit_mov_rbx_rax:
     ret
 
 ; Emit pop rbx
-codegen_emit_pop_rbx:
+codegen_emit_orig_pop_rbx:
     push    rax
     mov     al, 0x5b
     call    emit_b
@@ -2947,7 +2969,7 @@ codegen_emit_pop_rbx:
     ret
 
 ; Emit mov rdi, rax  (48 89 C7)
-codegen_emit_mov_rdi_rax:
+codegen_emit_orig_mov_rdi_rax:
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -2958,12 +2980,12 @@ codegen_emit_mov_rdi_rax:
     pop     rax
     ret
 
-; codegen_emit_movdi_rax: alias
-codegen_emit_movdi_rax:
-    jmp     codegen_emit_mov_rdi_rax
+; codegen_emit_orig_movdi_rax: alias
+codegen_emit_orig_movdi_rax:
+    jmp     codegen_emit_orig_mov_rdi_rax
 
-; codegen_emit_mov_rax_rdi  (48 89 F8)
-codegen_emit_mov_rax_rdi:
+; codegen_emit_orig_mov_rax_rdi  (48 89 F8)
+codegen_emit_orig_mov_rax_rdi:
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -2979,7 +3001,7 @@ codegen_emit_mov_rax_rdi:
 ; ============================================================
 ; All ops: rax = LHS, rbx = RHS (after push/pop pattern)
 
-codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
+codegen_emit_orig_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     ; O-I: emit IR_IADD if recording
     cmp     byte [ctpe_recording], 0
@@ -3174,7 +3196,7 @@ codegen_emit_add_rax_rbx:      ; add rax, rbx  (48 01 D8)
     pop     rax
     ret
 
-codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
+codegen_emit_orig_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     ; O-I: emit IR_ISUB if recording
     cmp     byte [ctpe_recording], 0
@@ -3374,7 +3396,7 @@ codegen_emit_sub_rax_rbx:      ; rbx - rax → rax  (neg+add pattern)
     pop     rax
     ret
 
-codegen_emit_imul_rax_rbx:     ; imul rax, rbx  (48 0F AF C3)
+codegen_emit_orig_imul_rax_rbx:     ; imul rax, rbx  (48 0F AF C3)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     ; O-I: emit IR_IMUL if recording
     cmp     byte [ctpe_recording], 0
@@ -3588,7 +3610,7 @@ codegen_emit_imul_rax_rbx:     ; imul rax, rbx  (48 0F AF C3)
     pop     rax
     ret
 
-codegen_emit_idiv_rbx_by_rax:  ; rbx/rax → rax (quotient)
+codegen_emit_orig_idiv_rbx_by_rax:  ; rbx/rax → rax (quotient)
     push    rax
     mov     al, 0x48            ; mov rcx, rax  (save divisor)
     call    emit_b
@@ -3615,8 +3637,8 @@ codegen_emit_idiv_rbx_by_rax:  ; rbx/rax → rax (quotient)
     pop     rax
     ret
 
-codegen_emit_imod_rbx_by_rax:  ; rbx%rax → rax (remainder)
-    call    codegen_emit_idiv_rbx_by_rax
+codegen_emit_orig_imod_rbx_by_rax:  ; rbx%rax → rax (remainder)
+    call    codegen_emit_orig_idiv_rbx_by_rax
     push    rax
     mov     al, 0x48            ; mov rax, rdx (remainder)
     call    emit_b
@@ -3627,7 +3649,7 @@ codegen_emit_imod_rbx_by_rax:  ; rbx%rax → rax (remainder)
     pop     rax
     ret
 
-codegen_emit_neg_rax:          ; neg rax  (48 F7 D8)
+codegen_emit_orig_neg_rax:          ; neg rax  (48 F7 D8)
     mov     qword [rax_holds_va], -1   ; rax = computed value, not a var
     ; O-I: emit IR_INEG if recording
     cmp     byte [ctpe_recording], 0
@@ -3650,7 +3672,7 @@ codegen_emit_neg_rax:          ; neg rax  (48 F7 D8)
 ; ============================================================
 ; Bitwise / shift
 ; ============================================================
-codegen_emit_bitwise_and:   ; and rax, rbx  (48 21 D8) — Pattern A-reg / A peepholes
+codegen_emit_orig_bitwise_and:   ; and rax, rbx  (48 21 D8) — Pattern A-reg / A peepholes
     push    rax
     push    rcx
     push    rdi
@@ -3763,7 +3785,7 @@ codegen_emit_bitwise_and:   ; and rax, rbx  (48 21 D8) — Pattern A-reg / A pee
     pop     rax
     ret
 
-codegen_emit_bitwise_or:    ; or rax, rbx  (48 09 D8) — Pattern A-reg / A peepholes
+codegen_emit_orig_bitwise_or:    ; or rax, rbx  (48 09 D8) — Pattern A-reg / A peepholes
     push    rax
     push    rcx
     push    rdi
@@ -3876,7 +3898,7 @@ codegen_emit_bitwise_or:    ; or rax, rbx  (48 09 D8) — Pattern A-reg / A peep
     pop     rax
     ret
 
-codegen_emit_bitwise_xor:   ; xor rax, rbx  (48 31 D8) — Pattern A-reg / A peepholes
+codegen_emit_orig_bitwise_xor:   ; xor rax, rbx  (48 31 D8) — Pattern A-reg / A peepholes
     push    rax
     push    rcx
     push    rdi
@@ -3989,7 +4011,7 @@ codegen_emit_bitwise_xor:   ; xor rax, rbx  (48 31 D8) — Pattern A-reg / A pee
     pop     rax
     ret
 
-codegen_emit_bitwise_not:   ; not rax  (48 F7 D0)
+codegen_emit_orig_bitwise_not:   ; not rax  (48 F7 D0)
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -4000,7 +4022,7 @@ codegen_emit_bitwise_not:   ; not rax  (48 F7 D0)
     pop     rax
     ret
 
-codegen_emit_shl:   ; rbx << rax → rax  (88 C1; 48 89 D8; 48 D3 E0)
+codegen_emit_orig_shl:   ; rbx << rax → rax  (88 C1; 48 89 D8; 48 D3 E0)
     push    rax
     mov     al, 0x88            ; mov cl, al
     call    emit_b
@@ -4021,7 +4043,7 @@ codegen_emit_shl:   ; rbx << rax → rax  (88 C1; 48 89 D8; 48 D3 E0)
     pop     rax
     ret
 
-codegen_emit_shr:   ; rbx >> rax → rax
+codegen_emit_orig_shr:   ; rbx >> rax → rax
     push    rax
     mov     al, 0x88
     call    emit_b
@@ -4045,7 +4067,7 @@ codegen_emit_shr:   ; rbx >> rax → rax
 ; ============================================================
 ; Boolean operations
 ; ============================================================
-codegen_emit_and_bool: ; tri-state boolean AND
+codegen_emit_orig_and_bool: ; tri-state boolean AND
     push    rsi
     push    rcx
     lea     rsi, [rel .and_code]
@@ -4064,7 +4086,7 @@ codegen_emit_and_bool: ; tri-state boolean AND
     db 0x48, 0xC7, 0xC0              ; mov rax, -1 (false)
     db 0xFF, 0xFF, 0xFF, 0xFF
 
-codegen_emit_or_bool:  ; tri-state boolean OR
+codegen_emit_orig_or_bool:  ; tri-state boolean OR
     push    rsi
     push    rcx
     lea     rsi, [rel .or_code]
@@ -4216,7 +4238,7 @@ codegen_emit_or_bool:  ; tri-state boolean OR
     ; .adone = current out_idx
     ; Now patch all the jz and jmp offsets
     ; Pop the saved patch offsets and patch them
-codegen_emit_not_rax:  ; neg rax  (tri-state NOT: true→false, false→true, neutral→neutral)
+codegen_emit_orig_not_rax:  ; neg rax  (tri-state NOT: true→false, false→true, neutral→neutral)
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -4232,7 +4254,7 @@ codegen_emit_not_rax:  ; neg rax  (tri-state NOT: true→false, false→true, ne
 ; rdi = setCC opcode byte (0x94=sete, 0x95=setne, etc.)
 ; Returns 0 (false) or 1 (true)
 ; ============================================================
-codegen_emit_cmp_setcc:
+codegen_emit_orig_cmp_setcc:
     push    rax
     push    rdi
     mov     al, 0x48            ; cmp rbx, rax
@@ -4302,10 +4324,10 @@ codegen_emit_cmp_setcc:
 ; Branch emission (returns patch offset in rax)
 ; ============================================================
 
-; codegen_emit_test_jz: emit  test rax,rax; jz placeholder  → rax=offset of rel32
+; codegen_emit_orig_test_jz: emit  test rax,rax; jz placeholder  → rax=offset of rel32
 ; PEEPHOLE: if recent bytes are mov+push+movabs+pop+cmp+setCC+movzx, fuse to cmp [addr],N; jcc
 ; Also: when register cache active, fuse to cmp r15,N; jcc
-codegen_emit_test_jz:
+codegen_emit_orig_test_jz:
     push    rbx
     push    rcx
     push    rdx
@@ -4743,8 +4765,8 @@ codegen_emit_test_jz:
     pop     rbx
     ret
 
-; codegen_emit_jmp_end: emit  jmp placeholder  → rax=offset of rel32
-codegen_emit_jmp_end:
+; codegen_emit_orig_jmp_end: emit  jmp placeholder  → rax=offset of rel32
+codegen_emit_orig_jmp_end:
     push    rbx
     mov     al, 0xe9
     call    emit_b
@@ -4812,42 +4834,42 @@ emit_call_abs:
     pop     rax
     ret
 
-codegen_emit_call_rt_pri:
+codegen_emit_orig_call_rt_pri:
     mov     rdi, LOAD_BASE + RT_PRI_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_call_rt_prs:
+codegen_emit_orig_call_rt_prs:
     mov     rdi, LOAD_BASE + RT_PRS_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_call_rt_prb:
+codegen_emit_orig_call_rt_prb:
     mov     rdi, LOAD_BASE + RT_PRB_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_call_rt_prf:
+codegen_emit_orig_call_rt_prf:
     mov     rdi, LOAD_BASE + RT_PRF_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_call_rt_prc:
+codegen_emit_orig_call_rt_prc:
     mov     rdi, LOAD_BASE + RT_PRC_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_call_rt_err:
+codegen_emit_orig_call_rt_err:
     mov     rdi, LOAD_BASE + RT_PRQ_OFFSET
     jmp     emit_call_abs
 
-; codegen_output_typed: emit  mov rdi, rax + call rt_pXX  given type
+; codegen_output_orig_typed: emit  mov rdi, rax + call rt_pXX  given type
 ; rdi = type code
-codegen_output_rax:
+codegen_output_orig_rax:
     push    rdi
     movzx   edi, byte [cur_type]
-    call    codegen_output_typed        ; rdi = type already loaded
+    call    codegen_output_orig_typed        ; rdi = type already loaded
     pop     rdi
     ret
 
-codegen_output_typed:
+codegen_output_orig_typed:
     push    rdi
-    call    codegen_emit_mov_rdi_rax    ; emit: mov rdi, rax
+    call    codegen_emit_orig_mov_rdi_rax    ; emit: mov rdi, rax
     pop     rdi
     cmp     edi, TYPE_FLOAT
     je      .float
@@ -4858,28 +4880,28 @@ codegen_output_typed:
     cmp     edi, TYPE_COMPLEX
     je      .complex
     ; default: int
-    call    codegen_emit_call_rt_pri
+    call    codegen_emit_orig_call_rt_pri
     ret
 .float:
-    call    codegen_emit_call_rt_prf
+    call    codegen_emit_orig_call_rt_prf
     ret
 .bool:
-    call    codegen_emit_call_rt_prb
+    call    codegen_emit_orig_call_rt_prb
     ret
 .str:
-    call    codegen_emit_call_rt_prs
+    call    codegen_emit_orig_call_rt_prs
     ret
 .complex:
-    call    codegen_emit_call_rt_prc
+    call    codegen_emit_orig_call_rt_prc
     ret
 
 ; ============================================================
 ; For loop
 ; ============================================================
-; codegen_emit_for_start(rdi=var_va, rsi=from_imm, rdx=to_imm)
+; codegen_emit_orig_for_start(rdi=var_va, rsi=from_imm, rdx=to_imm)
 ; Emits: init, jmp check, increment (cont target), condition, captures loop start
 ; Returns: rax = loop_start_pc (condition), rbx = jge_patch_offset
-codegen_emit_for_start:
+codegen_emit_orig_for_start:
     push    r12
     push    r13
     push    r14
@@ -4985,7 +5007,7 @@ codegen_emit_for_start:
 .increment_point:
     ; continue target = current out_idx (increment code)
     call    codegen_get_out_idx
-    mov     [for_cont_addr], rax    ; save for codegen_emit_for_end
+    mov     [for_cont_addr], rax    ; save for codegen_emit_orig_for_end
     mov     rdi, rax
     call    codegen_push_cont
 
@@ -5057,11 +5079,11 @@ codegen_emit_for_start:
     pop     r12
     ret
 
-; codegen_emit_for_end(rdi=loop_start, rsi=jge_patch, rdx=var_va)
+; codegen_emit_orig_for_end(rdi=loop_start, rsi=jge_patch, rdx=var_va)
 ; Emits back-jump to increment point + patches exit.
 ; Loop rolling: if body is a single O-G ADD-r15 RMW (8 bytes) or a constant-imul
 ; body (23 bytes), fold the entire loop into a single compile-time expression.
-codegen_emit_for_end:
+codegen_emit_orig_for_end:
     push    r12
     push    r13
     push    r14
@@ -5886,9 +5908,9 @@ codegen_emit_for_end:
     pop     r12
     ret
 
-; codegen_emit_for_start_dyn: same but 'to' is a variable VA
+; codegen_emit_orig_for_start_dyn: same but 'to' is a variable VA
 ; rdi=var_va, rsi=from_imm, rdx=to_var_va
-codegen_emit_for_start_dyn:
+codegen_emit_orig_for_start_dyn:
     push    r12
     push    r13
     push    r14
@@ -6037,12 +6059,12 @@ codegen_emit_for_start_dyn:
 ; ============================================================
 ; While loop
 ; ============================================================
-codegen_emit_while_start:
+codegen_emit_orig_while_start:
     ; nothing to emit (loop start captured by caller)
     ret
 
-; codegen_emit_while_end(rdi=loop_start, rsi=jz_patch)
-codegen_emit_while_end:
+; codegen_emit_orig_while_end(rdi=loop_start, rsi=jz_patch)
+codegen_emit_orig_while_end:
     push    r12
     push    r13
     push    r14
@@ -6126,7 +6148,7 @@ codegen_emit_while_end:
     ; delta is large: use mov rax, delta + op [addr], rax (11 bytes)
     push    rax
     mov     rdi, r15
-    call    codegen_emit_mov_rax_imm64
+    call    codegen_emit_orig_mov_rax_imm64
     ; op [og_rw_addr32], rax = 48 op_byte 04 25 addr32 (8 bytes)
     mov     al, 0x48
     call    emit_b
@@ -6445,7 +6467,7 @@ codegen_pop_cont:
     dec     qword [cont_base_depth]
     ret
 
-codegen_emit_break:
+codegen_emit_orig_break:
     ; emit: flush cache if active, then jmp placeholder
     push    rax
     ; Flush register cache before break
@@ -6479,9 +6501,9 @@ codegen_emit_break:
     pop     rax
     ret
 
-; codegen_emit_break_n(rdi=N): emit jmp placeholder with depth=N
+; codegen_emit_orig_break_n(rdi=N): emit jmp placeholder with depth=N
 ; Used by `stop N` — only the Nth outer loop will patch this entry
-codegen_emit_break_n:
+codegen_emit_orig_break_n:
     push    rax
     push    rbx
     push    rdi
@@ -6549,7 +6571,7 @@ codegen_patch_breaks:
     pop     rbx
     ret
 
-codegen_emit_skip:
+codegen_emit_orig_skip:
     ; emit: flush cache if active, then jmp to cont_base_stack top
     push    rax
     push    rbx
@@ -6590,7 +6612,7 @@ codegen_emit_skip:
 ; ============================================================
 ; Program entry/exit
 ; ============================================================
-codegen_emit_exit0:
+codegen_emit_orig_exit0:
     push    rax
     ; ── Flush stdout output buffer (F-7) before exit ──────────────
     ; mov eax, [OUTPUT_BUF_WPTR]  → 8B 04 25 wptr32  (7 bytes)
@@ -6679,7 +6701,7 @@ codegen_emit_exit0:
     pop     rax
     ret
 
-codegen_emit_exit1:
+codegen_emit_orig_exit1:
     push    rax
     push    rsi
     push    rcx
@@ -6697,11 +6719,11 @@ codegen_emit_exit1:
 
 ; ============================================================
 ; String literal inline embedding
-; codegen_emit_str_rax: emit jmp+data+mov_rax_addr for a string
+; codegen_emit_orig_str_rax: emit jmp+data+mov_rax_addr for a string
 ; rdi = pointer to string content (in compiler memory)
 ; After: rax = VA of string in output binary
 ; ============================================================
-codegen_emit_str_rax:
+codegen_emit_orig_str_rax:
     push    rbx
     push    r12
     push    r13
@@ -6745,7 +6767,7 @@ codegen_emit_str_rax:
 
     ; emit: mov rax, string_VA  (48 B8 <imm64>)
     mov     rdi, rbx
-    call    codegen_emit_mov_rax_imm64
+    call    codegen_emit_orig_mov_rax_imm64
 
     pop     rdi
     pop     r13
@@ -6756,7 +6778,7 @@ codegen_emit_str_rax:
 ; ============================================================
 ; Float type conversions
 ; ============================================================
-codegen_emit_cvttsd2si_rax:     ; int(float): cvttsd2si rax, xmm0 (via rax)
+codegen_emit_orig_cvttsd2si_rax:     ; int(float): cvttsd2si rax, xmm0 (via rax)
     push    rsi
     push    rcx
     lea     rsi, [rel .bytes]
@@ -6769,7 +6791,7 @@ codegen_emit_cvttsd2si_rax:     ; int(float): cvttsd2si rax, xmm0 (via rax)
     db 0x66, 0x48, 0x0f, 0x6e, 0xc0  ; movq xmm0, rax
     db 0xf2, 0x48, 0x0f, 0x2c, 0xc0  ; cvttsd2si rax, xmm0
 
-codegen_emit_cvtsi2sd_rax:      ; float(int): cvtsi2sd xmm0, rax → rax
+codegen_emit_orig_cvtsi2sd_rax:      ; float(int): cvtsi2sd xmm0, rax → rax
     push    rsi
     push    rcx
     lea     rsi, [rel .bytes]
@@ -6782,9 +6804,9 @@ codegen_emit_cvtsi2sd_rax:      ; float(int): cvtsi2sd xmm0, rax → rax
     db 0xf2, 0x48, 0x0f, 0x2a, 0xc0  ; cvtsi2sd xmm0, rax
     db 0x66, 0x48, 0x0f, 0x7e, 0xc0  ; movq rax, xmm0
 
-; codegen_emit_float_op(rdi=opcode_byte): emit full float binary op
+; codegen_emit_orig_float_op(rdi=opcode_byte): emit full float binary op
 ; Preamble: movq xmm1,rax + movq xmm0,rbx; Op: opsd xmm0,xmm1; Suffix: movq rax,xmm0
-codegen_emit_float_op:
+codegen_emit_orig_float_op:
     push    rsi
     push    rcx
     push    rdi
@@ -6847,9 +6869,9 @@ codegen_end_protos:
     pop     rdi
     ret
 
-; codegen_emit_prot_start(rdi=proto_idx, rsi=param_count)
+; codegen_emit_orig_prot_start(rdi=proto_idx, rsi=param_count)
 ; Records out_idx in proto table; emits push rbp; mov rbp, rsp
-codegen_emit_prot_start:
+codegen_emit_orig_prot_start:
     push    rbx
     push    rcx
     push    rdx
@@ -6876,7 +6898,7 @@ codegen_emit_prot_start:
     mov     al, 0xe5
     call    emit_b
     ; O-F: emit patchable sub rsp, 0 placeholder (48 81 EC 00 00 00 00)
-    ; Will be patched in codegen_emit_prot_end with the actual frame size.
+    ; Will be patched in codegen_emit_orig_prot_end with the actual frame size.
     mov     al, 0x48
     call    emit_b
     mov     al, 0x81
@@ -6907,9 +6929,9 @@ codegen_emit_prot_start:
     pop     rbx
     ret
 
-; codegen_emit_leave_placeholder: emit "add rsp, 0" placeholder + pop rbp + ret
-; Saves patch position to leave_patch_list for later patching in codegen_emit_prot_end.
-codegen_emit_leave_placeholder:
+; codegen_emit_orig_leave_placeholder: emit "add rsp, 0" placeholder + pop rbp + ret
+; Saves patch position to leave_patch_list for later patching in codegen_emit_orig_prot_end.
+codegen_emit_orig_leave_placeholder:
     push    rax
     push    rbx
     ; Emit: add rsp, 0 placeholder (48 81 C4 00 00 00 00)
@@ -6939,9 +6961,9 @@ codegen_emit_leave_placeholder:
     pop     rax
     ret
 
-; codegen_emit_prot_end: compute frame size, patch prologue and early returns, emit epilogue.
+; codegen_emit_orig_prot_end: compute frame size, patch prologue and early returns, emit epilogue.
 ; O-F: frame size = number_of_locals * 8 (derived from proto_local_offset).
-codegen_emit_prot_end:
+codegen_emit_orig_prot_end:
     push    rax
     push    rbx
     push    rcx
@@ -6960,7 +6982,7 @@ codegen_emit_prot_end:
     mov     rbx, [frame_size_patch_pos]
     mov     [out_buffer + rbx], ecx
 
-    ; Patch all codegen_emit_leave_placeholder positions
+    ; Patch all codegen_emit_orig_leave_placeholder positions
     mov     rax, [leave_patch_cnt]
 .pe_patch_loop:
     test    rax, rax
@@ -7057,9 +7079,9 @@ codegen_init_proto_frame:
     pop     rbx
     ret
 
-; codegen_emit_call_prot(rdi=proto_idx)
+; codegen_emit_orig_call_prot(rdi=proto_idx)
 ; Emits: call rel32_to_proto_body + add rsp, N*8 (stack cleanup)
-codegen_emit_call_prot:
+codegen_emit_orig_call_prot:
     mov     qword [rax_holds_va], -1   ; rax = return value after call
     push    rax
     push    rbx
@@ -7104,7 +7126,7 @@ codegen_emit_call_prot:
 ; ============================================================
 ; Sequence operations
 ; ============================================================
-; Data tables used by codegen_emit_seq_alloc (placed before function to keep
+; Data tables used by codegen_emit_orig_seq_alloc (placed before function to keep
 ; them in the same local-label scope)
 seq_alloc_code:
     db 0xbf, 0x50, 0x00, 0x00, 0x00   ; mov edi, 80
@@ -7112,7 +7134,7 @@ seq_setup_code:
     db 0x48, 0xc7, 0x00, 0x08, 0x00, 0x00, 0x00        ; mov qword [rax], 8
     db 0x48, 0xc7, 0x40, 0x08, 0x00, 0x00, 0x00, 0x00  ; mov qword [rax+8], 0
 
-codegen_emit_seq_alloc:   ; rdi = var_va
+codegen_emit_orig_seq_alloc:   ; rdi = var_va
     push    rbx
     push    r12
     mov     r12, rdi
@@ -7127,7 +7149,7 @@ codegen_emit_seq_alloc:   ; rdi = var_va
     pop     rsi
 
     ; call rt_alc
-    call    codegen_emit_call_rt_pri_via_alc
+    call    codegen_emit_orig_call_rt_pri_via_alc
 
     ; setup: mov qword [rax], 8; mov qword [rax+8], 0
     push    rsi
@@ -7140,24 +7162,24 @@ codegen_emit_seq_alloc:   ; rdi = var_va
 
     ; store rax to var
     mov     rdi, r12
-    call    codegen_emit_store_rax_to_var
+    call    codegen_emit_orig_store_rax_to_var
 
     pop     r12
     pop     rbx
     ret
 
-codegen_emit_call_rt_pri_via_alc:
+codegen_emit_orig_call_rt_pri_via_alc:
     mov     rdi, LOAD_BASE + RT_ALC_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_seq_push:  ; rdi = var_va
+codegen_emit_orig_seq_push:  ; rdi = var_va
     ; Simplified push: load ptr, append value, inc len
     ; Assumes value is in rax
     push    r12
     push    rsi
     push    rcx
     mov     r12, rdi
-    call    codegen_emit_push_rax       ; save value
+    call    codegen_emit_orig_push_rax       ; save value
     ; load ptr: mov rbx, [var_va]
     push    rax
     mov     al, 0x48
@@ -7191,7 +7213,7 @@ codegen_emit_seq_push:  ; rdi = var_va
     db 0x48, 0x89, 0x44, 0xcb, 0x10    ; mov [rbx+rcx*8+16], rax
     db 0x48, 0xff, 0x43, 0x08          ; inc qword [rbx+8]
 
-codegen_emit_seq_pop:   ; rdi = var_va → result in rax
+codegen_emit_orig_seq_pop:   ; rdi = var_va → result in rax
     push    r12
     push    rsi
     push    rcx
@@ -7222,13 +7244,13 @@ codegen_emit_seq_pop:   ; rdi = var_va → result in rax
     db 0x48, 0x8b, 0x4b, 0x08          ; mov rcx, [rbx+8]
     db 0x48, 0x8b, 0x44, 0xcb, 0x10    ; mov rax, [rbx+rcx*8+16]
 
-codegen_emit_seq_len:   ; rdi = var_va → rax = len
+codegen_emit_orig_seq_len:   ; rdi = var_va → rax = len
     push    rax
     push    rsi
     push    rcx
     push    rdi
     ; mov rax, [var_va]
-    call    codegen_emit_mov_rax_var    ; rdi already set
+    call    codegen_emit_orig_mov_rax_var    ; rdi already set
     ; mov rax, [rax+8]
     lea     rsi, [rel .len_load]
     mov     edx, 4
@@ -7242,12 +7264,12 @@ codegen_emit_seq_len:   ; rdi = var_va → rax = len
 .len_load:
     db 0x48, 0x8b, 0x40, 0x08          ; mov rax, [rax+8]
 
-codegen_emit_seq_cap:   ; rdi = var_va → rax = cap
+codegen_emit_orig_seq_cap:   ; rdi = var_va → rax = cap
     push    rax
     push    rsi
     push    rcx
     push    rdi
-    call    codegen_emit_mov_rax_var
+    call    codegen_emit_orig_mov_rax_var
     lea     rsi, [rel .cap_load]
     mov     edx, 3
     call    emit_blob_v2
@@ -7263,7 +7285,7 @@ codegen_emit_seq_cap:   ; rdi = var_va → rax = cap
 ; ============================================================
 ; Inc / Dec / Swap / Abs / Typeof
 ; ============================================================
-codegen_emit_inc_var:   ; rdi = var_va
+codegen_emit_orig_inc_var:   ; rdi = var_va
     mov     qword [rax_holds_va], -1   ; inc modifies memory directly, rax no longer valid
     ; O-I: emit IR_IINC if recording
     cmp     byte [ctpe_recording], 0
@@ -7293,7 +7315,7 @@ codegen_emit_inc_var:   ; rdi = var_va
     pop     rax
     ret
 
-codegen_emit_dec_var:   ; rdi = var_va
+codegen_emit_orig_dec_var:   ; rdi = var_va
     mov     qword [rax_holds_va], -1   ; dec modifies memory directly, rax no longer valid
     ; O-I: emit IR_IDEC if recording
     cmp     byte [ctpe_recording], 0
@@ -7323,14 +7345,14 @@ codegen_emit_dec_var:   ; rdi = var_va
     pop     rax
     ret
 
-codegen_emit_swap_vars:  ; rdi=va_a, rsi=va_b
+codegen_emit_orig_swap_vars:  ; rdi=va_a, rsi=va_b
     ; Stack after 4 pushes: [rsp]=rdx, [rsp+8]=rsi(va_b), [rsp+16]=rdi(va_a), [rsp+24]=rax
     push    rax
     push    rdi
     push    rsi
     push    rdx
     ; mov rax, [va_a]
-    call    codegen_emit_mov_rax_var
+    call    codegen_emit_orig_mov_rax_var
     ; mov rbx, [va_b] -- emit manually
     mov     rdi, [rsp + 8]         ; rdi = va_b
     push    rax
@@ -7363,14 +7385,14 @@ codegen_emit_swap_vars:  ; rdi=va_a, rsi=va_b
     pop     rax
     ; mov [va_b], rax
     mov     rdi, [rsp + 8]         ; va_b
-    call    codegen_emit_store_rax_to_var
+    call    codegen_emit_orig_store_rax_to_var
     pop     rdx
     pop     rsi
     pop     rdi
     pop     rax
     ret
 
-codegen_emit_abs_rax:   ; branchless abs via cmovs
+codegen_emit_orig_abs_rax:   ; branchless abs via cmovs
     push    rsi
     push    rcx
     lea     rsi, [rel .abs_bytes]
@@ -7384,13 +7406,13 @@ codegen_emit_abs_rax:   ; branchless abs via cmovs
     db 0x48, 0xf7, 0xd8     ; neg rax
     db 0x48, 0x0f, 0x48, 0xc3  ; cmovs rax, rbx
 
-codegen_emit_typeof_rax:  ; rdi = type code → emit mov rax, type
+codegen_emit_orig_typeof_rax:  ; rdi = type code → emit mov rax, type
     push    rdi
-    call    codegen_emit_mov_rax_imm64
+    call    codegen_emit_orig_mov_rax_imm64
     pop     rdi
     ret
 
-codegen_emit_unknown_bool:
+codegen_emit_orig_unknown_bool:
     push    rsi
     push    rcx
     lea     rsi, [rel .unk_bytes]
@@ -7404,13 +7426,13 @@ codegen_emit_unknown_bool:
     db 0x83, 0xe0, 0x01     ; and eax, 1
 
 ; rdrand eax  (same as unknown_bool init)
-codegen_emit_rdrand_rax:
-    jmp     codegen_emit_unknown_bool
+codegen_emit_orig_rdrand_rax:
+    jmp     codegen_emit_orig_unknown_bool
 
 ; ============================================================
 ; Clock
 ; ============================================================
-codegen_emit_clock_ms:
+codegen_emit_orig_clock_ms:
     push    rsi
     push    rcx
     lea     rsi, [rel .clock_bytes]
@@ -7438,17 +7460,17 @@ codegen_emit_clock_ms:
 ; ============================================================
 ; Dict operations (simplified using rt_prq blob entry points)
 ; ============================================================
-codegen_emit_dict_new:  ; result in rax = new dict ptr
+codegen_emit_orig_dict_new:  ; result in rax = new dict ptr
     mov     rdi, LOAD_BASE + RT_DICT_NEW_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_dict_set_raw:  ; rdi=dict_ptr_va, rsi=key_va, rdx=key_len, rcx=value_in_rax
+codegen_emit_orig_dict_set_raw:  ; rdi=dict_ptr_va, rsi=key_va, rdx=key_len, rcx=value_in_rax
     ; This is complex - for now emit a call to rt_dict_set
     ; Caller sets up rdi/rsi/rdx/rcx before this
     mov     rdi, LOAD_BASE + RT_DICT_SET_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_dict_get_raw:
+codegen_emit_orig_dict_get_raw:
     mov     rdi, LOAD_BASE + RT_DICT_GET_OFFSET
     jmp     emit_call_abs
 
@@ -7456,24 +7478,24 @@ codegen_emit_dict_get_raw:
 ; str / bool / input emit helpers (design.md §3.2, §4.7, §15.3)
 ; ============================================================
 
-codegen_emit_call_rt_str:
+codegen_emit_orig_call_rt_str:
     ; Emit: call rt_str_blob  (int64 → decimal string)
     mov     rdi, LOAD_BASE + RT_STR_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_call_rt_str_bool:
+codegen_emit_orig_call_rt_str_bool:
     ; Emit: call rt_str_bool_blob  (bool → "true"/"neutral"/"false")
     mov     rdi, LOAD_BASE + RT_STR_BOOL_OFFSET
     jmp     emit_call_abs
 
-codegen_emit_call_rt_inp:
+codegen_emit_orig_call_rt_inp:
     ; Emit: call rt_inp_blob  (read line from stdin)
     mov     rdi, LOAD_BASE + RT_INP_OFFSET
     jmp     emit_call_abs
 
-; codegen_emit_int_to_bool: rax ∈ ℤ → rax ∈ {-1, 0, 1}
+; codegen_emit_orig_int_to_bool: rax ∈ ℤ → rax ∈ {-1, 0, 1}
 ; test rax,rax / setg cl / sets al / neg al / or al,cl / movsx rax,al
-codegen_emit_int_to_bool:
+codegen_emit_orig_int_to_bool:
     push    rsi
     push    rcx
     lea     rsi, [rel .itb_code]
@@ -7490,8 +7512,8 @@ codegen_emit_int_to_bool:
     db 0x08, 0xC8                 ; or  al, cl
     db 0x48, 0x0F, 0xBE, 0xC0    ; movsx rax, al
 
-; codegen_emit_trunc_byte: rax → zero-extend al to rax (char/byte cast)
-codegen_emit_trunc_byte:
+; codegen_emit_orig_trunc_byte: rax → zero-extend al to rax (char/byte cast)
+codegen_emit_orig_trunc_byte:
     push    rsi
     push    rcx
     lea     rsi, [rel .tb_code]
@@ -7503,8 +7525,8 @@ codegen_emit_trunc_byte:
 .tb_code:
     db 0x48, 0x0F, 0xB6, 0xC0    ; movzx rax, al
 
-; codegen_emit_xor_rdi_rdi: emit xor rdi, rdi  (set rdi = 0 / null prompt)
-codegen_emit_xor_rdi_rdi:
+; codegen_emit_orig_xor_rdi_rdi: emit xor rdi, rdi  (set rdi = 0 / null prompt)
+codegen_emit_orig_xor_rdi_rdi:
     push    rsi
     push    rcx
     lea     rsi, [rel .xdi_code]
@@ -7520,9 +7542,9 @@ codegen_emit_xor_rdi_rdi:
 ; Stage-9 emitters
 ; ============================================================
 
-; codegen_emit_sign_rax: sign(rax) → rax ∈ {-1, 0, 1}
+; codegen_emit_orig_sign_rax: sign(rax) → rax ∈ {-1, 0, 1}
 ; test rax,rax; setg cl; sets al; sub cl,al; movsx rax,cl
-codegen_emit_sign_rax:
+codegen_emit_orig_sign_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .sign_bytes]
@@ -7538,8 +7560,8 @@ codegen_emit_sign_rax:
     db 0x28, 0xC1                 ; sub cl, al
     db 0x48, 0x0F, 0xBE, 0xC1    ; movsx rax, cl
 
-; codegen_emit_clz_rax: lzcnt rax, rax → count leading zeros
-codegen_emit_clz_rax:
+; codegen_emit_orig_clz_rax: lzcnt rax, rax → count leading zeros
+codegen_emit_orig_clz_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .clz_bytes]
@@ -7551,9 +7573,9 @@ codegen_emit_clz_rax:
 .clz_bytes:
     db 0xF3, 0x48, 0x0F, 0xBD, 0xC0  ; lzcnt rax, rax
 
-; codegen_emit_ceil_rax: ceil(rax-as-float)
+; codegen_emit_orig_ceil_rax: ceil(rax-as-float)
 ; movq xmm0,rax; roundsd xmm0,xmm0,2; movq rax,xmm0
-codegen_emit_ceil_rax:
+codegen_emit_orig_ceil_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .ceil_bytes]
@@ -7567,8 +7589,8 @@ codegen_emit_ceil_rax:
     db 0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x02     ; roundsd xmm0,xmm0,2 (ceil)
     db 0x66, 0x48, 0x0F, 0x7E, 0xC0           ; movq rax, xmm0
 
-; codegen_emit_floor_rax: floor(rax-as-float)
-codegen_emit_floor_rax:
+; codegen_emit_orig_floor_rax: floor(rax-as-float)
+codegen_emit_orig_floor_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .floor_bytes]
@@ -7582,8 +7604,8 @@ codegen_emit_floor_rax:
     db 0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x01     ; roundsd xmm0,xmm0,1 (floor)
     db 0x66, 0x48, 0x0F, 0x7E, 0xC0           ; movq rax, xmm0
 
-; codegen_emit_fract_rax: fract(rax-as-float) = x - floor(x)
-codegen_emit_fract_rax:
+; codegen_emit_orig_fract_rax: fract(rax-as-float) = x - floor(x)
+codegen_emit_orig_fract_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .fract_bytes]
@@ -7599,8 +7621,8 @@ codegen_emit_fract_rax:
     db 0x66, 0x0F, 0x5C, 0xC1                  ; subsd xmm0, xmm1
     db 0x66, 0x48, 0x0F, 0x7E, 0xC0           ; movq rax, xmm0
 
-; codegen_emit_rdrand64: rdrand rax (64-bit hardware random)
-codegen_emit_rdrand64:
+; codegen_emit_orig_rdrand64: rdrand rax (64-bit hardware random)
+codegen_emit_orig_rdrand64:
     push    rsi
     push    rcx
     lea     rsi, [rel .rand_bytes]
@@ -7612,9 +7634,9 @@ codegen_emit_rdrand64:
 .rand_bytes:
     db 0x48, 0x0F, 0xC7, 0xF0                  ; rdrand rax
 
-; codegen_emit_hash_rax: 64-bit multiplicative hash of rax
+; codegen_emit_orig_hash_rax: 64-bit multiplicative hash of rax
 ; Uses a single LCG step: rax = rax * K
-codegen_emit_hash_rax:
+codegen_emit_orig_hash_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .hash_bytes]
@@ -7628,8 +7650,8 @@ codegen_emit_hash_rax:
     db 0x2D, 0x7F, 0x95, 0x4C, 0x2D, 0xF4, 0x51, 0x58  ; 0x5851F42D4C957F2D
     db 0x48, 0x0F, 0xAF, 0xC1                 ; imul rax, rcx
 
-; codegen_emit_carry_rax: setc al; movzx rax, al → CF flag as 0/1
-codegen_emit_carry_rax:
+; codegen_emit_orig_carry_rax: setc al; movzx rax, al → CF flag as 0/1
+codegen_emit_orig_carry_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .carry_bytes]
@@ -7642,8 +7664,8 @@ codegen_emit_carry_rax:
     db 0x0F, 0x92, 0xC0                        ; setc al
     db 0x48, 0x0F, 0xB6, 0xC0                 ; movzx rax, al
 
-; codegen_emit_overflow_rax: seto al; movzx rax, al → OF flag as 0/1
-codegen_emit_overflow_rax:
+; codegen_emit_orig_overflow_rax: seto al; movzx rax, al → OF flag as 0/1
+codegen_emit_orig_overflow_rax:
     push    rsi
     push    rcx
     lea     rsi, [rel .ovf_bytes]
@@ -7656,8 +7678,8 @@ codegen_emit_overflow_rax:
     db 0x0F, 0x90, 0xC0                        ; seto al
     db 0x48, 0x0F, 0xB6, 0xC0                 ; movzx rax, al
 
-; codegen_emit_mov_rdi_rbx: emit mov rdi, rbx  (48 89 DF)
-codegen_emit_mov_rdi_rbx:
+; codegen_emit_orig_mov_rdi_rbx: emit mov rdi, rbx  (48 89 DF)
+codegen_emit_orig_mov_rdi_rbx:
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -7668,8 +7690,8 @@ codegen_emit_mov_rdi_rbx:
     pop     rax
     ret
 
-; codegen_emit_mov_rsi_rax: emit mov rsi, rax  (48 89 C6)
-codegen_emit_mov_rsi_rax:
+; codegen_emit_orig_mov_rsi_rax: emit mov rsi, rax  (48 89 C6)
+codegen_emit_orig_mov_rsi_rax:
     push    rax
     mov     al, 0x48
     call    emit_b
@@ -7680,8 +7702,8 @@ codegen_emit_mov_rsi_rax:
     pop     rax
     ret
 
-; codegen_emit_neg_var(rdi=var_va): emit neg qword [var_va]  (48 F7 1C 25 <va>)
-codegen_emit_neg_var:
+; codegen_emit_orig_neg_var(rdi=var_va): emit neg qword [var_va]  (48 F7 1C 25 <va>)
+codegen_emit_orig_neg_var:
     mov     qword [rax_holds_va], -1   ; neg modifies memory directly, rax no longer valid
     push    rax
     push    rdi
@@ -7699,18 +7721,18 @@ codegen_emit_neg_var:
     pop     rax
     ret
 
-; codegen_emit_call_rt_str_cat: call rt_str_cat blob
+; codegen_emit_orig_call_rt_str_cat: call rt_str_cat blob
 ; Caller must set rdi=ptr1, rsi=ptr2 before this
-codegen_emit_call_rt_str_cat:
+codegen_emit_orig_call_rt_str_cat:
     mov     rdi, LOAD_BASE + RT_STR_CAT_OFFSET
     jmp     emit_call_abs
 
-; codegen_emit_seq_subscript: emit bounds-checked seq element load
+; codegen_emit_orig_seq_subscript: emit bounds-checked seq element load
 ; Protocol (caller must do before calling this):
 ;   1. push rax  (seq ptr from earlier variable load)
 ;   2. parse index expr → rax = index
 ;   3. call this function → emits pop+check+load
-codegen_emit_seq_subscript:
+codegen_emit_orig_seq_subscript:
     push    rsi
     push    rcx
     lea     rsi, [rel .ssub_bytes]
@@ -7729,12 +7751,12 @@ codegen_emit_seq_subscript:
     db 0x31, 0xC0                ; .oob: xor eax, eax
     ; .done: (falls through — next instruction)
 
-; codegen_emit_seq_in(rdi=seq_var_va): linear search → rax = 1 (found) / -1 (not found)
+; codegen_emit_orig_seq_in(rdi=seq_var_va): linear search → rax = 1 (found) / -1 (not found)
 ; Protocol:
 ;   1. parser evaluates search value → rax
-;   2. parser calls codegen_emit_push_rax  (saves value)
-;   3. parser calls codegen_emit_seq_in(rdi=seq_var_va)
-codegen_emit_seq_in:
+;   2. parser calls codegen_emit_orig_push_rax  (saves value)
+;   3. parser calls codegen_emit_orig_seq_in(rdi=seq_var_va)
+codegen_emit_orig_seq_in:
     push    rbx
     push    rsi
     push    rcx
@@ -7787,6 +7809,283 @@ codegen_emit_seq_in:
     ; .notfound: (offset 36)
     db 0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF  ; mov rax, -1
     ; .done: (offset 43)
+
+; ============================================================
+; Seq method codegen emitters
+; rbx = seq ptr (popped by caller before calling)
+; ============================================================
+
+; codegen_emit_orig_seq_contains: linear search → rax = 1 (found) / 0 (not found)
+; rax = search value, rbx = seq ptr (already popped)
+codegen_emit_orig_seq_contains:
+    push    rsi
+    push    rcx
+    push    rdx
+    ; Inline loop:
+    ;   mov rcx, [rbx+8]       (len)         offset 0-3
+    ;   xor edx, edx            (index=0)     offset 4-5
+    ; .search: test rcx, rcx                   offset 6-8
+    ;   jz .notfound                            offset 9-10
+    ;   cmp rax, [rbx+rdx*8+16]                offset 11-15
+    ;   je .found                               offset 16-17
+    ;   inc rdx                                 offset 18-20
+    ;   dec rcx                                 offset 21-23
+    ;   jmp .search                             offset 24-25
+    ; .found: mov eax, 1                        offset 26-30
+    ;   jmp .done                               offset 31-32
+    ; .notfound: xor eax, eax                   offset 33-34
+    ; .done:                                    offset 35
+    lea     rsi, [rel .contains_code]
+    mov     edx, 35
+    call    emit_blob_v2
+    pop     rdx
+    pop     rcx
+    pop     rsi
+    ret
+.contains_code:
+    db 0x48, 0x8B, 0x4B, 0x08              ; mov rcx, [rbx+8]
+    db 0x31, 0xD2                           ; xor edx, edx
+    db 0x48, 0x85, 0xC9                     ; test rcx, rcx
+    db 0x74, 23                             ; jz .notfound (+23 → offset 33)
+    db 0x48, 0x3B, 0x44, 0xD3, 0x10        ; cmp rax, [rbx+rdx*8+16]
+    db 0x74, 13                             ; je .found (+13 → offset 26)
+    db 0x48, 0xFF, 0xC2                     ; inc rdx
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0xEB, 0xE7                           ; jmp .search (-25 → offset 6)
+    db 0xB8, 0x01, 0x00, 0x00, 0x00        ; mov eax, 1
+    db 0xEB, 0x02                           ; jmp .done (+2 → offset 35)
+    db 0x31, 0xC0                           ; .notfound: xor eax, eax
+
+; codegen_emit_orig_seq_sum: sum all elements → rax = sum
+codegen_emit_orig_seq_sum:
+    push    rcx
+    push    rdx
+    push    rsi
+    lea     rsi, [rel .sum_code]
+    mov     edx, 31
+    call    emit_blob_v2
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    ret
+.sum_code:
+    db 0x48, 0x8B, 0x4B, 0x08              ; mov rcx, [rbx+8]
+    db 0x31, 0xC0                           ; xor eax, eax
+    db 0x31, 0xD2                           ; xor edx, edx
+    db 0x48, 0x85, 0xC9                     ; test rcx, rcx
+    db 0x74, 16                             ; jz .done
+    db 0x48, 0x03, 0x44, 0xD3, 0x10        ; add rax, [rbx+rdx*8+16]
+    db 0x48, 0xFF, 0xC2                     ; inc rdx
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0xEB, 0xEF                           ; jmp .loop
+
+codegen_emit_orig_seq_min:
+    push    rcx
+    push    rdx
+    push    rsi
+    lea     rsi, [rel .min_code]
+    mov     edx, 43
+    call    emit_blob_v2
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    ret
+.min_code:
+    db 0x48, 0x8B, 0x4B, 0x08              ; mov rcx, [rbx+8]
+    db 0x48, 0x85, 0xC9                     ; test rcx, rcx
+    db 0x74, 28                             ; jz .empty
+    db 0x48, 0x8B, 0x43, 0x10              ; mov rax, [rbx+16]
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0x74, 14                             ; jz .done
+    db 0x31, 0xD2                           ; xor edx, edx
+    db 0x48, 0xFF, 0xC2                     ; inc rdx
+    db 0x48, 0x3B, 0x44, 0xD3, 0x10        ; .loop: cmp rax, [rbx+rdx*8+16]
+    db 0x7E, 4                              ; jle .skip
+    db 0x48, 0x8B, 0x44, 0xD3, 0x10        ; mov rax, [rbx+rdx*8+16]
+    db 0x48, 0xFF, 0xC2                     ; .skip: inc rdx
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0x75, 0xEF                           ; jnz .loop
+    db 0xEB, 0x02                           ; jmp .end
+    db 0x31, 0xC0                           ; .empty: xor eax, eax
+
+; codegen_emit_orig_seq_max: find maximum → rax = max
+codegen_emit_orig_seq_max:
+    push    rcx
+    push    rdx
+    push    rsi
+    lea     rsi, [rel .max_code]
+    mov     edx, 43
+    call    emit_blob_v2
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    ret
+.max_code:
+    db 0x48, 0x8B, 0x4B, 0x08              ; mov rcx, [rbx+8]
+    db 0x48, 0x85, 0xC9                     ; test rcx, rcx
+    db 0x74, 28                             ; jz .empty
+    db 0x48, 0x8B, 0x43, 0x10              ; mov rax, [rbx+16]
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0x74, 14                             ; jz .done
+    db 0x31, 0xD2                           ; xor edx, edx
+    db 0x48, 0xFF, 0xC2                     ; inc rdx
+    db 0x48, 0x3B, 0x44, 0xD3, 0x10        ; .loop: cmp rax, [rbx+rdx*8+16]
+    db 0x7D, 4                              ; jge .skip
+    db 0x48, 0x8B, 0x44, 0xD3, 0x10        ; mov rax, [rbx+rdx*8+16]
+    db 0x48, 0xFF, 0xC2                     ; .skip: inc rdx
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0x75, 0xEF                           ; jnz .loop
+    db 0xEB, 0x02                           ; jmp .end
+    db 0x31, 0xC0                           ; .empty: xor eax, eax
+
+; codegen_emit_orig_seq_reverse: in-place reverse
+codegen_emit_orig_seq_reverse:
+    push    rax
+    push    rcx
+    push    rdx
+    push    rsi
+    lea     rsi, [rel .rev_code]
+    mov     edx, 45
+    call    emit_blob_v2
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rax
+    ret
+.rev_code:
+    db 0x48, 0x8B, 0x4B, 0x08              ; mov rcx, [rbx+8]
+    db 0x48, 0x83, 0xF9, 0x02              ; cmp rcx, 2
+    db 0x72, 22                             ; jb .done
+    db 0x48, 0x8D, 0x53, 0x10              ; lea rdx, [rbx+16] (start)
+    db 0x48, 0x8D, 0x74, 0xCB, 0x08        ; lea rsi, [rbx+rcx*8+8] (end)
+    db 0x48, 0x39, 0xF2                     ; .loop: cmp rdx, rsi
+    db 0x73, 12                             ; jae .done
+    db 0x48, 0x8B, 0x02                     ; mov rax, [rdx]
+    db 0x48, 0x87, 0x06                     ; xchg rax, [rsi]
+    db 0x48, 0x89, 0x02                     ; mov [rdx], rax
+    db 0x48, 0x83, 0xC2, 0x08              ; add rdx, 8
+    db 0x48, 0x83, 0xEE, 0x08              ; sub rsi, 8
+    db 0xEB, 0xE8                           ; jmp .loop
+
+; codegen_emit_orig_seq_sort: in-place bubble sort
+codegen_emit_orig_seq_sort:
+    push    rax
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    lea     rsi, [rel .sort_code]
+    mov     edx, 58
+    call    emit_blob_v2
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rax
+    ret
+.sort_code:
+    db 0x48, 0x8B, 0x4B, 0x08              ; mov rcx, [rbx+8]
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0x74, 48                             ; jz .done
+    db 0x51                                 ; .outer: push rcx
+    db 0x31, 0xD2                           ; xor edx, edx
+    db 0x48, 0x39, 0xCA                     ; .inner: cmp rdx, rcx
+    db 0x7D, 24                             ; jge .inner_done
+    db 0x48, 0x8B, 0x44, 0xD3, 0x10        ; mov rax, [rbx+rdx*8+16]
+    db 0x48, 0x3B, 0x44, 0xD3, 0x18        ; cmp rax, [rbx+rdx*8+24]
+    db 0x7E, 10                             ; jle .no_swap
+    db 0x48, 0x87, 0x44, 0xD3, 0x18        ; xchg rax, [rbx+rdx*8+24]
+    db 0x48, 0x89, 0x44, 0xD3, 0x10        ; mov [rbx+rdx*8+16], rax
+    db 0x48, 0xFF, 0xC2                     ; inc rdx
+    db 0xEB, 0xE1                           ; jmp .inner
+    db 0x48, 0xFF, 0xC2                     ; .no_swap: inc rdx
+    db 0xEB, 0xDC                           ; jmp .inner
+    db 0x59                                 ; .inner_done: pop rcx
+    db 0x48, 0xFF, 0xC9                     ; dec rcx
+    db 0x75, 0xDF                           ; jnz .outer
+                                           ; .done:
+
+; ============================================================
+; String method codegen emitters
+; These EMIT code that runs at runtime.
+; Parser protocol: push rax (str ptr) before calling, then call this.
+; ============================================================
+
+; codegen_emit_orig_str_upper: emit pop + call rt_strm_upper
+; Parser already pushed str ptr. This emits: pop rdi; call upper
+codegen_emit_orig_str_upper:
+    push    rax
+    ; pop rdi (48 89 C7 = mov rdi, rsp [wrong]; actually: 5F = pop rdi)
+    mov     al, 0x5F
+    call    emit_b
+    ; call rt_strm_upper (relative)
+    mov     rdi, LOAD_BASE + RT_STRM_OFFSET + 64  ; upper is at offset 64
+    call    emit_call_abs
+    pop     rax
+    ret
+
+; codegen_emit_orig_str_lower: emit pop + call rt_strm_lower
+codegen_emit_orig_str_lower:
+    push    rax
+    mov     al, 0x5F
+    call    emit_b
+    mov     rdi, LOAD_BASE + RT_STRM_OFFSET + 512  ; lower at offset 512
+    call    emit_call_abs
+    pop     rax
+    ret
+
+; codegen_emit_orig_str_trim: emit pop + call rt_strm_trim
+codegen_emit_orig_str_trim:
+    push    rax
+    mov     al, 0x5F
+    call    emit_b
+    mov     rdi, LOAD_BASE + RT_STRM_OFFSET + 1024  ; trim at offset 1024
+    call    emit_call_abs
+    pop     rax
+    ret
+
+; codegen_emit_orig_call_rt_str_len: emit pop rdi + call rt_strm_strlen
+codegen_emit_orig_call_rt_str_len:
+    push    rax
+    mov     al, 0x5F
+    call    emit_b
+    mov     rdi, LOAD_BASE + RT_STRM_OFFSET + 0  ; strlen at offset 0
+    call    emit_call_abs
+    pop     rax
+    ret
+
+; codegen_emit_orig_str_contains: emit args setup + call rt_strm_contains
+; Parser protocol: pushed haystack (str ptr), then parsed needle expr into rax.
+; Parser calls codegen_emit_orig_pop_rbx to pop haystack into rbx.
+; Then calls this function. At this point: rax = needle ptr, rbx = haystack ptr.
+; We need to emit: mov rdi, rbx; mov rsi, rax; call contains
+codegen_emit_orig_str_contains:
+    push    rax
+    push    rdi
+    ; mov rdi, rbx (48 89 DF)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xDF
+    call    emit_b
+    ; mov rsi, rax (48 89 C6)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xC6
+    call    emit_b
+    pop     rdi
+    ; call rt_strm_contains (offset 640)
+    mov     rdi, LOAD_BASE + RT_STRM_OFFSET + 1536
+    call    emit_call_abs
+    pop     rax
+    ret
+
+codegen_emit_orig_call_rt_alc:
+    mov     rdi, LOAD_BASE + RT_ALC_OFFSET
+    jmp     emit_call_abs
 
 ; ============================================================
 ; codegen_finish: patches ELF header with final sizes
@@ -7857,6 +8156,7 @@ codegen_write_runtime:
     write_blob rt_str_data, RT_STR_SIZE
     write_blob rt_inp_data, RT_INP_SIZE
     write_blob rt_str_cat_data, RT_STR_CAT_SIZE
+    write_blob rt_strm_data, RT_STRM_SIZE
 
     pop     rbx
     ret
@@ -8051,10 +8351,10 @@ cp_flush_all:
     ret
 
 ; ============================================================
-; codegen_emit_test_jnz: emit  test rax,rax; jnz placeholder
+; codegen_emit_orig_test_jnz: emit  test rax,rax; jnz placeholder
 ; Used for while-loop back-edge condition check.
 ; ============================================================
-codegen_emit_test_jnz:
+codegen_emit_orig_test_jnz:
     push    rax
     push    rbx
     ; test rax, rax  =  48 85 C0
@@ -8591,3 +8891,424 @@ ctpe_interp:
     xor     eax, eax
     xor     edx, edx
     ret
+
+; ============================================================
+; File I/O codegen emitters (§15.4)
+; ============================================================
+
+codegen_emit_orig_file_open:
+    mov     rdi, LOAD_BASE + RT_ALC_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_orig_file_read:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .read_bytes]
+    mov     edx, 12
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.read_bytes:
+    db 0x48, 0x31, 0xC0
+    db 0x0F, 0x05
+    db 0x48, 0x89, 0xC0
+
+codegen_emit_orig_file_write:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .write_bytes]
+    mov     edx, 14
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.write_bytes:
+    db 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00
+    db 0x0F, 0x05
+    db 0x48, 0x89, 0xC0
+
+codegen_emit_orig_file_close:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .close_bytes]
+    mov     edx, 14
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.close_bytes:
+    db 0x48, 0xC7, 0xC0, 0x03, 0x00, 0x00, 0x00
+    db 0x0F, 0x05
+    db 0x48, 0x89, 0xC0
+
+; ============================================================
+; Flip emitter
+; ============================================================
+codegen_emit_orig_flip_rax:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .flip_bytes]
+    mov     edx, 3
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.flip_bytes:
+    db 0x48, 0xF7, 0xD8                     ; neg rax
+
+; ============================================================
+; Type method emitters (§4.5-4.9)
+; ============================================================
+
+codegen_emit_orig_int_min:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .min_bytes]
+    mov     edx, 7
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.min_bytes:
+    db 0x48, 0x39, 0xC3
+    db 0x48, 0x0F, 0x4E, 0xC3
+
+codegen_emit_orig_int_max:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .max_bytes]
+    mov     edx, 7
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.max_bytes:
+    db 0x48, 0x39, 0xC3
+    db 0x48, 0x0F, 0x4D, 0xC3
+
+codegen_emit_orig_int_pow:
+    push    rsi
+    push    rcx
+    push    rbx
+    mov     rbx, rax
+    mov     rax, 1
+    test    rcx, rcx
+    jz      .pow_done
+.pow_loop:
+    imul    rax, rbx
+    dec     rcx
+    jnz     .pow_loop
+.pow_done:
+    pop     rbx
+    pop     rcx
+    pop     rsi
+    ret
+
+codegen_emit_orig_int_popcount:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .popcnt_bytes]
+    mov     edx, 5
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.popcnt_bytes:
+    db 0xF3, 0x48, 0x0F, 0xB8, 0xC0
+
+codegen_emit_orig_int_to_bin:
+    mov     rdi, LOAD_BASE + RT_STR_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_orig_int_to_hex:
+    mov     rdi, LOAD_BASE + RT_STR_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_orig_int_to_oct:
+    mov     rdi, LOAD_BASE + RT_STR_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_orig_float_sqrt:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .fsqrt_bytes]
+    mov     edx, 12
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.fsqrt_bytes:
+    db 0x66, 0x48, 0x0F, 0x6E, 0xC0
+    db 0xF2, 0x0F, 0x51, 0xC0
+    db 0x66, 0x48, 0x0F, 0x7E, 0xC0
+
+codegen_emit_orig_bool_is_true:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .is_true_bytes]
+    mov     edx, 11
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.is_true_bytes:
+    db 0x48, 0x83, 0xF8, 0x01
+    db 0x0F, 0x94, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_bool_is_false:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .is_false_bytes]
+    mov     edx, 11
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.is_false_bytes:
+    db 0x48, 0x83, 0xF8, 0xFF
+    db 0x0F, 0x94, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_bool_is_neutral:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .is_neutral_bytes]
+    mov     edx, 10
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.is_neutral_bytes:
+    db 0x48, 0x85, 0xC0
+    db 0x0F, 0x94, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_bool_is_decided:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .is_decided_bytes]
+    mov     edx, 10
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.is_decided_bytes:
+    db 0x48, 0x85, 0xC0
+    db 0x0F, 0x95, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_bool_flip:
+    jmp     codegen_emit_orig_flip_rax
+
+codegen_emit_orig_char_is_alpha:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .isalpha_bytes]
+    mov     edx, 38
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.isalpha_bytes:
+    ; rax = char value (0-255)
+    db 0x48, 0x0F, 0xB6, 0xC0               ; movzx rax, al
+    db 0x48, 0x89, 0xC1                      ; mov rcx, rax (save copy)
+    ; Check A-Z
+    db 0x48, 0x83, 0xE8, 0x41               ; sub rax, 0x41 ('A')
+    db 0x48, 0x83, 0xF8, 0x19               ; cmp rax, 25
+    db 0x0F, 0x96, 0xC0                      ; setbe al
+    ; Check a-z
+    db 0x48, 0x89, 0xC8                      ; mov rax, rcx (restore)
+    db 0x48, 0x83, 0xE8, 0x61               ; sub rax, 0x61 ('a')
+    db 0x48, 0x83, 0xF8, 0x19               ; cmp rax, 25
+    db 0x0F, 0x96, 0xC1                      ; setbe cl
+    ; Combine: al = is_upper OR is_lower
+    db 0x08, 0xC8                             ; or al, cl
+    ; Sign-extend to rax
+    db 0x48, 0x0F, 0xBE, 0xC0               ; movsx rax, al
+
+codegen_emit_orig_char_is_digit:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .isdigit_bytes]
+    mov     edx, 19
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.isdigit_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+    db 0x48, 0x83, 0xE8, 0x30
+    db 0x48, 0x83, 0xF8, 0x09
+    db 0x0F, 0x96, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_char_is_upper:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .isupper_bytes]
+    mov     edx, 19
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.isupper_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+    db 0x48, 0x83, 0xE8, 0x41
+    db 0x48, 0x83, 0xF8, 0x19
+    db 0x0F, 0x96, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_char_is_lower:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .islower_bytes]
+    mov     edx, 19
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.islower_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+    db 0x48, 0x83, 0xE8, 0x61
+    db 0x48, 0x83, 0xF8, 0x19
+    db 0x0F, 0x96, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_char_to_upper:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .toupper_bytes]
+    mov     edx, 28
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.toupper_bytes:
+    ; rax = char value
+    db 0x48, 0x0F, 0xB6, 0xC0               ; movzx rax, al
+    db 0x48, 0x89, 0xC1                      ; mov rcx, rax (save original)
+    ; Check if lowercase a-z
+    db 0x48, 0x83, 0xE8, 0x61               ; sub rax, 0x61 ('a')
+    db 0x48, 0x83, 0xF8, 0x19               ; cmp rax, 25
+    db 0x77, 0x07                             ; ja .done (not lowercase)
+    ; Convert: restore original and subtract 0x20
+    db 0x48, 0x89, 0xC8                      ; mov rax, rcx
+    db 0x48, 0x83, 0xE8, 0x20               ; sub rax, 0x20
+.done:
+    db 0x48, 0x0F, 0xBE, 0xC0               ; movsx rax, al
+
+codegen_emit_orig_char_to_lower:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .tolower_bytes]
+    mov     edx, 28
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.tolower_bytes:
+    ; rax = char value
+    db 0x48, 0x0F, 0xB6, 0xC0               ; movzx rax, al
+    db 0x48, 0x89, 0xC1                      ; mov rcx, rax (save original)
+    ; Check if uppercase A-Z
+    db 0x48, 0x83, 0xE8, 0x41               ; sub rax, 0x41 ('A')
+    db 0x48, 0x83, 0xF8, 0x19               ; cmp rax, 25
+    db 0x77, 0x07                             ; ja .done (not uppercase)
+    ; Convert: restore original and add 0x20
+    db 0x48, 0x89, 0xC8                      ; mov rax, rcx
+    db 0x48, 0x83, 0xC0, 0x20               ; add rax, 0x20
+.done:
+    db 0x48, 0x0F, 0xBE, 0xC0               ; movsx rax, al
+
+codegen_emit_orig_char_to_int:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .char2int_bytes]
+    mov     edx, 4
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.char2int_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+
+codegen_emit_orig_char_to_str:
+    push    rsi
+    push    rcx
+    push    rdi
+    lea     rsi, [rel .char_str_buf]
+    mov     [rsi], al
+    mov     byte [rsi+1], 0
+    lea     rdi, [rsi]
+    call    codegen_emit_orig_str_rax
+    pop     rdi
+    pop     rcx
+    pop     rsi
+    ret
+.char_str_buf: resb 2
+
+codegen_emit_orig_byte_popcount:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .bpopcnt_bytes]
+    mov     edx, 8
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.bpopcnt_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+    db 0xF3, 0x0F, 0xB8, 0xC0
+
+codegen_emit_orig_byte_to_int:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .byte2int_bytes]
+    mov     edx, 4
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.byte2int_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+
+codegen_emit_orig_byte_to_hex:
+    mov     rdi, LOAD_BASE + RT_STR_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_orig_byte_to_bin:
+    mov     rdi, LOAD_BASE + RT_STR_OFFSET
+    jmp     emit_call_abs
+
+codegen_emit_orig_byte_is_zero:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .biszero_bytes]
+    mov     edx, 14
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.biszero_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+    db 0x48, 0x85, 0xC0
+    db 0x0F, 0x94, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
+
+codegen_emit_orig_byte_is_ascii:
+    push    rsi
+    push    rcx
+    lea     rsi, [rel .bascii_bytes]
+    mov     edx, 15
+    call    emit_blob_v2
+    pop     rcx
+    pop     rsi
+    ret
+.bascii_bytes:
+    db 0x48, 0x0F, 0xB6, 0xC0
+    db 0x48, 0x83, 0xF8, 0x7F
+    db 0x0F, 0x96, 0xC0
+    db 0x48, 0x0F, 0xBE, 0xC0
