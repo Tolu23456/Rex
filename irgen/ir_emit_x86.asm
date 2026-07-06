@@ -394,6 +394,10 @@ ir_emit_x86:
     je      .op_add_stack
 
     ; All vregs in physical registers
+    ; NOTE: Assumes src1 already lives in dst — missing mov src1→dst must be
+    ; emitted when register allocation is enabled (currently disabled: wrappers
+    ; zero vreg IDs).  Also, this path emits 3 bytes (REX+op+ModRM) but the
+    ; size estimator assumes 4 — must be fixed when register path is enabled.
     ; Emit: add <dst>, <src2>  (assumes src1 already lives in dst)
     ; eax = src2 phys reg, rcx = dst phys reg
     push    rax
@@ -960,7 +964,7 @@ ir_emit_x86:
     movzx   eax, word [r13 + IR_OFF_SRC2]
     shl     eax, 6
     add     eax, VAR_STORAGE_BASE
-    mov     r11d, eax
+    mov     ebx, eax
 
     mov     al, 0x48
     call    emit_b
@@ -981,7 +985,7 @@ ir_emit_x86:
     call    emit_b
     mov     al, 0x25
     call    emit_b
-    mov     eax, r11d
+    mov     eax, ebx
     call    emit_d
 
     mov     al, 0x48

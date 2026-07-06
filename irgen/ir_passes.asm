@@ -146,6 +146,13 @@ ir_optimize_pass1:
 .fold_div:
     test    r10, r10
     jz      .pass1_next
+    ; Check for INT_MIN / -1 (signed overflow → #DE)
+    cmp     r10, -1
+    jne     .fold_div_safe
+    mov     rcx, 0x8000000000000000
+    cmp     r9, rcx
+    je      .pass1_next
+.fold_div_safe:
     mov     r11, rax
     mov     rax, r9
     cqo
@@ -156,6 +163,13 @@ ir_optimize_pass1:
 .fold_mod:
     test    r10, r10
     jz      .pass1_next
+    ; Check for INT_MIN % -1 (signed overflow → #DE)
+    cmp     r10, -1
+    jne     .fold_mod_safe
+    mov     rcx, 0x8000000000000000
+    cmp     r9, rcx
+    je      .pass1_next
+.fold_mod_safe:
     mov     r11, rax
     mov     rax, r9
     cqo
@@ -251,20 +265,43 @@ ir_optimize_pass2:
     movzx   esi, byte [rdx + IR_OFF_OPCODE]
 
     cmp     sil, IR_LOAD_VAR
-    jne     .pass2_scan_store
-    cmp     word [rdx + IR_OFF_SRC1], r14w
-    jne     .pass2_scan_inc
-    jmp     .pass2_next
-
-.pass2_scan_store:
-    cmp     sil, IR_STORE_VAR
     jne     .pass2_scan_inc
     cmp     word [rdx + IR_OFF_SRC1], r14w
     jne     .pass2_scan_inc
-    mov     byte [rax + IR_OFF_OPCODE], IR_NOP
     jmp     .pass2_next
 
 .pass2_scan_inc:
+    cmp     sil, IR_INC
+    jne     .pass2_scan_dec
+    cmp     word [rdx + IR_OFF_SRC1], r14w
+    jne     .pass2_scan_inc2
+    jmp     .pass2_next
+
+.pass2_scan_dec:
+    cmp     sil, IR_DEC
+    jne     .pass2_scan_swap
+    cmp     word [rdx + IR_OFF_SRC1], r14w
+    jne     .pass2_scan_inc2
+    jmp     .pass2_next
+
+.pass2_scan_swap:
+    cmp     sil, IR_SWAP
+    jne     .pass2_scan_store
+    cmp     word [rdx + IR_OFF_SRC1], r14w
+    je      .pass2_next
+    cmp     word [rdx + IR_OFF_SRC2], r14w
+    je      .pass2_next
+    ; fall through to store check
+
+.pass2_scan_store:
+    cmp     sil, IR_STORE_VAR
+    jne     .pass2_scan_inc2
+    cmp     word [rdx + IR_OFF_SRC1], r14w
+    jne     .pass2_scan_inc2
+    mov     byte [rax + IR_OFF_OPCODE], IR_NOP
+    jmp     .pass2_next
+
+.pass2_scan_inc2:
     inc     ecx
     jmp     .pass2_scan
 
