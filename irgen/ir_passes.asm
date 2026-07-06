@@ -690,6 +690,93 @@ ir_optimize_pass5:
     push    rbx
     push    r12
     push    r13
+    push    r14
+    push    r15
+
+    ; Phase 0: Store-Load & Redundant Load Elimination
+    ; Track last store to each variable (last_store_to_var[var_idx] = vreg)
+    ; If LOAD_VAR reads a variable that was last stored from vreg X with no
+    ; intervening modification, replace LOAD with MOV from vreg X.
+    ; Also handles the adjacent Store-Load pattern as a special case.
+    ;
+    ; Stack: last_store_to_var (256 words, init to 0xFFFF)
+    sub     rsp, 512
+
+    mov     di, 0xFFFF
+    lea     rdi, [rsp]
+    mov     ecx, 256
+    rep stosw
+
+    lea     r12, [ir_buffer]
+    mov     r13d, [ir_idx]
+    xor     ebx, ebx
+
+.pass5_sle_loop:
+    cmp     ebx, r13d
+    jae     .pass5_sle_done
+
+    mov     rax, rbx
+    shl     rax, 5
+    add     rax, r12
+
+    movzx   ecx, byte [rax + IR_OFF_OPCODE]
+
+    ; STORE_VAR: record last store to the variable
+    cmp     cl, IR_STORE_VAR
+    jne     .pass5_sle_not_store
+    movzx   r14d, word [rax + IR_OFF_SRC1]    ; var_idx
+    cmp     r14d, 256
+    jae     .pass5_sle_next
+    movzx   r15d, word [rax + IR_OFF_SRC2]    ; vreg that was stored
+    mov     word [rsp + r14*2], r15w
+    jmp     .pass5_sle_next
+
+.pass5_sle_not_store:
+    ; LOAD_VAR: check if variable was last stored from a known vreg
+    cmp     cl, IR_LOAD_VAR
+    jne     .pass5_sle_not_load
+    movzx   r14d, word [rax + IR_OFF_SRC1]    ; var_idx
+    cmp     r14d, 256
+    jae     .pass5_sle_next
+    movzx   r15d, word [rsp + r14*2]          ; last stored vreg (0xFFFF = none)
+    cmp     r15w, 0xFFFF
+    je      .pass5_sle_next
+    ; Redundant load: replace LOAD_VAR with MOV
+    mov     byte [rax + IR_OFF_OPCODE], IR_MOV
+    mov     word [rax + IR_OFF_SRC1], r15w
+    mov     word [rax + IR_OFF_SRC2], 0
+    jmp     .pass5_sle_next
+
+.pass5_sle_not_load:
+    ; INC/DEC: invalidates the variable being modified
+    cmp     cl, IR_INC
+    je      .pass5_sle_invalidate
+    cmp     cl, IR_DEC
+    jne     .pass5_sle_not_mod
+
+.pass5_sle_invalidate:
+    movzx   r14d, word [rax + IR_OFF_SRC1]
+    cmp     r14d, 256
+    jae     .pass5_sle_next
+    mov     word [rsp + r14*2], 0xFFFF
+    jmp     .pass5_sle_next
+
+.pass5_sle_not_mod:
+    ; STORE_GLOBAL: invalidate any variable (conservative)
+    cmp     cl, IR_STORE_GLOBAL
+    jne     .pass5_sle_next
+    ; Invalidate all tracked variables (conservative, no alias analysis)
+    mov     di, 0xFFFF
+    lea     rdi, [rsp]
+    mov     ecx, 256
+    rep stosw
+
+.pass5_sle_next:
+    inc     ebx
+    jmp     .pass5_sle_loop
+
+.pass5_sle_done:
+    add     rsp, 512
 
     sub     rsp, 2048 + 256
 
@@ -794,6 +881,8 @@ ir_optimize_pass5:
 
 .pass5_done:
     add     rsp, 2048 + 256
+    pop     r15
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx
