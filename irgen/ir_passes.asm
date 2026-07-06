@@ -336,7 +336,122 @@ ir_optimize_pass4:
     ret
 
 ; ============================================================
-; ir_optimize_pass5 — Peephole Optimization (stub)
+; ir_optimize_pass5 — Peephole Optimization
+;   Pattern 3: INC/DEC recognition
+;     IR_ADD dst, src1, src2 where src2 is known 1 → IR_INC dst, src1
+;     IR_SUB dst, src1, src2 where src2 is known 1 → IR_DEC dst, src1
+;   Pattern 5: Strength reduction
+;     IR_MUL dst, src1, src2 where src2 is known 2 → IR_BSHL dst, src1, imm=1
 ; ============================================================
 ir_optimize_pass5:
+    push    rbx
+    push    r12
+    push    r13
+
+    sub     rsp, 2048 + 256
+
+    lea     rdi, [rsp + 2048]
+    xor     eax, eax
+    mov     ecx, 256
+    rep stosb
+
+    lea     rdi, [rsp]
+    mov     ecx, 256
+    rep stosq
+
+    lea     r12, [ir_buffer]
+    mov     r13d, [ir_idx]
+    xor     ebx, ebx
+
+.pass5_loop:
+    cmp     ebx, r13d
+    jae     .pass5_done
+
+    mov     rax, rbx
+    shl     rax, 5
+    add     rax, r12
+
+    movzx   ecx, byte [rax + IR_OFF_OPCODE]
+
+    cmp     cl, IR_NOP
+    je      .pass5_next
+
+    cmp     cl, IR_LOAD_IMM
+    je      .pass5_load_imm
+
+    cmp     cl, IR_ADD
+    je      .pass5_check_inc
+
+    cmp     cl, IR_SUB
+    je      .pass5_check_dec
+
+    cmp     cl, IR_MUL
+    je      .pass5_check_shl
+
+    jmp     .pass5_invalidate_dst
+
+.pass5_load_imm:
+    movzx   edx, word [rax + IR_OFF_DST]
+    cmp     edx, 256
+    jae     .pass5_next
+    mov     r8, [rax + IR_OFF_IMM]
+    mov     [rsp + rdx*8], r8
+    mov     byte [rsp + 2048 + rdx], 1
+    jmp     .pass5_next
+
+.pass5_check_inc:
+    movzx   edx, word [rax + IR_OFF_SRC2]
+    cmp     edx, 256
+    jae     .pass5_next
+    cmp     byte [rsp + 2048 + rdx], 0
+    je      .pass5_next
+    cmp     qword [rsp + rdx*8], 1
+    jne     .pass5_next
+
+    mov     byte [rax + IR_OFF_OPCODE], IR_INC
+    mov     word [rax + IR_OFF_SRC2], 0
+    jmp     .pass5_invalidate_dst
+
+.pass5_check_dec:
+    movzx   edx, word [rax + IR_OFF_SRC2]
+    cmp     edx, 256
+    jae     .pass5_next
+    cmp     byte [rsp + 2048 + rdx], 0
+    je      .pass5_next
+    cmp     qword [rsp + rdx*8], 1
+    jne     .pass5_next
+
+    mov     byte [rax + IR_OFF_OPCODE], IR_DEC
+    mov     word [rax + IR_OFF_SRC2], 0
+    jmp     .pass5_invalidate_dst
+
+.pass5_check_shl:
+    movzx   edx, word [rax + IR_OFF_SRC2]
+    cmp     edx, 256
+    jae     .pass5_next
+    cmp     byte [rsp + 2048 + rdx], 0
+    je      .pass5_next
+    cmp     qword [rsp + rdx*8], 2
+    jne     .pass5_next
+
+    mov     byte [rax + IR_OFF_OPCODE], IR_BSHL
+    mov     word [rax + IR_OFF_SRC2], 0
+    mov     qword [rax + IR_OFF_IMM], 1
+    jmp     .pass5_invalidate_dst
+
+.pass5_invalidate_dst:
+    movzx   ecx, word [rax + IR_OFF_DST]
+    cmp     ecx, 256
+    jae     .pass5_next
+    mov     byte [rsp + 2048 + rcx], 0
+
+.pass5_next:
+    inc     ebx
+    jmp     .pass5_loop
+
+.pass5_done:
+    add     rsp, 2048 + 256
+    pop     r13
+    pop     r12
+    pop     rbx
     ret
