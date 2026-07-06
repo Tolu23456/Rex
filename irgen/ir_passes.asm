@@ -893,6 +893,374 @@ ir_optimize_pass5:
 
 .pass5_done:
     add     rsp, 2048 + 256
+
+    ; ============================================================
+    ; Phase 3: Loop Step Doubling & LICM
+    ;
+    ; Step Doubling: Detect loops with step=1 and small bodies
+    ; (< 8 IR records, no stop/skip). Change step from 1 to 2.
+    ;
+    ; LICM: Move IR_LOAD_IMM before loop if its dst vreg is not
+    ; read by any other instruction in the loop body.
+    ; ============================================================
+
+    ; Stack: loop_tops (256 dwords) + scratch (256 dwords + 256 bytes)
+    ; loop_tops[label_id] = position of IR_LABEL (0 = not a loop top)
+    sub     rsp, 2048
+
+    ; Zero loop_tops
+    lea     rdi, [rsp]
+    xor     eax, eax
+    mov     ecx, 512
+    rep stosd
+
+    lea     r12, [ir_buffer]
+    mov     r13d, [ir_idx]
+
+    ; --- Pass 3a: Find backward jumps to identify loop tops ---
+    ; For each IR_JMP, if it targets a label that appears earlier
+    ; in the IR stream, that label is a loop top.
+    xor     ebx, ebx
+
+.pass5_loop_scan:
+    cmp     ebx, r13d
+    jae     .pass5_loop_scan_done
+
+    mov     rax, rbx
+    shl     rax, 5
+    add     rax, r12
+
+    cmp     byte [rax + IR_OFF_OPCODE], IR_JMP
+    jne     .pass5_loop_scan_next
+
+    ; Get the label this JMP targets (imm field holds label id)
+    mov     ecx, dword [rax + IR_OFF_IMM]
+    cmp     ecx, 256
+    jae     .pass5_loop_scan_next
+
+    ; Check if that label appears earlier (backward jump = loop back-edge)
+    xor     edx, edx
+.pass5_find_label:
+    cmp     edx, ebx
+    jae     .pass5_loop_scan_next
+
+    mov     rsi, rdx
+    shl     rsi, 5
+    add     rsi, r12
+
+    cmp     byte [rsi + IR_OFF_OPCODE], IR_LABEL
+    jne     .pass5_find_label_next
+
+    mov     edi, dword [rsi + IR_OFF_IMM]
+    cmp     edi, ecx
+    jne     .pass5_find_label_next
+
+    ; Found backward jump — mark label ecx as loop top at position edx
+    mov     dword [rsp + rcx*4], edx
+    jmp     .pass5_loop_scan_next
+
+.pass5_find_label_next:
+    inc     edx
+    jmp     .pass5_find_label
+
+.pass5_loop_scan_next:
+    inc     ebx
+    jmp     .pass5_loop_scan
+
+.pass5_loop_scan_done:
+
+    ; --- Pass 3b: Step doubling + LICM for each loop ---
+    mov     r14d, 0         ; label index
+
+.pass5_opt_loop:
+    cmp     r14d, 256
+    jae     .pass5_opt_done
+
+    mov     eax, dword [rsp + r14*4]
+    test    eax, eax
+    jz      .pass5_opt_next
+
+    ; eax = loop_top position (IR_LABEL), r14d = label_id
+    mov     r15d, eax        ; r15 = loop_top pos
+
+    ; Find the back-edge IR_JMP that targets this label
+    mov     ebx, r15d
+    inc     ebx
+
+.pass5_find_be:
+    cmp     ebx, r13d
+    jae     .pass5_opt_next
+
+    mov     rax, rbx
+    shl     rax, 5
+    add     rax, r12
+
+    cmp     byte [rax + IR_OFF_OPCODE], IR_JMP
+    jne     .pass5_find_be_next
+
+    mov     ecx, dword [rax + IR_OFF_IMM]
+    cmp     ecx, r14d
+    jne     .pass5_find_be_next
+
+    ; Found back-edge at position ebx. Loop body: r15+1 .. ebx-1
+    jmp     .pass5_have_loop
+
+.pass5_find_be_next:
+    inc     ebx
+    jmp     .pass5_find_be
+
+.pass5_have_loop:
+    ; ---- Step Doubling ----
+    ; Check body size <= 8 records
+    mov     esi, ebx
+    sub     esi, r15d
+    dec     esi
+    cmp     esi, 8
+    ja      .pass5_try_licm
+
+    ; Check for IR_JMP or IR_RET in body (skip doubling if found)
+    mov     edi, r15d
+    inc     edi
+.pass5_check_body:
+    cmp     edi, ebx
+    jae     .pass5_body_ok
+
+    mov     rax, rdi
+    shl     rax, 5
+    add     rax, r12
+
+    movzx   ecx, byte [rax + IR_OFF_OPCODE]
+    cmp     cl, IR_JMP
+    je      .pass5_try_licm
+    cmp     cl, IR_RET
+    je      .pass5_try_licm
+
+    inc     edi
+    jmp     .pass5_check_body
+
+.pass5_body_ok:
+    ; Find the comparison (IR_CMP) before the back-edge to identify loop var
+    mov     edi, ebx
+    dec     edi
+.pass5_find_cmp:
+    cmp     edi, r15d
+    jb      .pass5_try_licm
+
+    mov     rax, rdi
+    shl     rax, 5
+    add     rax, r12
+
+    cmp     byte [rax + IR_OFF_OPCODE], IR_CMP
+    je      .pass5_have_cmp
+
+    dec     edi
+    jmp     .pass5_find_cmp
+
+.pass5_have_cmp:
+    ; Loop var = src1 of CMP
+    movzx   r8d, word [rax + IR_OFF_SRC1]
+
+    ; Scan loop body for the increment of loop_var
+    mov     edi, r15d
+    inc     edi
+.pass5_find_inc:
+    cmp     edi, ebx
+    jae     .pass5_try_licm
+
+    mov     rax, rdi
+    shl     rax, 5
+    add     rax, r12
+
+    ; Check for IR_INC loop_var, loop_var
+    cmp     byte [rax + IR_OFF_OPCODE], IR_INC
+    jne     .pass5_check_add
+
+    cmp     word [rax + IR_OFF_DST], r8w
+    jne     .pass5_check_add
+    cmp     word [rax + IR_OFF_SRC1], r8w
+    jne     .pass5_check_add
+
+    ; Found IR_INC loop_var → convert to IR_ADD with step=2
+    mov     byte [rax + IR_OFF_OPCODE], IR_ADD
+    mov     word [rax + IR_OFF_SRC2], 0
+    mov     qword [rax + IR_OFF_IMM], 2
+    jmp     .pass5_opt_next
+
+.pass5_check_add:
+    ; Check for IR_ADD loop_var, loop_var, 1
+    cmp     byte [rax + IR_OFF_OPCODE], IR_ADD
+    jne     .pass5_find_inc_next
+
+    cmp     word [rax + IR_OFF_DST], r8w
+    jne     .pass5_find_inc_next
+    cmp     word [rax + IR_OFF_SRC1], r8w
+    jne     .pass5_find_inc_next
+
+    ; Check if step is 1: either src2=0 and imm=1, or src2 points to const 1
+    movzx   ecx, word [rax + IR_OFF_SRC2]
+    test    cx, cx
+    jz      .pass5_check_add_imm
+
+    ; src2 is a vreg — check if it's known constant 1 (from pass5 const tracking)
+    cmp     ecx, 256
+    jae     .pass5_find_inc_next
+
+    ; We no longer have the const table (freed at pass5_done). Skip vreg case.
+    jmp     .pass5_find_inc_next
+
+.pass5_check_add_imm:
+    ; Check immediate field = 1
+    cmp     qword [rax + IR_OFF_IMM], 1
+    jne     .pass5_find_inc_next
+
+    ; Change step to 2
+    mov     qword [rax + IR_OFF_IMM], 2
+    jmp     .pass5_opt_next
+
+.pass5_find_inc_next:
+    inc     edi
+    jmp     .pass5_find_inc
+
+.pass5_try_licm:
+    ; ---- LICM: hoist IR_LOAD_IMM ----
+    ; For each IR_LOAD_IMM in the loop body, if its dst vreg is not
+    ; used as src by any other instruction in the body, move it before
+    ; the loop label.
+    mov     edi, r15d
+    inc     edi
+
+.pass5_licm_try:
+    cmp     edi, ebx
+    jae     .pass5_opt_next
+
+    mov     rax, rdi
+    shl     rax, 5
+    add     rax, r12
+
+    cmp     byte [rax + IR_OFF_OPCODE], IR_LOAD_IMM
+    jne     .pass5_licm_try_next
+
+    movzx   r8d, word [rax + IR_OFF_DST]
+    test    r8w, r8w
+    jz      .pass5_licm_try_next
+    cmp     r8d, 65535
+    jae     .pass5_licm_try_next
+
+    ; Check if r8w is used as src by any other instruction in the body
+    mov     r9d, edi         ; r9 = candidate position
+    mov     esi, r15d
+    inc     esi
+
+.pass5_licm_check_use:
+    cmp     esi, ebx
+    jae     .pass5_licm_can_hoist
+
+    cmp     esi, r9d
+    je      .pass5_licm_check_use_next
+
+    mov     rax, rsi
+    shl     rax, 5
+    add     rax, r12
+
+    cmp     word [rax + IR_OFF_SRC1], r8w
+    je      .pass5_licm_try_next
+    cmp     word [rax + IR_OFF_SRC2], r8w
+    je      .pass5_licm_try_next
+
+.pass5_licm_check_use_next:
+    inc     esi
+    jmp     .pass5_licm_check_use
+
+.pass5_licm_can_hoist:
+    ; Hoist: insert a copy of this IR_LOAD_IMM at r15 (before IR_LABEL)
+    ; by shifting r15..r9 down by 1, then NOP the original.
+    ; Save the 32-byte record to stack.
+
+    mov     rax, r9
+    shl     rax, 5
+    add     rax, r12
+
+    ; Save to stack scratch area (use rsp+1536 which is within our 2048 alloc)
+    push    rbx
+    push    r8
+    push    r9
+    push    r10
+    push    r11
+    sub     rsp, 32
+
+    ; Copy 32 bytes from rax to [rsp]
+    mov     rsi, rax
+    mov     rdi, rsp
+    mov     rcx, 4
+    rep movsq
+
+    ; Shift instructions from r15..r9-1 down by 1 position
+    ; Start from r9-1 and copy each to position+1
+    mov     edi, r9d
+    dec     edi
+
+.pass5_licm_shift:
+    cmp     edi, r15d
+    jb      .pass5_licm_shift_done
+
+    mov     rax, rdi
+    shl     rax, 5
+    add     rax, r12
+
+    ; Copy [rax] to [rax+32]
+    mov     rsi, rax
+    lea     rdi, [rax + 32]
+    mov     rcx, 4
+    push    rdi
+    rep movsq
+    pop     rdi
+
+    dec     edi
+    jmp     .pass5_licm_shift
+
+.pass5_licm_shift_done:
+    ; Place saved instruction at r15 (before IR_LABEL)
+    mov     rax, r15
+    shl     rax, 5
+    add     rax, r12
+
+    mov     rsi, rsp
+    mov     rdi, rax
+    mov     rcx, 4
+    rep movsq
+
+    add     rsp, 32
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r8
+    pop     rbx
+
+    ; NOP the original LOAD_IMM (now shifted to r9+1)
+    mov     rax, r9
+    inc     rax
+    shl     rax, 5
+    add     rax, r12
+    mov     byte [rax + IR_OFF_OPCODE], IR_NOP
+
+    ; ir_idx increased by 1 due to insertion
+    inc     dword [ir_idx]
+    mov     r13d, [ir_idx]
+
+    ; Adjust back-edge position (shifted by 1)
+    inc     ebx
+
+.pass5_licm_try_next:
+    inc     edi
+    jmp     .pass5_licm_try
+
+.pass5_opt_next:
+    inc     r14d
+    jmp     .pass5_opt_loop
+
+.pass5_opt_done:
+    add     rsp, 2048
+
     pop     r15
     pop     r14
     pop     r13
