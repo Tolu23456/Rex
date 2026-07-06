@@ -300,21 +300,17 @@ ir_emit_x86:
     jmp     .p2
 
 ; ============================================================
-; IR_SUB: pop rbx; xchg rax,rbx; sub rax,rbx
-; 5B 48 93 48 29 C3
+; IR_SUB: pop rbx; sub rax,rbx
+; 5B 48 29 D8
 ; ============================================================
 .op_sub:
     mov     al, 0x5B
     call    emit_b
     mov     al, 0x48
     call    emit_b
-    mov     al, 0x93
-    call    emit_b
-    mov     al, 0x48
-    call    emit_b
     mov     al, 0x29
     call    emit_b
-    mov     al, 0xC3
+    mov     al, 0xD8
     call    emit_b
     inc     r12
     jmp     .p2
@@ -337,15 +333,11 @@ ir_emit_x86:
     jmp     .p2
 
 ; ============================================================
-; IR_DIV: pop rbx; xchg rax,rbx; cqo; idiv rbx
-; 5B 48 93 48 99 48 F7 FB
+; IR_DIV: pop rbx; cqo; idiv rbx
+; 5B 48 99 48 F7 FB
 ; ============================================================
 .op_div:
     mov     al, 0x5B
-    call    emit_b
-    mov     al, 0x48
-    call    emit_b
-    mov     al, 0x93
     call    emit_b
     mov     al, 0x48
     call    emit_b
@@ -362,14 +354,10 @@ ir_emit_x86:
 
 ; ============================================================
 ; IR_MOD: same as DIV + mov rax,rdx
-; 5B 48 93 48 99 48 F7 FB 48 89 D0
+; 5B 48 99 48 F7 FB 48 89 D0
 ; ============================================================
 .op_mod:
     mov     al, 0x5B
-    call    emit_b
-    mov     al, 0x48
-    call    emit_b
-    mov     al, 0x93
     call    emit_b
     mov     al, 0x48
     call    emit_b
@@ -396,10 +384,6 @@ ir_emit_x86:
 ; ============================================================
 .op_idiv:
     mov     al, 0x5B
-    call    emit_b
-    mov     al, 0x48
-    call    emit_b
-    mov     al, 0x93
     call    emit_b
     mov     al, 0x48
     call    emit_b
@@ -592,7 +576,7 @@ ir_emit_x86:
     movzx   eax, word [r13 + IR_OFF_IMM]
     mov     eax, [emit_label_offs + rax*4]
     mov     rcx, [out_idx]
-    add     rcx, 8
+    add     rcx, 9
     sub     eax, ecx
     mov     r14d, eax
     mov     al, 0x48
@@ -618,7 +602,7 @@ ir_emit_x86:
     movzx   eax, word [r13 + IR_OFF_IMM]
     mov     eax, [emit_label_offs + rax*4]
     mov     rcx, [out_idx]
-    add     rcx, 8
+    add     rcx, 9
     sub     eax, ecx
     mov     r14d, eax
     mov     al, 0x48
@@ -941,8 +925,6 @@ ir_emit_x86:
     call    emit_b
     mov     al, 0x00
     call    emit_b
-    mov     al, 0x08
-    call    emit_b
     xor     eax, eax
     call    emit_d
 
@@ -955,7 +937,6 @@ ir_emit_x86:
     mov     al, 0x08
     call    emit_b
     xor     eax, eax
-    call    emit_d
     call    emit_d
 
     inc     r12
@@ -990,11 +971,7 @@ ir_emit_x86:
 .op_dict_new:
     mov     al, 0xBF
     call    emit_b
-    mov     al, 0x00
-    call    emit_b
-    mov     al, 0x01
-    call    emit_b
-    xor     eax, eax
+    mov     eax, 256
     call    emit_d
 
     mov     eax, LOAD_BASE + RT_ALC_OFFSET
@@ -1131,15 +1108,15 @@ ir_emit_x86:
     cmp     al, IR_ADD
     je      .est_4
     cmp     al, IR_SUB
-    je      .est_6
+    je      .est_4
     cmp     al, IR_MUL
     je      .est_5
     cmp     al, IR_DIV
-    je      .est_8
+    je      .est_6
     cmp     al, IR_MOD
-    je      .est_11
+    je      .est_9
     cmp     al, IR_IDIV
-    je      .est_8
+    je      .est_6
     cmp     al, IR_NEG
     je      .est_3
     cmp     al, IR_CMP
@@ -1155,9 +1132,9 @@ ir_emit_x86:
     cmp     al, IR_JMP
     je      .est_5
     cmp     al, IR_JMP_TRUE
-    je      .est_8
+    je      .est_9
     cmp     al, IR_JMP_FALSE
-    je      .est_8
+    je      .est_9
     cmp     al, IR_JMP_CMP
     je      .est_6
     cmp     al, IR_CALL
