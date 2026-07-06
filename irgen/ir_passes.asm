@@ -12,6 +12,35 @@ default rel
 extern ir_buffer
 extern ir_idx
 
+; ============================================================
+; Register Allocation Constants
+; ============================================================
+%define REG_POOL_SIZE   12
+%define REG_SPILLED     0xFF
+
+section .bss
+
+live_start:     resw 256    ; first definition index per vreg
+live_end:       resw 256    ; last use index per vreg
+vreg_phys:      resw 256    ; physical register assignment per vreg (0xFF = spilled)
+spill_slot:     resw 256    ; stack offset for spilled vregs
+num_spills:     resw 1      ; count of spill slots used
+sorted_vregs:   resw 256    ; vreg IDs sorted by live_start
+sorted_start:   resw 256    ; corresponding live_start values
+sorted_end:     resw 256    ; corresponding live_end values
+sorted_count:   resw 1      ; number of vregs with live ranges
+active_vregs:   resw 12     ; active vreg IDs
+active_phys:    resw 12     ; active physical register IDs
+active_end:     resw 12     ; active live_end values
+active_count:   resw 1      ; number of active vregs
+
+section .data
+
+; Register pool in priority order (most preferred first)
+; r10(8), r11(9), r8(6), r9(7), rsi(4), rdi(5), rcx(2), rdx(3), r12(10), r13(11), rbx(1), rax(0)
+reg_pool:
+    dw 8, 9, 6, 7, 4, 5, 2, 3, 10, 11, 1, 0
+
 section .text
 
 global ir_optimize_pass1
@@ -19,6 +48,7 @@ global ir_optimize_pass2
 global ir_optimize_pass3
 global ir_optimize_pass4
 global ir_optimize_pass5
+global vreg_phys
 
 ; ============================================================
 ; ir_optimize_pass1 — Constant Folding
@@ -330,9 +360,285 @@ ir_optimize_pass3:
     ret
 
 ; ============================================================
-; ir_optimize_pass4 — Linear Scan Register Allocation (stub)
+; ir_optimize_pass4 — Linear Scan Register Allocation
+;
+; Phase A: Compute live ranges for each vreg by scanning ir_buffer.
+; Phase B: Assign physical registers using linear scan algorithm.
+;   - Available pool: 12 GPRs (r10,r11,r8,r9,rsi,rdi,rcx,rdx,r12,r13,rbx,rax)
+;   - r14,r15 excluded (used by type propagation and loop pin)
+;   - Vregs that cannot be assigned are marked spilled (0xFF)
+;
+; Results stored in vreg_phys[vreg_id] → physical register ID or 0xFF.
+; The x86 emission pass reads vreg_phys to emit register-to-register
+; instructions instead of stack-based operations.
 ; ============================================================
 ir_optimize_pass4:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    ; ---- Phase A: Zero arrays ----
+    lea     rdi, [live_start]
+    xor     eax, eax
+    mov     ecx, 256
+    rep stosw
+
+    lea     rdi, [live_end]
+    mov     ecx, 256
+    rep stosw
+
+    lea     rdi, [vreg_phys]
+    mov     ax, REG_SPILLED
+    mov     ecx, 256
+    rep stosw
+
+    mov     word [num_spills], 0
+    mov     word [sorted_count], 0
+    mov     word [active_count], 0
+
+    ; ---- Phase A: Compute live ranges ----
+    lea     r12, [ir_buffer]
+    mov     r13d, [ir_idx]
+    xor     ebx, ebx
+
+.pass4_scan:
+    cmp     ebx, r13d
+    jae     .pass4_scan_done
+
+    mov     rax, rbx
+    shl     rax, 5
+    add     rax, r12
+
+    ; Check dst: first definition of this vreg
+    movzx   ecx, word [rax + IR_OFF_DST]
+    test    cx, cx
+    jz      .pass4_scan_src1
+    cmp     ecx, 256
+    jae     .pass4_scan_src1
+    cmp     word [live_start + rcx*2], 0
+    jne     .pass4_scan_src1
+    mov     word [live_start + rcx*2], bx
+
+.pass4_scan_src1:
+    ; Check src1: last use of this vreg
+    movzx   ecx, word [rax + IR_OFF_SRC1]
+    test    cx, cx
+    jz      .pass4_scan_src2
+    cmp     ecx, 256
+    jae     .pass4_scan_src2
+    mov     word [live_end + rcx*2], bx
+
+.pass4_scan_src2:
+    ; Check src2: last use of this vreg
+    movzx   ecx, word [rax + IR_OFF_SRC2]
+    test    cx, cx
+    jz      .pass4_scan_next
+    cmp     ecx, 256
+    jae     .pass4_scan_next
+    mov     word [live_end + rcx*2], bx
+
+.pass4_scan_next:
+    inc     ebx
+    jmp     .pass4_scan
+
+.pass4_scan_done:
+    ; ---- Phase B: Assign physical registers ----
+
+    ; Build sorted list of vregs with live ranges
+    mov     word [sorted_count], 0
+    mov     r14d, 1
+
+.pass4_build:
+    cmp     r14d, 256
+    jae     .pass4_build_done
+
+    movzx   eax, word [live_start + r14*2]
+    test    ax, ax
+    jz      .pass4_build_next
+
+    movzx   ecx, word [sorted_count]
+    mov     word [sorted_vregs + rcx*2], r14w
+    mov     word [sorted_start + rcx*2], ax
+    movzx   eax, word [live_end + r14*2]
+    mov     word [sorted_end + rcx*2], ax
+    inc     word [sorted_count]
+
+.pass4_build_next:
+    inc     r14d
+    jmp     .pass4_build
+
+.pass4_build_done:
+    ; Sort by live_start ascending (insertion sort)
+    movzx   ecx, word [sorted_count]
+    cmp     ecx, 2
+    jb      .pass4_sort_done
+
+    mov     r14d, 1
+
+.pass4_sort_outer:
+    cmp     r14d, ecx
+    jae     .pass4_sort_done
+
+    movzx   eax, word [sorted_start + r14*2]
+    mov     r15d, eax
+    movzx   edx, word [sorted_vregs + r14*2]
+    mov     r12d, edx
+    movzx   edx, word [sorted_end + r14*2]
+    mov     r13d, edx
+
+    mov     ebx, r14d
+    dec     ebx
+
+.pass4_sort_inner:
+    cmp     ebx, 0
+    jl      .pass4_sort_insert
+
+    movzx   eax, word [sorted_start + rbx*2]
+    cmp     ax, r15w
+    jbe     .pass4_sort_insert
+
+    movzx   edx, word [sorted_vregs + rbx*2]
+    mov     word [sorted_vregs + (rbx+1)*2], dx
+    movzx   edx, word [sorted_start + rbx*2]
+    mov     word [sorted_start + (rbx+1)*2], dx
+    movzx   edx, word [sorted_end + rbx*2]
+    mov     word [sorted_end + (rbx+1)*2], dx
+
+    dec     ebx
+    jmp     .pass4_sort_inner
+
+.pass4_sort_insert:
+    inc     ebx
+    mov     word [sorted_vregs + rbx*2], r12w
+    mov     word [sorted_start + rbx*2], r15w
+    mov     word [sorted_end + rbx*2], r13w
+
+    inc     r14d
+    movzx   ecx, word [sorted_count]
+    jmp     .pass4_sort_outer
+
+.pass4_sort_done:
+    ; Linear scan over sorted vregs
+    mov     word [active_count], 0
+    xor     ebx, ebx        ; pool index
+    mov     r14d, 0         ; sorted index
+
+.pass4_linear:
+    movzx   eax, word [sorted_count]
+    cmp     r14d, eax
+    jae     .pass4_linear_done
+
+    movzx   eax, word [sorted_vregs + r14*2]
+    mov     r12d, eax        ; r12 = current vreg
+    movzx   eax, word [sorted_start + r14*2]
+    mov     r13d, eax        ; r13 = current live_start
+    movzx   eax, word [sorted_end + r14*2]
+    mov     r15d, eax        ; r15 = current live_end
+
+    ; Remove expired vregs from active list
+    movzx   ecx, word [active_count]
+    xor     edx, edx
+
+.pass4_remove:
+    cmp     edx, ecx
+    jae     .pass4_remove_done
+
+    movzx   eax, word [active_end + rdx*2]
+    cmp     ax, r13w
+    jae     .pass4_remove_next
+
+    ; Expired: shift left
+    dec     ecx
+    mov     esi, edx
+.pass4_remove_shift:
+    cmp     esi, ecx
+    jge     .pass4_remove_shift_done
+    movzx   eax, word [active_vregs + (rsi+1)*2]
+    mov     word [active_vregs + rsi*2], ax
+    movzx   eax, word [active_phys + (rsi+1)*2]
+    mov     word [active_phys + rsi*2], ax
+    movzx   eax, word [active_end + (rsi+1)*2]
+    mov     word [active_end + rsi*2], ax
+    inc     esi
+    jmp     .pass4_remove_shift
+.pass4_remove_shift_done:
+    dec     edx
+    jmp     .pass4_remove_next
+
+.pass4_remove_next:
+    inc     edx
+    jmp     .pass4_remove
+
+.pass4_remove_done:
+    mov     word [active_count], cx
+
+    ; Try to assign a free physical register
+    cmp     ebx, REG_POOL_SIZE
+    jae     .pass4_try_spill
+
+    movzx   eax, word [reg_pool + ebx*2]
+    mov     word [vreg_phys + r12*2], ax
+
+    movzx   ecx, word [active_count]
+    mov     word [active_vregs + rcx*2], r12w
+    mov     word [active_phys + rcx*2], ax
+    mov     word [active_end + rcx*2], r15w
+    inc     word [active_count]
+
+    inc     ebx
+    jmp     .pass4_linear_next
+
+.pass4_try_spill:
+    ; All registers in use — find active vreg with furthest live_end
+    movzx   ecx, word [active_count]
+    test    ecx, ecx
+    jz      .pass4_linear_next
+
+    xor     edx, edx        ; furthest index
+    xor     esi, esi        ; scan index
+    movzx   eax, word [active_end]
+    mov     edi, eax        ; furthest_end
+
+.pass4_find_furthest:
+    inc     esi
+    cmp     esi, ecx
+    jae     .pass4_check_furthest
+    movzx   eax, word [active_end + rsi*2]
+    cmp     ax, di
+    jbe     .pass4_find_furthest
+    mov     edi, eax
+    mov     edx, esi
+    jmp     .pass4_find_furthest
+
+.pass4_check_furthest:
+    ; If current vreg dies later than the furthest active, spill current
+    cmp     r15w, di
+    ja      .pass4_linear_next
+
+    ; Spill the active vreg with furthest live_end
+    movzx   eax, word [active_vregs + rdx*2]
+    mov     word [vreg_phys + rax*2], REG_SPILLED
+
+    ; Reuse its register for current vreg
+    movzx   eax, word [active_phys + rdx*2]
+    mov     word [vreg_phys + r12*2], ax
+
+    ; Update active list entry
+    mov     word [active_vregs + rdx*2], r12w
+    mov     word [active_end + rdx*2], r15w
+
+.pass4_linear_next:
+    inc     r14d
+    jmp     .pass4_linear
+
+.pass4_linear_done:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
     ret
 
 ; ============================================================

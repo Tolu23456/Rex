@@ -14,6 +14,52 @@ extern emit_b, emit_d, emit_q
 extern ir_buffer, ir_idx
 extern proto_table
 extern out_idx
+extern vreg_phys
+
+; ============================================================
+; Register ID → x86 register code mapping
+; My IDs: rax=0, rbx=1, rcx=2, rdx=3, rsi=4, rdi=5,
+;         r8=6, r9=7, r10=8, r11=9, r12=10, r13=11, r14=12, r15=13
+; x86 codes: rax=0, rcx=1, rdx=2, rbx=3, rsi=6, rdi=7,
+;            r8=8, r9=9, r10=10, r11=11, r12=12, r13=13, r14=14, r15=15
+; ============================================================
+section .data
+reg_to_x86:
+    db 0, 3, 1, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+
+section .text
+
+; ============================================================
+; check_vreg_phys — look up physical register for a vreg
+; Input:  eax = vreg ID
+; Output: eax = physical register ID (0–13), or -1 if spilled/unknown
+; Clobbers: rcx
+; ============================================================
+check_vreg_phys:
+    test    ax, ax
+    jz      .not_assigned
+    cmp     eax, 256
+    jae     .not_assigned
+    movzx   eax, word [vreg_phys + rax*2]
+    cmp     ax, 0xFF
+    je      .not_assigned
+    ret
+.not_assigned:
+    mov     eax, -1
+    ret
+
+; ============================================================
+; emit_rex_modrm — emit REX prefix + opcode + ModRM for reg-reg op
+; Input:  cl = REX byte, dl = opcode, sil = modrm byte
+; ============================================================
+emit_rex_modrm:
+    mov     al, cl
+    call    emit_b
+    mov     al, dl
+    call    emit_b
+    mov     al, sil
+    call    emit_b
+    ret
 
 section .bss
 emit_label_offs: resd LABEL_MAX
@@ -217,9 +263,47 @@ ir_emit_x86:
 ; ============================================================
 ; IR_LOAD_IMM / IR_LOAD_BOOL / IR_LOAD_STRING
 ; mov rax, imm64: 48 B8 <8 bytes>
+; With register allocation: mov <phys_reg>, imm64
 ; ============================================================
 .op_load_imm:
     mov     rdi, [r13 + IR_OFF_IMM]
+
+    ; Check if dst has a physical register assignment
+    movzx   eax, word [r13 + IR_OFF_DST]
+    call    check_vreg_phys
+    cmp     eax, -1
+    je      .op_load_imm_stack
+
+    ; Register-based: mov <phys_reg>, imm64
+    ; Look up x86 register code
+    push    rdi
+    lea     rcx, [rel reg_to_x86]
+    movzx   edx, byte [rcx + rax]
+
+    ; Build REX prefix: 0x48 | (REX.B if reg >= 8)
+    mov     cl, 0x48
+    cmp     edx, 8
+    jb      .op_load_imm_no_rexb
+    or      cl, 0x01
+.op_load_imm_no_rexb:
+    mov     al, cl
+    call    emit_b
+
+    ; Opcode: 0xB8 + (x86_code & 7)
+    mov     al, 0xB8
+    mov     cl, dl
+    and     cl, 7
+    or      al, cl
+    call    emit_b
+
+    ; 8-byte immediate
+    pop     rax
+    call    emit_q
+    inc     r12
+    jmp     .p2
+
+.op_load_imm_stack:
+    ; Stack-based: mov rax, imm64
     mov     al, 0x48
     call    emit_b
     mov     al, 0xB8
@@ -286,8 +370,67 @@ ir_emit_x86:
 
 ; ============================================================
 ; IR_ADD: pop rbx; add rax, rbx (5B 48 01 D8)
+; With register allocation: add <dst>, <src2>
 ; ============================================================
 .op_add:
+    ; Check if all three vregs have physical register assignments
+    movzx   eax, word [r13 + IR_OFF_DST]
+    call    check_vreg_phys
+    cmp     eax, -1
+    je      .op_add_stack
+    push    rax                 ; save dst phys reg
+
+    movzx   eax, word [r13 + IR_OFF_SRC1]
+    call    check_vreg_phys
+    cmp     eax, -1
+    pop     rcx                 ; rcx = dst phys reg
+    je      .op_add_stack
+    push    rcx                 ; re-save dst
+
+    movzx   eax, word [r13 + IR_OFF_SRC2]
+    call    check_vreg_phys
+    cmp     eax, -1
+    pop     rcx                 ; rcx = dst phys reg
+    je      .op_add_stack
+
+    ; All vregs in physical registers
+    ; Emit: add <dst>, <src2>  (assumes src1 already lives in dst)
+    ; eax = src2 phys reg, rcx = dst phys reg
+    push    rax
+    lea     rsi, [rel reg_to_x86]
+    movzx   edi, byte [rsi + rcx]   ; edi = dst x86 code
+    pop     rax
+    movzx   esi, byte [rsi + rax]   ; esi = src2 x86 code
+
+    ; Build REX: 0x48 | REX.R(src2>=8) | REX.B(dst>=8)
+    mov     cl, 0x48
+    cmp     esi, 8
+    jb      .op_add_no_rexr
+    or      cl, 0x04
+.op_add_no_rexr:
+    cmp     edi, 8
+    jb      .op_add_no_rexb
+    or      cl, 0x01
+.op_add_no_rexb:
+    ; REX in cl, opcode=0x01
+    ; ModRM: mod=11, reg=src2_code, r/m=dst_code
+    mov     dl, 0x01           ; opcode ADD r/m64, r64
+    mov     al, 0xC0
+    mov     r8b, sil
+    and     r8b, 7
+    shl     r8b, 3
+    or      al, r8b
+    mov     r8b, dil
+    and     r8b, 7
+    or      al, r8b
+    mov     sil, al            ; sil = modrm
+    call    emit_rex_modrm
+
+    inc     r12
+    jmp     .p2
+
+.op_add_stack:
+    ; Stack-based: pop rbx; add rax, rbx
     mov     al, 0x5B
     call    emit_b
     mov     al, 0x48
