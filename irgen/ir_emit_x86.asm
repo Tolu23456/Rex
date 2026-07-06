@@ -254,6 +254,14 @@ ir_emit_x86:
     je      .op_lzcnt
     cmp     al, IR_POPCOUNT
     je      .op_popcnt
+    cmp     al, IR_SIMD_LOAD
+    je      .op_simd_load
+    cmp     al, IR_SIMD_STORE
+    je      .op_simd_store
+    cmp     al, IR_SIMD_ADD
+    je      .op_simd_add
+    cmp     al, IR_SIMD_SUB
+    je      .op_simd_sub
 
     ; Unknown opcode: skip
     inc     r12
@@ -306,6 +314,88 @@ ir_emit_x86:
     mov     al, 0xB8
     call    emit_b
     mov     al, 0xC0
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SIMD_LOAD: movdqu xmm0, [addr]
+; F3 0F 6F 04 25 addr32
+; Loads 4x32-bit ints from [VAR_STORAGE_BASE + src1*64 + imm]
+; ============================================================
+.op_simd_load:
+    movzx   eax, word [r13 + IR_OFF_SRC1]
+    shl     eax, 6
+    add     eax, VAR_STORAGE_BASE
+    mov     r14d, eax
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x6F
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r14d
+    call    emit_d
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SIMD_STORE: movdqu [addr], xmm0
+; F3 0F 7F 04 25 addr32
+; Stores 4x32-bit ints from xmm0 to [VAR_STORAGE_BASE + dst*64 + imm]
+; ============================================================
+.op_simd_store:
+    movzx   eax, word [r13 + IR_OFF_DST]
+    shl     eax, 6
+    add     eax, VAR_STORAGE_BASE
+    mov     r14d, eax
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7F
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     eax, r14d
+    call    emit_d
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SIMD_ADD: paddd xmm0, xmm1
+; 66 0F FE C1
+; ============================================================
+.op_simd_add:
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xFE
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SIMD_SUB: psubd xmm0, xmm1
+; 66 0F FA C1
+; ============================================================
+.op_simd_sub:
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xFA
+    call    emit_b
+    mov     al, 0xC1
     call    emit_b
     inc     r12
     jmp     .p2
@@ -1389,6 +1479,14 @@ ir_emit_x86:
     je      .est_5b
     cmp     al, IR_POPCOUNT
     je      .est_5b
+    cmp     al, IR_SIMD_LOAD
+    je      .est_8
+    cmp     al, IR_SIMD_STORE
+    je      .est_8
+    cmp     al, IR_SIMD_ADD
+    je      .est_4
+    cmp     al, IR_SIMD_SUB
+    je      .est_4
     ret
 
 .est_0:

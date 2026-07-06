@@ -77,6 +77,10 @@ global ir_emit_mm_switch
 global ir_emit_tzcnt
 global ir_emit_lzcnt
 global ir_emit_popcnt
+global ir_emit_simd_load
+global ir_emit_simd_store
+global ir_emit_simd_add
+global ir_emit_simd_sub
 
 ; ============================================================
 ; ir_reset — Reset IR state to initial values
@@ -781,4 +785,66 @@ ir_emit_popcnt:
     mov [ir_cur_aux], rax
     mov [ir_cur_flags], eax
     mov dil, IR_POPCOUNT
+    jmp ir_emit_record
+
+; ============================================================
+; ir_emit_simd_load — Load 4 ints from memory into xmm0
+; Input: edi = base var_idx
+; ============================================================
+ir_emit_simd_load:
+    mov word [ir_cur_src1], di
+    xor eax, eax
+    mov byte [ir_cur_type], al
+    mov word [ir_cur_dst], ax
+    mov word [ir_cur_src2], ax
+    mov [ir_cur_imm], rax
+    mov [ir_cur_aux], rax
+    mov [ir_cur_flags], eax
+    mov dil, IR_SIMD_LOAD
+    jmp ir_emit_record
+
+; ============================================================
+; ir_emit_simd_store — Store 4 ints from xmm0 to memory
+; Input: edi = base var_idx
+; ============================================================
+ir_emit_simd_store:
+    mov word [ir_cur_dst], di
+    xor eax, eax
+    mov byte [ir_cur_type], al
+    mov word [ir_cur_src1], ax
+    mov word [ir_cur_src2], ax
+    mov [ir_cur_imm], rax
+    mov [ir_cur_aux], rax
+    mov [ir_cur_flags], eax
+    mov dil, IR_SIMD_STORE
+    jmp ir_emit_record
+
+; ============================================================
+; ir_emit_simd_add — xmm0 = xmm0 + xmm1
+; ============================================================
+ir_emit_simd_add:
+    xor eax, eax
+    mov byte [ir_cur_type], al
+    mov word [ir_cur_dst], ax
+    mov word [ir_cur_src1], ax
+    mov word [ir_cur_src2], ax
+    mov [ir_cur_imm], rax
+    mov [ir_cur_aux], rax
+    mov [ir_cur_flags], eax
+    mov dil, IR_SIMD_ADD
+    jmp ir_emit_record
+
+; ============================================================
+; ir_emit_simd_sub — xmm0 = xmm0 - xmm1
+; ============================================================
+ir_emit_simd_sub:
+    xor eax, eax
+    mov byte [ir_cur_type], al
+    mov word [ir_cur_dst], ax
+    mov word [ir_cur_src1], ax
+    mov word [ir_cur_src2], ax
+    mov [ir_cur_imm], rax
+    mov [ir_cur_aux], rax
+    mov [ir_cur_flags], eax
+    mov dil, IR_SIMD_SUB
     jmp ir_emit_record

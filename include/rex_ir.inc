@@ -111,6 +111,13 @@
 %define IR_LZCNT            0x3C    ; dst = count leading zeros (lzcnt)
 
 ; ----------------------------------------------------------------
+; IR Opcodes — SIMD (0x3D–0x3F)
+; ----------------------------------------------------------------
+%define IR_SIMD_LOAD        0x3D    ; load 4 ints from [src1+imm] into xmm0
+%define IR_SIMD_STORE       0x3E    ; store 4 ints from xmm0 to [dst+imm]
+%define IR_SIMD_ADD         0x3F    ; xmm0 = xmm0 + xmm1 (4 int32 parallel)
+
+; ----------------------------------------------------------------
 ; IR Opcodes — Comparison / Boolean (0x41–0x4F)
 ; ----------------------------------------------------------------
 %define IR_CMP              0x41    ; compare src1 vs src2; set aux=condition
@@ -187,6 +194,7 @@
 %define IR_FREE             0x84    ; free(src1)
 %define IR_MEMO_CHECK       0x85    ; dst = memo hit? (src1=proto_id)
 %define IR_MEMO_STORE       0x86    ; memo.store(proto_id=src1, result=src2)
+%define IR_SIMD_SUB         0x87    ; xmm0 = xmm0 - xmm1 (4 int32 parallel)
 
 ; ----------------------------------------------------------------
 ; IR Opcodes — Protocol Markers (0xF0–0xFF)
