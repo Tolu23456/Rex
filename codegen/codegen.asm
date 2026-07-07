@@ -184,6 +184,10 @@ extern ra_emit_spill_all, ra_emit_restore_all
 ; ============================================================
 ; BSS — compiler state
 ; ============================================================
+section .data
+ir_only_mode:   dq 1    ; 0 = normal, 1 = skip old codegen x86 emission
+global ir_only_mode
+
 section .bss
 out_buffer:         resb OUT_BUF_SIZE           ; 512 KB user code buffer
 out_idx:            resq 1                      ; current write position
@@ -953,6 +957,7 @@ emit_b:
     pop     rdi
     pop     rcx
     ret
+
 .emit_b_ov:
     mov     rax, SYS_write
     mov     rdi, 2

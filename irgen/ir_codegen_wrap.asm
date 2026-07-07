@@ -632,11 +632,7 @@ codegen_emit_%1:
     push    rdi
     call    emit_ir_nul
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .wrap_pass_skip_%1
     jmp     codegen_emit_orig_%1
-.wrap_pass_skip_%1:
-    ret
 %endmacro
 
 ; ============================================================
@@ -665,11 +661,7 @@ codegen_emit_%1:
     pop     rcx
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .wrap_done_%1
     jmp     codegen_emit_orig_%1
-.wrap_done_%1:
-    ret
 %endmacro
 
 EMIT_IR mov_rdi_rax, IR_MOV
@@ -706,11 +698,7 @@ codegen_emit_call_rt_pri:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_pri
     jmp     codegen_emit_orig_call_rt_pri
-.done_call_rt_pri:
-    ret
 
 ; --- codegen_emit_call_rt_prs() → IR_OUTPUT TYPE_STR ---
 global codegen_emit_call_rt_prs
@@ -729,11 +717,7 @@ codegen_emit_call_rt_prs:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_prs
     jmp     codegen_emit_orig_call_rt_prs
-.done_call_rt_prs:
-    ret
 
 ; --- codegen_emit_call_rt_prb() → IR_OUTPUT TYPE_BOOL ---
 global codegen_emit_call_rt_prb
@@ -752,11 +736,7 @@ codegen_emit_call_rt_prb:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_prb
     jmp     codegen_emit_orig_call_rt_prb
-.done_call_rt_prb:
-    ret
 
 ; --- codegen_emit_call_rt_prf() → IR_OUTPUT TYPE_FLOAT ---
 global codegen_emit_call_rt_prf
@@ -775,11 +755,7 @@ codegen_emit_call_rt_prf:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_prf
     jmp     codegen_emit_orig_call_rt_prf
-.done_call_rt_prf:
-    ret
 
 ; --- codegen_emit_call_rt_prc() → IR_OUTPUT TYPE_COMPLEX ---
 global codegen_emit_call_rt_prc
@@ -798,11 +774,7 @@ codegen_emit_call_rt_prc:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_prc
     jmp     codegen_emit_orig_call_rt_prc
-.done_call_rt_prc:
-    ret
 
 ; --- codegen_emit_call_rt_err() → IR_RAISE ---
 global codegen_emit_call_rt_err
@@ -821,11 +793,7 @@ codegen_emit_call_rt_err:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_err
     jmp     codegen_emit_orig_call_rt_err
-.done_call_rt_err:
-    ret
 
 ; ============================================================
 ; IR-emitting wrappers using EMIT_IR macro
@@ -879,11 +847,7 @@ codegen_emit_float_op:
     pop     rcx
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_float_op
     jmp     codegen_emit_orig_float_op
-.done_float_op:
-    ret
 
 WRAP_PASS mov_rdi_var
 
@@ -904,11 +868,7 @@ codegen_emit_unknown_bool:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_unknown_bool
     jmp     codegen_emit_orig_unknown_bool
-.done_unknown_bool:
-    ret
 
 ; --- codegen_emit_rdrand_rax() → IR_LOAD_BOOL imm=2 (triggers rdrand) ---
 global codegen_emit_rdrand_rax
@@ -927,11 +887,7 @@ codegen_emit_rdrand_rax:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_rdrand_rax
     jmp     codegen_emit_orig_rdrand_rax
-.done_rdrand_rax:
-    ret
 
 ; --- codegen_emit_clock_ms() → IR_CLOCK ---
 global codegen_emit_clock_ms
@@ -950,11 +906,7 @@ codegen_emit_clock_ms:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_clock_ms
     jmp     codegen_emit_orig_clock_ms
-.done_clock_ms:
-    ret
 
 ; --- codegen_emit_call_rt_str() → IR_OUTPUT_STR ---
 global codegen_emit_call_rt_str
@@ -973,11 +925,7 @@ codegen_emit_call_rt_str:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_str
     jmp     codegen_emit_orig_call_rt_str
-.done_call_rt_str:
-    ret
 
 WRAP_PASS call_rt_str_bool
 
@@ -998,11 +946,7 @@ codegen_emit_call_rt_inp:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_call_rt_inp
     jmp     codegen_emit_orig_call_rt_inp
-.done_call_rt_inp:
-    ret
 
 ; --- codegen_emit_int_to_bool() → IR_CAST aux=TYPE_BOOL ---
 global codegen_emit_int_to_bool
@@ -1021,11 +965,7 @@ codegen_emit_int_to_bool:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_int_to_bool
     jmp     codegen_emit_orig_int_to_bool
-.done_int_to_bool:
-    ret
 ; --- codegen_emit_trunc_byte() → IR_CAST aux=TYPE_BYTE(0x0C) ---
 global codegen_emit_trunc_byte
 codegen_emit_trunc_byte:
@@ -1043,11 +983,7 @@ codegen_emit_trunc_byte:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_trunc_byte
     jmp     codegen_emit_orig_trunc_byte
-.done_trunc_byte:
-    ret
 WRAP_PASS int_min
 WRAP_PASS int_max
 ; --- codegen_emit_int_pow() → IR_POW ---
@@ -1067,11 +1003,7 @@ codegen_emit_int_pow:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_int_pow
     jmp     codegen_emit_orig_int_pow
-.done_int_pow:
-    ret
 
 ; --- codegen_emit_int_popcount() → IR_POPCOUNT ---
 global codegen_emit_int_popcount
@@ -1090,11 +1022,7 @@ codegen_emit_int_popcount:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_int_popcount
     jmp     codegen_emit_orig_int_popcount
-.done_int_popcount:
-    ret
 WRAP_PASS int_to_bin
 WRAP_PASS int_to_hex
 WRAP_PASS int_to_oct
@@ -1116,11 +1044,7 @@ codegen_emit_float_sqrt:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_float_sqrt
     jmp     codegen_emit_orig_float_sqrt
-.done_float_sqrt:
-    ret
 ; WRAP_PASS float_abs — not defined in codegen
 ; --- codegen_emit_bool_is_true() → IR_TEST ---
 global codegen_emit_bool_is_true
@@ -1139,11 +1063,7 @@ codegen_emit_bool_is_true:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_bool_is_true
     jmp     codegen_emit_orig_bool_is_true
-.done_bool_is_true:
-    ret
 
 ; --- codegen_emit_bool_is_false() → IR_TEST ---
 global codegen_emit_bool_is_false
@@ -1162,11 +1082,7 @@ codegen_emit_bool_is_false:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_bool_is_false
     jmp     codegen_emit_orig_bool_is_false
-.done_bool_is_false:
-    ret
 WRAP_PASS bool_is_neutral
 WRAP_PASS bool_is_decided
 ; --- codegen_emit_bool_flip() → IR_LNOT ---
@@ -1186,11 +1102,7 @@ codegen_emit_bool_flip:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_bool_flip
     jmp     codegen_emit_orig_bool_flip
-.done_bool_flip:
-    ret
 WRAP_PASS char_is_alpha
 WRAP_PASS char_is_digit
 WRAP_PASS char_is_upper
@@ -1214,11 +1126,7 @@ codegen_emit_char_to_int:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_char_to_int
     jmp     codegen_emit_orig_char_to_int
-.done_char_to_int:
-    ret
 WRAP_PASS char_to_str
 ; --- codegen_emit_byte_popcount() → IR_POPCOUNT ---
 global codegen_emit_byte_popcount
@@ -1237,11 +1145,7 @@ codegen_emit_byte_popcount:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_byte_popcount
     jmp     codegen_emit_orig_byte_popcount
-.done_byte_popcount:
-    ret
 
 ; --- codegen_emit_byte_to_int() → IR_CAST aux=TYPE_INT ---
 global codegen_emit_byte_to_int
@@ -1260,11 +1164,7 @@ codegen_emit_byte_to_int:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_byte_to_int
     jmp     codegen_emit_orig_byte_to_int
-.done_byte_to_int:
-    ret
 WRAP_PASS byte_to_hex
 WRAP_PASS byte_to_bin
 WRAP_PASS byte_is_zero
@@ -1298,11 +1198,7 @@ codegen_emit_clz_rax:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_clz_rax
     jmp     codegen_emit_orig_clz_rax
-.done_clz_rax:
-    ret
 EMIT_IR ceil_rax, IR_CEIL
 EMIT_IR floor_rax, IR_FLOOR
 WRAP_PASS fract_rax
@@ -1323,11 +1219,7 @@ codegen_emit_rdrand64:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_rdrand64
     jmp     codegen_emit_orig_rdrand64
-.done_rdrand64:
-    ret
 
 WRAP_PASS hash_rax
 WRAP_PASS carry_rax
@@ -1350,11 +1242,7 @@ codegen_emit_seq_alloc:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_seq_alloc
     jmp     codegen_emit_orig_seq_alloc
-.done_seq_alloc:
-    ret
 
 ; --- codegen_emit_seq_push() → IR_SEQ_PUSH ---
 global codegen_emit_seq_push
@@ -1373,11 +1261,7 @@ codegen_emit_seq_push:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_seq_push
     jmp     codegen_emit_orig_seq_push
-.done_seq_push:
-    ret
 
 ; --- codegen_emit_seq_pop() → IR_SEQ_POP ---
 global codegen_emit_seq_pop
@@ -1396,11 +1280,7 @@ codegen_emit_seq_pop:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_seq_pop
     jmp     codegen_emit_orig_seq_pop
-.done_seq_pop:
-    ret
 
 ; --- codegen_emit_seq_len() → IR_SEQ_LEN ---
 global codegen_emit_seq_len
@@ -1419,11 +1299,7 @@ codegen_emit_seq_len:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_seq_len
     jmp     codegen_emit_orig_seq_len
-.done_seq_len:
-    ret
 
 WRAP_PASS seq_cap
 
@@ -1444,11 +1320,7 @@ codegen_emit_seq_subscript:
     call    ir_emit_record
     pop     rax
     pop     rdi
-    cmp     qword [ir_only_mode], 1
-    je      .done_seq_subscript
     jmp     codegen_emit_orig_seq_subscript
-.done_seq_subscript:
-    ret
 
 WRAP_PASS seq_in
 WRAP_PASS seq_contains
