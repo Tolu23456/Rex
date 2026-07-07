@@ -14,7 +14,18 @@ extern emit_b, emit_d, emit_q
 extern ir_buffer, ir_idx
 extern proto_table
 extern out_idx
+extern out_buffer
 extern vreg_phys
+
+; ---- register cache for hot variables ----
+section .bss
+global ir_cache_var, ir_cache_cnt, ir_cache_reg
+ir_cache_var:   resq 4      ; var_idx cached in each slot (-1 = none)
+ir_cache_reg:   resb 4      ; register code for each slot
+ir_cache_cnt:   resq 1      ; number of active caches
+
+section .data
+ir_cache_regmap: db 15, 14, 13, 12
 
 ; ============================================================
 ; Register ID → x86 register code mapping
@@ -23,7 +34,6 @@ extern vreg_phys
 ; x86 codes: rax=0, rcx=1, rdx=2, rbx=3, rsi=6, rdi=7,
 ;            r8=8, r9=9, r10=10, r11=11, r12=12, r13=13, r14=14, r15=15
 ; ============================================================
-section .data
 reg_to_x86:
     db 0, 3, 1, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
 
@@ -122,6 +132,328 @@ ir_emit_x86:
     jmp     .p1
 
 .p1_done:
+    ; ===== Pass 1b: Detect loops and cache variables =====
+    ; Scan for backward jumps, identify CMP variables, cache them
+    xor     r12, r12
+
+.p1b_loop:
+    cmp     r12, r15
+    jge     .p1b_done
+
+    mov     rax, r12
+    shl     rax, 5
+    lea     r13, [ir_buffer + rax]
+
+    movzx   eax, byte [r13 + IR_OFF_OPCODE]
+
+    ; Check for IR_JMP, IR_JMP_TRUE, IR_JMP_FALSE (backward jump = loop)
+    cmp     al, IR_JMP
+    je      .p1b_check_jump
+    cmp     al, IR_JMP_TRUE
+    je      .p1b_check_jump
+    cmp     al, IR_JMP_FALSE
+    je      .p1b_check_jump
+    inc     r12
+    jmp     .p1b_loop
+
+.p1b_check_jump:
+    ; Get target label
+    movzx   ecx, word [r13 + IR_OFF_IMM]
+    ; Search backward for that label
+    xor     edx, edx
+.p1b_find_label:
+    cmp     edx, r12d
+    jge     .p1b_not_backward
+    mov     rax, rdx
+    shl     rax, 5
+    lea     rsi, [ir_buffer]
+    add     rsi, rax
+    cmp     byte [rsi], IR_LABEL
+    jne     .p1b_find_label_next
+    movzx   edi, word [rsi + IR_OFF_IMM]
+    cmp     di, cx
+    je      .p1b_backward_found
+.p1b_find_label_next:
+    inc     edx
+    jmp     .p1b_find_label
+
+.p1b_backward_found:
+    ; Save label position in r11 (before it gets clobbered)
+    mov     r11d, edx
+    ; Backward jump found — scan backward from jump for IR_CMP
+    mov     ecx, r12d
+    dec     ecx
+.p1b_find_cmp:
+    cmp     ecx, 0
+    jl      .p1b_not_backward
+    mov     rax, rcx
+    shl     rax, 5
+    add     rax, ir_buffer
+    cmp     byte [rax], IR_CMP
+    je      .p1b_cmp_found
+    dec     ecx
+    jmp     .p1b_find_cmp
+
+.p1b_cmp_found:
+    ; CMP found — get the variable index from src1
+    movzx   edx, word [rax + IR_OFF_SRC1]
+    test    dx, dx
+    jz      .p1b_not_backward
+    cmp     edx, 256
+    jge     .p1b_not_backward
+    ; Cache CMP variable in slot 0 (r15)
+    mov     [ir_cache_var], edx
+    mov     byte [ir_cache_reg], 15   ; r15
+    mov     qword [ir_cache_cnt], 1
+
+    ; Scan loop body to find the most frequently modified variable
+    ; (the accumulator). Count STORE_VAR targets.
+    ; Also find any ADD/SUB targeting the same variable as CMP.src1
+    xor     esi, esi            ; best_accum_var = 0
+    xor     edi, edi            ; best_accum_count = 0
+    ; Temporary: count per-variable stores (use stack)
+    sub     rsp, 2048           ; count_table[256] = 0
+    mov     r8, rsp
+    xor     eax, eax
+    mov     ecx, 256
+    rep stosq                   ; zero 256 qwords
+
+    ; Loop body: from label+1 to jump position
+    mov     ecx, edx            ; ecx = label position (from .p1b_find_label)
+    inc     ecx
+.p1b_count_stores:
+    cmp     ecx, r12d
+    jge     .p1b_count_done
+    mov     rax, rcx
+    shl     rax, 5
+    add     rax, ir_buffer
+    ; Check for IR_STORE_VAR or IR_ADD/IR_SUB targeting a variable
+    movzx   edi, byte [rax]
+    cmp     dil, IR_STORE_VAR
+    je      .p1b_count_store
+    cmp     dil, IR_ADD
+    je      .p1b_count_add
+    cmp     dil, IR_SUB
+    je      .p1b_count_add
+    cmp     dil, IR_INC
+    je      .p1b_count_inc
+    cmp     dil, IR_DEC
+    je      .p1b_count_inc
+    inc     ecx
+    jmp     .p1b_count_stores
+
+.p1b_count_inc:
+    ; INC/DEC: var_idx is in src1
+    movzx   eax, word [rax + IR_OFF_SRC1]
+    cmp     eax, 256
+    jge     .p1b_count_next
+    inc     qword [r8 + rax*8]
+    jmp     .p1b_count_next
+
+.p1b_count_store:
+    ; STORE_VAR: var_idx is in src1 (not dst which is 0)
+    movzx   eax, word [rax + IR_OFF_SRC1]
+    cmp     eax, 256
+    jge     .p1b_count_next
+    inc     qword [r8 + rax*8]
+    jmp     .p1b_count_next
+
+.p1b_count_add:
+    ; ADD/SUB: dst is the accumulator
+    movzx   eax, word [rax + IR_OFF_DST]
+    cmp     eax, 256
+    jge     .p1b_count_next
+    inc     qword [r8 + rax*8]
+
+.p1b_count_next:
+    inc     ecx
+    jmp     .p1b_count_stores
+
+.p1b_count_done:
+    ; Find variable with highest count (excluding CMP variable)
+    xor     ecx, ecx
+    xor     esi, esi            ; best_var = 0
+    xor     edi, edi            ; best_count = 0
+.p1b_find_best:
+    cmp     ecx, 256
+    jge     .p1b_best_found
+    mov     rax, [r8 + rcx*8]
+    test    rax, rax
+    jz      .p1b_find_best_next
+    cmp     ecx, edx            ; skip CMP variable
+    je      .p1b_find_best_next
+    cmp     rax, rdi
+    jle     .p1b_find_best_next
+    mov     rdi, rax
+    mov     esi, ecx            ; best_var = ecx
+.p1b_find_best_next:
+    inc     ecx
+    jmp     .p1b_find_best
+
+.p1b_best_found:
+    add     rsp, 2048           ; free count_table
+    test    esi, esi
+    jz      .p1b_not_backward
+    ; Cache accumulator in slot 1 (r14)
+    mov     [ir_cache_var + 8], esi
+    mov     byte [ir_cache_reg + 1], 14  ; r14
+    mov     qword [ir_cache_cnt], 2
+
+.p1b_not_backward:
+    inc     r12
+    jmp     .p1b_loop
+
+.p1b_done:
+    ; Emit cache setup if loop variables were detected
+    cmp     qword [ir_cache_cnt], 0
+    je      .p1b_no_cache2
+    ; Emit: push r15 + push r14 + mov r15, [abs32] + mov r14, [abs32]
+    ; push r15 = 41 57
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x57
+    call    emit_b
+    ; push r14 = 41 56
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x56
+    call    emit_b
+    ; mov r15, [abs32] = 4C 8B 3C 25 addr32
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+    ; mov r14, [abs32] = 4C 8B 34 25 addr32
+    cmp     qword [ir_cache_cnt], 1
+    jle     .p1b_no_cache2
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var + 8]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+.p1b_no_cache2:
+
+    ; ===== Pass 2: emit x86 code =====
+    ; Pre-scan: detect hot variables by counting INC/DEC/ADD/SUB targets
+    mov     qword [ir_cache_cnt], 0
+    ; Count modifications per variable using stack (16 qwords = 128 bytes)
+    sub     rsp, 128
+    xor     eax, eax
+    mov     rcx, rsp
+    xor     edi, edi
+.count_zero:
+    cmp     edi, 16
+    jge     .count_zero_done
+    mov     qword [rcx + rdi*8], 0
+    inc     edi
+    jmp     .count_zero
+.count_zero_done:
+    ; Scan IR for INC/DEC/ADD/SUB (these are the hot operations)
+    xor     r12, r12
+.pre_scan:
+    cmp     r12, r15
+    jge     .pre_scan_done
+    mov     rax, r12
+    shl     rax, 5
+    add     rax, ir_buffer
+    movzx   ecx, byte [rax]
+    xor     edx, edx
+    cmp     cl, IR_INC
+    je      .pre_scan_inc
+    cmp     cl, IR_DEC
+    je      .pre_scan_inc
+    cmp     cl, IR_ADD
+    je      .pre_scan_add
+    cmp     cl, IR_SUB
+    je      .pre_scan_add
+    inc     r12
+    jmp     .pre_scan
+.pre_scan_inc:
+    movzx   edx, word [rax + IR_OFF_SRC1]
+    jmp     .pre_scan_count
+.pre_scan_add:
+    movzx   edx, word [rax + IR_OFF_DST]
+    jmp     .pre_scan_count
+.pre_scan_count:
+    cmp     edx, 16
+    jge     .pre_scan_next
+    inc     qword [rsp + rdx*8]
+.pre_scan_next:
+    inc     r12
+    jmp     .pre_scan
+
+.pre_scan_done:
+    add     rsp, 128           ; free pre-scan count buffer
+
+    ; Cache
+    test    rsi, rsi
+    jz      .p2_start
+    mov     [ir_cache_var], rsi
+    mov     byte [ir_cache_reg], 15
+    mov     qword [ir_cache_cnt], 1
+    test    r8, r8
+    jz      .p2_emit_cache
+    mov     [ir_cache_var + 8], r8
+    mov     byte [ir_cache_reg + 1], 14
+    mov     qword [ir_cache_cnt], 2
+
+.p2_emit_cache:
+    cmp     qword [ir_cache_cnt], 0
+    je      .p2_start
+    ; push r15 + push r14 + mov r15,[v1] + mov r14,[v2]
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x57
+    call    emit_b
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x56
+    call    emit_b
+    ; mov r15, [abs32]
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+    cmp     qword [ir_cache_cnt], 1
+    jle     .p2_start
+    ; mov r14, [abs32]
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x8B
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var + 8]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+
+.p2_start:
     ; ===== Pass 2: emit x86 code =====
     mov     qword [out_idx], CODE_START
     xor     r12, r12
@@ -262,6 +594,50 @@ ir_emit_x86:
     je      .op_simd_add
     cmp     al, IR_SIMD_SUB
     je      .op_simd_sub
+    cmp     al, 0xA2           ; IR_SIMD_REDUCE_SUM
+    je      .op_simd_reduce_sum
+    cmp     al, IR_BAND
+    je      .op_band
+    cmp     al, IR_BOR
+    je      .op_bor
+    cmp     al, IR_BXOR
+    je      .op_bxor
+    cmp     al, IR_BNOT
+    je      .op_bnot
+    cmp     al, IR_BSHL
+    je      .op_bshl
+    cmp     al, IR_BSHR
+    je      .op_bshr
+    cmp     al, IR_BSHR_S
+    je      .op_bshr_s
+    cmp     al, IR_ABS
+    je      .op_abs
+    cmp     al, IR_SIGN
+    je      .op_sign
+    cmp     al, IR_LOAD_CHAR
+    je      .op_load_imm
+    cmp     al, IR_LOAD_BYTE
+    je      .op_load_imm
+    cmp     al, IR_FADD
+    je      .op_fadd
+    cmp     al, IR_FSUB
+    je      .op_fsub
+    cmp     al, IR_FMUL
+    je      .op_fmul
+    cmp     al, IR_FDIV
+    je      .op_fdiv
+    cmp     al, IR_FNEG
+    je      .op_fneg
+    cmp     al, IR_FABS
+    je      .op_fabs
+    cmp     al, IR_FLOOR
+    je      .op_floor
+    cmp     al, IR_CEIL
+    je      .op_ceil
+    cmp     al, IR_ROUND
+    je      .op_round
+    cmp     al, IR_FSQRT
+    je      .op_fsqrt
 
     ; Unknown opcode: skip
     inc     r12
@@ -401,6 +777,65 @@ ir_emit_x86:
     jmp     .p2
 
 ; ============================================================
+; IR_SIMD_REDUCE_SUM: horizontal sum of xmm0 → rax
+; pshufd xmm1,xmm0,0x4E; paddd xmm0,xmm1;
+; pshufd xmm1,xmm0,0xB1; paddd xmm0,xmm1; movd eax,xmm0
+; 5 + 4 + 5 + 4 + 4 = 22 bytes
+; ============================================================
+.op_simd_reduce_sum:
+    ; pshufd xmm1, xmm0, 0x4E = 66 0F 70 C8 4E
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x70
+    call    emit_b
+    mov     al, 0xC8
+    call    emit_b
+    mov     al, 0x4E
+    call    emit_b
+    ; paddd xmm0, xmm1 = 66 0F FE C1
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xFE
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    ; pshufd xmm1, xmm0, 0xB1 = 66 0F 70 C8 B1
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x70
+    call    emit_b
+    mov     al, 0xC8
+    call    emit_b
+    mov     al, 0xB1
+    call    emit_b
+    ; paddd xmm0, xmm1 = 66 0F FE C1
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xFE
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    ; movd eax, xmm0 = 66 0F 7E C0
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+; ============================================================
 ; Skip (label, proto marker, mov, nop)
 ; ============================================================
 .op_skip:
@@ -476,6 +911,48 @@ ir_emit_x86:
 ; 48 8B 04 25 <addr32>
 ; ============================================================
 .op_load_var:
+    ; Check register cache first
+    movzx   eax, word [r13 + IR_OFF_SRC1]    ; var_idx
+    ; Search cache for this var
+    xor     ecx, ecx
+.cache_search:
+    cmp     ecx, 4
+    jge     .cache_miss
+    cmp     rax, [ir_cache_var + rcx*8]
+    je      .cache_hit
+    inc     ecx
+    jmp     .cache_search
+.cache_hit:
+    ; Emit: mov rax, reg (3 bytes)
+    ; reg code from ir_cache_regmap
+    movzx   edx, byte [ir_cache_regmap + rcx]
+    ; REX prefix: 0x48 for rax-rdi, 0x4C for r8-r15 (REX.W + REX.R)
+    cmp     dl, 8
+    jb      .cache_hit_no_rex
+    mov     al, 0x4C            ; REX.W + REX.R
+    call    emit_b
+    mov     al, 0x89            ; mov rax, reg
+    call    emit_b
+    ; ModRM: mod=11, reg=reg_code-8, rm=0(rax)
+    mov     al, 0xC0
+    movzx   ecx, dl
+    sub     ecx, 8              ; r8=0, r9=1, ..., r15=7
+    or      al, cl
+    shl     al, 3               ; reg field in bits 5:3
+    call    emit_b
+    jmp     .op_load_var_done
+.cache_hit_no_rex:
+    mov     al, 0x48            ; REX.W
+    call    emit_b
+    mov     al, 0x89            ; mov rax, reg
+    call    emit_b
+    mov     al, 0xC0
+    or      al, dl
+    call    emit_b
+    jmp     .op_load_var_done
+
+.cache_miss:
+    ; Emit: mov rax, [VAR_STORAGE_BASE + var_idx*64]
     movzx   eax, word [r13 + IR_OFF_SRC1]
     shl     eax, 6
     add     eax, VAR_STORAGE_BASE
@@ -490,6 +967,8 @@ ir_emit_x86:
     call    emit_b
     mov     eax, r14d
     call    emit_d
+
+.op_load_var_done:
     inc     r12
     jmp     .p2
 
@@ -498,6 +977,44 @@ ir_emit_x86:
 ; 48 89 04 25 <addr32>
 ; ============================================================
 .op_store_var:
+    movzx   eax, word [r13 + IR_OFF_SRC1]    ; var_idx
+    ; Check if this variable is cached
+    xor     ecx, ecx
+.store_cache_search:
+    cmp     ecx, 4
+    jge     .store_cache_miss
+    cmp     rax, [ir_cache_var + rcx*8]
+    je      .store_cache_hit
+    inc     ecx
+    jmp     .store_cache_search
+.store_cache_hit:
+    ; Emit: mov reg, rax (3 bytes)
+    movzx   edx, byte [ir_cache_regmap + rcx]
+    cmp     dl, 8
+    jb      .store_hit_no_rex
+    mov     al, 0x4C            ; REX.W + REX.R
+    call    emit_b
+    mov     al, 0x89            ; mov reg, rax
+    call    emit_b
+    ; ModRM: mod=11, reg=0(rax), rm=reg_code-8
+    mov     al, 0xC0
+    movzx   ecx, dl
+    sub     ecx, 8
+    or      al, cl              ; rm field in bits 2:0
+    call    emit_b
+    jmp     .op_store_var_done
+.store_hit_no_rex:
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0xC0
+    or      al, dl
+    call    emit_b
+    jmp     .op_store_var_done
+
+.store_cache_miss:
+    ; Emit: mov [abs32], rax (8 bytes)
     movzx   eax, word [r13 + IR_OFF_SRC1]
     shl     eax, 6
     add     eax, VAR_STORAGE_BASE
@@ -512,6 +1029,8 @@ ir_emit_x86:
     call    emit_b
     mov     eax, r14d
     call    emit_d
+
+.op_store_var_done:
     inc     r12
     jmp     .p2
 
@@ -690,20 +1209,55 @@ ir_emit_x86:
 
 ; ============================================================
 ; IR_IDIV: floor division — same as DIV for positive, adjust for negative
-; Stub: treat same as DIV for now
+; Floor division: differs from truncating division for negative operands
 ; ============================================================
 .op_idiv:
+    ; Pop divisor into rbx
     mov     al, 0x5B
     call    emit_b
+    ; cqo: sign-extend rax into rdx:rax
     mov     al, 0x48
     call    emit_b
     mov     al, 0x99
     call    emit_b
+    ; idiv rbx: rax = quotient, rdx = remainder
     mov     al, 0x48
     call    emit_b
     mov     al, 0xF7
     call    emit_b
     mov     al, 0xFB
+    call    emit_b
+    ; Floor correction: if remainder != 0 and signs of remainder and divisor differ, dec rax
+    ; test rdx, rdx
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x85
+    call    emit_b
+    mov     al, 0xD2
+    call    emit_b
+    ; jz .idiv_done (skip if remainder is 0)
+    mov     al, 0x74
+    call    emit_b
+    mov     al, 0x09
+    call    emit_b
+    ; xor rdx, rbx (check if remainder and divisor signs differ)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x31
+    call    emit_b
+    mov     al, 0xDA
+    call    emit_b
+    ; jns .idiv_done (same sign → no correction needed)
+    mov     al, 0x79
+    call    emit_b
+    mov     al, 0x03
+    call    emit_b
+    ; dec rax (floor = trunc - 1 when signs differ)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xC8
     call    emit_b
     inc     r12
     jmp     .p2
@@ -867,6 +1421,49 @@ ir_emit_x86:
 ; IR_JMP: E9 rel32
 ; ============================================================
 .op_jmp:
+    ; Flush register cache before jump (loop back-edge)
+    cmp     qword [ir_cache_cnt], 0
+    je      .op_jmp_no_flush
+    ; Flush slot 0 (r15) → memory
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+    ; Flush slot 1 (r14) → memory
+    cmp     qword [ir_cache_cnt], 1
+    jle     .op_jmp_flush_pop
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var + 8]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+.op_jmp_flush_pop:
+    ; pop r14 + pop r15
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5E
+    call    emit_b
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5F
+    call    emit_b
+    mov     qword [ir_cache_cnt], 0
+.op_jmp_no_flush:
     movzx   eax, word [r13 + IR_OFF_IMM]
     mov     eax, [emit_label_offs + rax*4]
     mov     rcx, [out_idx]
@@ -885,6 +1482,48 @@ ir_emit_x86:
 ; 48 85 C0 0F 85 rel32
 ; ============================================================
 .op_jmp_true:
+    ; Flush register cache before conditional jump
+    cmp     qword [ir_cache_cnt], 0
+    je      .op_jmp_true_no_flush
+    ; Flush slot 0 (r15)
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+    ; Flush slot 1 (r14)
+    cmp     qword [ir_cache_cnt], 1
+    jle     .op_jt_flush_pop
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var + 8]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+.op_jt_flush_pop:
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5E
+    call    emit_b
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5F
+    call    emit_b
+    mov     qword [ir_cache_cnt], 0
+.op_jmp_true_no_flush:
     movzx   eax, word [r13 + IR_OFF_IMM]
     mov     eax, [emit_label_offs + rax*4]
     mov     rcx, [out_idx]
@@ -911,6 +1550,48 @@ ir_emit_x86:
 ; 48 85 C0 0F 84 rel32
 ; ============================================================
 .op_jmp_false:
+    ; Flush register cache before conditional jump
+    cmp     qword [ir_cache_cnt], 0
+    je      .op_jmp_false_no_flush
+    ; Flush slot 0 (r15)
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x3C
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+    ; Flush slot 1 (r14)
+    cmp     qword [ir_cache_cnt], 1
+    jle     .op_jf_flush_pop
+    mov     al, 0x4C
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     rax, [ir_cache_var + 8]
+    shl     rax, 6
+    add     rax, VAR_STORAGE_BASE
+    call    emit_d
+.op_jf_flush_pop:
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5E
+    call    emit_b
+    mov     al, 0x41
+    call    emit_b
+    mov     al, 0x5F
+    call    emit_b
+    mov     qword [ir_cache_cnt], 0
+.op_jmp_false_no_flush:
     movzx   eax, word [r13 + IR_OFF_IMM]
     mov     eax, [emit_label_offs + rax*4]
     mov     rcx, [out_idx]
@@ -1170,6 +1851,46 @@ ir_emit_x86:
 ; 48 FF 04 25 addr32
 ; ============================================================
 .op_inc:
+    ; Check register cache first
+    movzx   eax, word [r13 + IR_OFF_SRC1]    ; var_idx
+    ; Search cache
+    xor     ecx, ecx
+.inc_cache_search:
+    cmp     ecx, 4
+    jge     .inc_cache_miss
+    cmp     rax, [ir_cache_var + rcx*8]
+    je      .inc_cache_hit
+    inc     ecx
+    jmp     .inc_cache_search
+.inc_cache_hit:
+    ; Emit: inc reg (2-3 bytes)
+    cmp     ecx, 0
+    je      .inc_r15
+    cmp     ecx, 1
+    je      .inc_r14
+    jmp     .inc_cache_miss
+.inc_r15:
+    ; inc r15 = 49 FF C7
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xC7
+    call    emit_b
+    inc     r12
+    jmp     .p2
+.inc_r14:
+    ; inc r14 = 49 FF C6
+    mov     al, 0x49
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xC6
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.inc_cache_miss:
     movzx   eax, word [r13 + IR_OFF_SRC1]
     shl     eax, 6
     add     eax, VAR_STORAGE_BASE
@@ -1255,12 +1976,56 @@ ir_emit_x86:
     jmp     .p2
 
 ; ============================================================
-; IR_SEQ_PUSH / IR_SEQ_POP / IR_SEQ_GET / IR_SEQ_SET — stubs
+; IR_SEQ_PUSH
 ; ============================================================
 .op_seq_push:
+    pop     rsi
+    pop     rbx
+    mov     rcx, [rbx + 4]
+    cmp     dword [rbx], ecx
+    jbe     .seq_push_grow
+    mov     [rbx + rcx*8 + 20], rsi
+    inc     qword [rbx + 4]
+    inc     r12
+    jmp     .p2
+.seq_push_grow:
+    mov     [rbx + rcx*8 + 20], rsi
+    inc     qword [rbx + 4]
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SEQ_POP
+; ============================================================
 .op_seq_pop:
+    pop     rbx
+    mov     rcx, [rbx + 4]
+    dec     rcx
+    mov     [rbx + 4], rcx
+    mov     rax, [rbx + rcx*8 + 20]
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SEQ_GET
+; ============================================================
 .op_seq_get:
+    pop     rcx
+    pop     rbx
+    mov     rax, [rbx + rcx*8 + 20]
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SEQ_SET
+; ============================================================
 .op_seq_set:
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    mov     [rbx + rcx*8 + 20], rdx
     inc     r12
     jmp     .p2
 
@@ -1299,19 +2064,37 @@ ir_emit_x86:
     jmp     .p2
 
 ; ============================================================
-; IR_DICT_SET / IR_DICT_GET — stubs
+; IR_DICT_SET: pop val, key, dict_ptr — simplified
 ; ============================================================
 .op_dict_set:
-.op_dict_get:
+    add     rsp, 24
     inc     r12
     jmp     .p2
 
 ; ============================================================
-; IR_ABS / IR_SIGN / IR_RAISE — stubs
+; IR_DICT_GET: pop key, dict_ptr — simplified: push 0
 ; ============================================================
-.op_abs:
-.op_sign:
+.op_dict_get:
+    add     rsp, 16
+    xor     eax, eax
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_RAISE: pop error message pointer, call rt_err_blob
+; ============================================================
 .op_raise:
+    pop     rdi
+    mov     eax, LOAD_BASE + RT_PRQ_OFFSET
+    mov     rcx, [out_idx]
+    add     rcx, 5
+    sub     eax, ecx
+    mov     r14d, eax
+    mov     al, 0xE8
+    call    emit_b
+    mov     eax, r14d
+    call    emit_d
     inc     r12
     jmp     .p2
 
@@ -1339,52 +2122,936 @@ ir_emit_x86:
     jmp     .p2
 
 ; ============================================================
-; IR_LEN: stub
+; IR_LEN: pop pointer, read length from hidden header at [rax+8]
 ; ============================================================
 .op_len:
+    pop     rax
+    mov     rax, [rax + 8]
+    push    rax
     inc     r12
     jmp     .p2
 
 ; ============================================================
-; IR_CONCAT: stub
+; IR_CONCAT: pop two string pointers, call rt_str_cat
 ; ============================================================
 .op_concat:
+    pop     rsi
+    pop     rdi
+    mov     eax, LOAD_BASE + RT_STR_CAT_OFFSET
+    mov     rcx, [out_idx]
+    add     rcx, 5
+    sub     eax, ecx
+    mov     r14d, eax
+    mov     al, 0xE8
+    call    emit_b
+    mov     eax, r14d
+    call    emit_d
+    push    rax
     inc     r12
     jmp     .p2
 
 ; ============================================================
-; IR_TYPEOF: stub
+; IR_TYPEOF: push type code of the expression onto runtime stack
 ; ============================================================
 .op_typeof:
+    movzx   eax, byte [r13 + IR_OFF_TYPE]
+    mov     r14d, eax
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0xB8
+    call    emit_b
+    mov     eax, r14d
+    call    emit_q
+    mov     al, 0x50
+    call    emit_b
     inc     r12
     jmp     .p2
 
 ; ============================================================
-; IR_INPUT: stub
+; IR_INPUT: call rt_inp runtime blob
 ; ============================================================
 .op_input:
+    mov     eax, LOAD_BASE + RT_INP_OFFSET
+    mov     rcx, [out_idx]
+    add     rcx, 5
+    sub     eax, ecx
+    mov     r14d, eax
+    mov     al, 0xE8
+    call    emit_b
+    mov     eax, r14d
+    call    emit_d
+    push    rax
     inc     r12
     jmp     .p2
 
 ; ============================================================
-; IR_ASSERT: stub
+; IR_ASSERT: pop value; if zero, trap with ud2
 ; ============================================================
 .op_assert:
+    pop     rax
+    test    rax, rax
+    jnz     .op_assert_ok
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x0B
+    call    emit_b
+.op_assert_ok:
     inc     r12
     jmp     .p2
 
 ; ============================================================
-; IR_CLOCK: stub
+; IR_CLOCK: clock_gettime syscall, return milliseconds
 ; ============================================================
 .op_clock:
+    sub     rsp, 16
+    mov     rdi, 1
+    mov     rsi, rsp
+    mov     eax, 228
+    syscall
+    mov     rax, [rsp]
+    mov     rcx, 1000
+    imul    rax, rcx
+    add     rsp, 16
+    push    rax
     inc     r12
     jmp     .p2
 
 ; ============================================================
-; IR_LOAD_GLOBAL / IR_STORE_GLOBAL — stubs
+; IR_LOAD_GLOBAL: load from global address in imm field
 ; ============================================================
 .op_load_global:
+    mov     rax, [r13 + IR_OFF_IMM]
+    mov     rax, [rax]
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_STORE_GLOBAL: store to global address in imm field
+; ============================================================
 .op_store_global:
+    pop     rax
+    mov     rcx, [r13 + IR_OFF_IMM]
+    mov     [rcx], rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_BAND: and rax, rbx (48 21 D8)
+; ============================================================
+.op_band:
+    pop     rbx
+    and     rax, rbx
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_BOR: or rax, rbx (48 09 D8)
+; ============================================================
+.op_bor:
+    pop     rbx
+    or      rax, rbx
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_BXOR: xor rax, rbx (48 31 D8)
+; ============================================================
+.op_bxor:
+    pop     rbx
+    xor     rax, rbx
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_BNOT: not rax (48 F7 D0)
+; ============================================================
+.op_bnot:
+    not     rax
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_BSHL: shl rax, cl (48 D3 E0)
+; ============================================================
+.op_bshl:
+    pop     rcx
+    shl     rax, cl
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_BSHR: shr rax, cl (48 D3 E8) — logical shift right
+; ============================================================
+.op_bshr:
+    pop     rcx
+    shr     rax, cl
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_BSHR_S: sar rax, cl (48 D3 F8) — arithmetic shift right
+; ============================================================
+.op_bshr_s:
+    pop     rcx
+    sar     rax, cl
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_ABS: integer absolute value
+; test rax, rax; jns .skip; neg rax; .skip:
+; ============================================================
+.op_abs:
+    pop     rbx
+    mov     rax, rbx
+    test    rax, rax
+    jns     .op_abs_done
+    neg     rax
+.op_abs_done:
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; IR_SIGN: sign function (-1, 0, or 1)
+; ============================================================
+.op_sign:
+    pop     rbx
+    mov     rax, rbx
+    cmp     rax, 0
+    setl    cl
+    setg    dl
+    movzx   ecx, cl
+    movzx   edx, dl
+    sub     ecx, edx
+    movsxd  rax, ecx
+    push    rax
+    inc     r12
+    jmp     .p2
+
+; ============================================================
+; Float binary ops: emit x86 for xmm0 = xmm0 op xmm1
+; Pattern: pop rax; movq xmm1,rax; opsd xmm0,xmm1; movq rax,xmm0; push rax
+; ============================================================
+.op_fadd:
+    ; pop rax (5B)
+    mov     al, 0x5B
+    call    emit_b
+    ; movq xmm1, rax (F3 48 0F 7E C8)
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC8
+    call    emit_b
+    ; addsd xmm0, xmm1 (F2 0F 58 C1)
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x58
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    ; movq rax, xmm0 (F3 48 0F 7E C0)
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax (50)
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_fsub:
+    ; pop rax
+    mov     al, 0x5B
+    call    emit_b
+    ; movq xmm1, rax
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC8
+    call    emit_b
+    ; subsd xmm0, xmm1 (F2 0F 5C C1)
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x5C
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    ; movq rax, xmm0
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_fmul:
+    ; pop rax
+    mov     al, 0x5B
+    call    emit_b
+    ; movq xmm1, rax
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC8
+    call    emit_b
+    ; mulsd xmm0, xmm1 (F2 0F 59 C1)
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x59
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    ; movq rax, xmm0
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_fdiv:
+    ; pop rax
+    mov     al, 0x5B
+    call    emit_b
+    ; movq xmm1, rax
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC8
+    call    emit_b
+    ; divsd xmm0, xmm1 (F2 0F 5E C1)
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x5E
+    call    emit_b
+    mov     al, 0xC1
+    call    emit_b
+    ; movq rax, xmm0
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_fneg:
+    ; Float negate: flip sign bit using xorps with [sign_mask]
+    ; Actually, use: movq rax,xmm0; btc rax,63; movq xmm0,rax
+    ; movq rax, xmm0 (F3 48 0F 7E C0)
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; btc rax, 63 (48 0F BA F8 3F)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xBA
+    call    emit_b
+    mov     al, 0xF8
+    call    emit_b
+    mov     al, 0x3F
+    call    emit_b
+    ; movq xmm0, rax (F3 48 0F 6E C0)
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x6E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_fabs:
+    ; Float abs: clear sign bit using btr rax,63
+    ; movq rax, xmm0
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; btr rax, 63 (48 0F BA F0 3F)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xBA
+    call    emit_b
+    mov     al, 0xF0
+    call    emit_b
+    mov     al, 0x3F
+    call    emit_b
+    ; movq xmm0, rax
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x6E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_floor:
+    ; x87 floor: set RC=01 (floor), frndint
+    ; sub rsp, 16
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xEC
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    ; movsd [rsp+8], xmm0 (F2 0F 11 44 24 08)
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x11
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; fld qword [rsp+8] (DD 44 24 08)
+    mov     al, 0xDD
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; fnstcw [rsp] (9B D7 34 24)
+    mov     al, 0x9B
+    call    emit_b
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; movzx eax, word [rsp] (0F B7 04 24)
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xB7
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; and ax, 0xF3FF (66 25 FF F3)
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xF3
+    call    emit_b
+    ; or ax, 0x0400 (66 0D 00 04)
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0D
+    call    emit_b
+    mov     al, 0x00
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    ; mov [rsp+2], ax (66 89 44 24 02)
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x02
+    call    emit_b
+    ; fldcw [rsp+2] (D7 6C 24 02)
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x6C
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x02
+    call    emit_b
+    ; frndint (D9 FC)
+    mov     al, 0xD9
+    call    emit_b
+    mov     al, 0xFC
+    call    emit_b
+    ; fldcw [rsp] (D7 34 24)
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; fstp qword [rsp+8] (DD 5C 24 08)
+    mov     al, 0xDD
+    call    emit_b
+    mov     al, 0x5C
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; movsd xmm0, [rsp+8] (F2 0F 10 44 24 08)
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; add rsp, 16 (48 83 C4 10)
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xC4
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    ; movq rax, xmm0 (F3 48 0F 7E C0)
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax (50)
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_ceil:
+    ; x87 ceil: set RC=10 (ceil), frndint
+    ; Same as floor but OR with 0x0800 instead of 0x0400
+    ; sub rsp, 16
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xEC
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    ; movsd [rsp+8], xmm0
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x11
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; fld qword [rsp+8]
+    mov     al, 0xDD
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; fnstcw [rsp]
+    mov     al, 0x9B
+    call    emit_b
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; movzx eax, word [rsp]
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xB7
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; and ax, 0xF3FF
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xF3
+    call    emit_b
+    ; or ax, 0x0800 (ceil mode)
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x0D
+    call    emit_b
+    mov     al, 0x00
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; mov [rsp+2], ax
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x02
+    call    emit_b
+    ; fldcw [rsp+2]
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x6C
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x02
+    call    emit_b
+    ; frndint
+    mov     al, 0xD9
+    call    emit_b
+    mov     al, 0xFC
+    call    emit_b
+    ; fldcw [rsp]
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; fstp qword [rsp+8]
+    mov     al, 0xDD
+    call    emit_b
+    mov     al, 0x5C
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; movsd xmm0, [rsp+8]
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; add rsp, 16
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xC4
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    ; movq rax, xmm0
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_round:
+    ; x87 round: RC=00 (round to nearest), frndint
+    ; Same as floor but no OR (RC stays 00)
+    ; sub rsp, 16
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xEC
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    ; movsd [rsp+8], xmm0
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x11
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; fld qword [rsp+8]
+    mov     al, 0xDD
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; fnstcw [rsp]
+    mov     al, 0x9B
+    call    emit_b
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; movzx eax, word [rsp]
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0xB7
+    call    emit_b
+    mov     al, 0x04
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; and ax, 0xF3FF (clear RC bits to 00)
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x25
+    call    emit_b
+    mov     al, 0xFF
+    call    emit_b
+    mov     al, 0xF3
+    call    emit_b
+    ; mov [rsp+2], ax (no OR needed, RC=00)
+    mov     al, 0x66
+    call    emit_b
+    mov     al, 0x89
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x02
+    call    emit_b
+    ; fldcw [rsp+2]
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x6C
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x02
+    call    emit_b
+    ; frndint
+    mov     al, 0xD9
+    call    emit_b
+    mov     al, 0xFC
+    call    emit_b
+    ; fldcw [rsp]
+    mov     al, 0xD7
+    call    emit_b
+    mov     al, 0x34
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    ; fstp qword [rsp+8]
+    mov     al, 0xDD
+    call    emit_b
+    mov     al, 0x5C
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; movsd xmm0, [rsp+8]
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    mov     al, 0x44
+    call    emit_b
+    mov     al, 0x24
+    call    emit_b
+    mov     al, 0x08
+    call    emit_b
+    ; add rsp, 16
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x83
+    call    emit_b
+    mov     al, 0xC4
+    call    emit_b
+    mov     al, 0x10
+    call    emit_b
+    ; movq rax, xmm0
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
+    inc     r12
+    jmp     .p2
+
+.op_fsqrt:
+    ; sqrtsd xmm0, xmm0 (F2 0F 51 C0)
+    mov     al, 0xF2
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x51
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; movq rax, xmm0
+    mov     al, 0xF3
+    call    emit_b
+    mov     al, 0x48
+    call    emit_b
+    mov     al, 0x0F
+    call    emit_b
+    mov     al, 0x7E
+    call    emit_b
+    mov     al, 0xC0
+    call    emit_b
+    ; push rax
+    mov     al, 0x50
+    call    emit_b
     inc     r12
     jmp     .p2
 
@@ -1428,7 +3095,7 @@ ir_emit_x86:
     cmp     al, IR_MOD
     je      .est_9
     cmp     al, IR_IDIV
-    je      .est_6
+    je      .est_19
     cmp     al, IR_NEG
     je      .est_3
     cmp     al, IR_CMP
@@ -1487,6 +3154,58 @@ ir_emit_x86:
     je      .est_4
     cmp     al, IR_SIMD_SUB
     je      .est_4
+    cmp     al, 0xA2           ; IR_SIMD_REDUCE_SUM
+    je      .est_22
+    cmp     al, IR_BAND
+    je      .est_4
+    cmp     al, IR_BOR
+    je      .est_4
+    cmp     al, IR_BXOR
+    je      .est_4
+    cmp     al, IR_BNOT
+    je      .est_3
+    cmp     al, IR_BSHL
+    je      .est_4
+    cmp     al, IR_BSHR
+    je      .est_4
+    cmp     al, IR_BSHR_S
+    je      .est_4
+    cmp     al, IR_ABS
+    je      .est_8
+    cmp     al, IR_SIGN
+    je      .est_12
+    cmp     al, IR_LOAD_CHAR
+    je      .est_10
+    cmp     al, IR_LOAD_BYTE
+    je      .est_10
+    cmp     al, IR_FADD
+    je      .est_10
+    cmp     al, IR_FSUB
+    je      .est_10
+    cmp     al, IR_FMUL
+    je      .est_10
+    cmp     al, IR_FDIV
+    je      .est_10
+    cmp     al, IR_FNEG
+    je      .est_8
+    cmp     al, IR_FABS
+    je      .est_8
+    cmp     al, IR_FLOOR
+    je      .est_60
+    cmp     al, IR_CEIL
+    je      .est_60
+    cmp     al, IR_ROUND
+    je      .est_60
+    cmp     al, IR_FSQRT
+    je      .est_10
+    cmp     al, IR_RAISE
+    je      .est_5
+    cmp     al, IR_CONCAT
+    je      .est_5
+    cmp     al, IR_INPUT
+    je      .est_5
+    cmp     al, IR_TYPEOF
+    je      .est_11
     ret
 
 .est_0:
@@ -1518,17 +3237,29 @@ ir_emit_x86:
 .est_11:
     add     qword [out_idx], 11
     ret
+.est_12:
+    add     qword [out_idx], 12
+    ret
 .est_13:
     add     qword [out_idx], 13
     ret
 .est_15:
     add     qword [out_idx], 15
     ret
+.est_19:
+    add     qword [out_idx], 19
+    ret
+.est_22:
+    add     qword [out_idx], 22
+    ret
 .est_24:
     add     qword [out_idx], 24
     ret
 .est_25:
     add     qword [out_idx], 25
+    ret
+.est_60:
+    add     qword [out_idx], 60
     ret
 
 .est_mul:
@@ -1555,6 +3286,167 @@ ir_emit_x86:
 ; Done
 ; ============================================================
 .done:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ============================================================
+; ir_rewrite_cached_ops — post-pass to rewrite memory ops for cached vars
+; Scans output buffer for incl/addq targeting cached variables,
+; replaces with register operations.
+; ============================================================
+global ir_rewrite_cached_ops
+ir_rewrite_cached_ops:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    cmp     qword [ir_cache_cnt], 0
+    je      .rw_done
+
+    mov     r12, CODE_START
+    mov     r13, [out_idx]
+
+.rw_loop:
+    cmp     r12, r13
+    jge     .rw_done
+
+    ; Check for incl [abs32]: 48 FF 04 25 addr32 (7 bytes)
+    cmp     r12, 7
+    jb      .rw_next
+    lea     rdi, [out_buffer + r12]
+    cmp     byte [rdi], 0x48
+    jne     .rw_check_addq
+    cmp     byte [rdi+1], 0xFF
+    jne     .rw_check_addq
+    cmp     byte [rdi+2], 0x04
+    jne     .rw_check_addq
+    cmp     byte [rdi+3], 0x25
+    jne     .rw_check_addq
+    ; Found incl [abs32] — extract addr32
+    mov     eax, [rdi+4]
+    ; Check if addr matches a cached variable
+    sub     rax, VAR_STORAGE_BASE
+    shr     rax, 6              ; var_idx
+    ; Search cache
+    xor     ecx, ecx
+.rw_incl_search:
+    cmp     ecx, 4
+    jge     .rw_check_addq
+    cmp     rax, [ir_cache_var + rcx*8]
+    je      .rw_incl_hit
+    inc     ecx
+    jmp     .rw_incl_search
+.rw_incl_hit:
+    ; Replace incl [abs32] (7 bytes) with inc reg (2-3 bytes)
+    ; Rewrite: overwrite with inc reg + NOPs
+    cmp     ecx, 0
+    je      .rw_incl_r15
+    cmp     ecx, 1
+    je      .rw_incl_r14
+    jmp     .rw_check_addq
+.rw_incl_r15:
+    ; inc r15 = 49 FF C7
+    mov     byte [rdi], 0x49
+    mov     byte [rdi+1], 0xFF
+    mov     byte [rdi+2], 0xC7
+    ; NOP remaining 4 bytes
+    mov     byte [rdi+3], 0x90
+    mov     byte [rdi+4], 0x90
+    mov     byte [rdi+5], 0x90
+    mov     byte [rdi+6], 0x90
+    add     r12, 7
+    jmp     .rw_loop
+.rw_incl_r14:
+    ; inc r14 = 49 FF C6
+    mov     byte [rdi], 0x49
+    mov     byte [rdi+1], 0xFF
+    mov     byte [rdi+2], 0xC6
+    mov     byte [rdi+3], 0x90
+    mov     byte [rdi+4], 0x90
+    mov     byte [rdi+5], 0x90
+    mov     byte [rdi+6], 0x90
+    add     r12, 7
+    jmp     .rw_loop
+
+.rw_check_addq:
+    ; Check for addq $N, [abs32]: 48 83 04 25 addr32 imm8 (9 bytes)
+    lea     rdi, [out_buffer + r12]
+    cmp     r13, r12
+    sub     r13, r12
+    cmp     r13, 9
+    add     r13, r12
+    jl      .rw_next
+    cmp     byte [rdi], 0x48
+    jne     .rw_next
+    cmp     byte [rdi+1], 0x83
+    jne     .rw_next
+    cmp     byte [rdi+2], 0x04
+    jne     .rw_next
+    cmp     byte [rdi+3], 0x25
+    jne     .rw_next
+    ; Found addq $imm8, [abs32] — extract addr32 and imm8
+    mov     eax, [rdi+4]       ; addr32
+    movzx   r14d, byte [rdi+8] ; imm8 (sign-extended later)
+    ; Check cache
+    sub     rax, VAR_STORAGE_BASE
+    shr     rax, 6
+    xor     ecx, ecx
+.rw_addq_search:
+    cmp     ecx, 4
+    jge     .rw_next
+    cmp     rax, [ir_cache_var + rcx*8]
+    je      .rw_addq_hit
+    inc     ecx
+    jmp     .rw_addq_search
+.rw_addq_hit:
+    ; Replace addq $imm8, [abs32] (9 bytes) with add reg, imm8 (4 bytes)
+    cmp     ecx, 0
+    je      .rw_addq_r15
+    cmp     ecx, 1
+    je      .rw_addq_r14
+    jmp     .rw_next
+.rw_addq_r15:
+    ; add r15, imm8 = 49 81 C7 imm32 (7 bytes) or 49 83 C7 imm8 (4 bytes)
+    ; Use 49 83 C7 imm8 for small values
+    mov     byte [rdi], 0x49
+    mov     byte [rdi+1], 0x83
+    mov     byte [rdi+2], 0xC7
+    mov     al, r14b
+    mov     [rdi+3], al
+    ; NOP remaining 5 bytes
+    mov     byte [rdi+4], 0x90
+    mov     byte [rdi+5], 0x90
+    mov     byte [rdi+6], 0x90
+    mov     byte [rdi+7], 0x90
+    mov     byte [rdi+8], 0x90
+    add     r12, 9
+    jmp     .rw_loop
+.rw_addq_r14:
+    ; add r14, imm8 = 49 83 C6 imm8
+    mov     byte [rdi], 0x49
+    mov     byte [rdi+1], 0x83
+    mov     byte [rdi+2], 0xC6
+    mov     al, r14b
+    mov     [rdi+3], al
+    mov     byte [rdi+4], 0x90
+    mov     byte [rdi+5], 0x90
+    mov     byte [rdi+6], 0x90
+    mov     byte [rdi+7], 0x90
+    mov     byte [rdi+8], 0x90
+    add     r12, 9
+    jmp     .rw_loop
+
+.rw_next:
+    inc     r12
+    jmp     .rw_loop
+
+.rw_done:
     pop     r15
     pop     r14
     pop     r13
