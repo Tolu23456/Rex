@@ -37,7 +37,7 @@
 %define CODE_START          9909      ; 9397 + 512
 
 ; JMP rel32 = CODE_START - (RT_JMP_OFFSET + 5) = 9909 - 181 = 9728
-%define RT_TOTAL_SIZE       9728
+%define RT_TOTAL_SIZE       11520    ; 512+512+256+512+512+1024+4096+1024+256+512+512+2048
 
 ; Runtime blob sizes
 %define RT_PRI_SIZE         512
@@ -51,6 +51,9 @@
 %define RT_STR_SIZE         256
 %define RT_INP_SIZE         512
 %define RT_STR_CAT_SIZE     512       ; string concat blob (NEW)
+%define RT_STRM_OFFSET      9397      ; string methods blob
+%define RT_STRM_SIZE        2048      ; string methods blob
+; CODE_START unchanged — RT_STRM blob fits in existing padding
 
 ; Dict entry points inside rt_prq_blob
 %define RT_DICT_NEW_OFFSET  7606
