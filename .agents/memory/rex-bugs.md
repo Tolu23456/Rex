@@ -39,15 +39,29 @@ description: Catalogue of all bugs found and fixed in the Rex NASM compiler, plu
 
 ## Architectural improvements
 
-### Graph-colouring register allocator (replaces linear scan)
-**File:** `irgen/ra.asm` — full rewrite
-**Algorithm:** Chaitin-Briggs four-phase graph colouring:
-1. Liveness: compute `gc_def[v]` and `gc_last_use[v]` from IR.
-2. Build: interference graph as 512×512-bit symmetric bitmap; two vregs interfere iff their live ranges [def, last_use] overlap.
-3. Simplify: repeatedly push nodes with degree < 6 onto the colouring stack; when stuck, push highest-degree node as potential spill (optimistic colouring).
-4. Colour: pop stack, assign smallest colour not used by already-coloured neighbours; uncolourable → spill (colour 255).
-**Key constants:** `GRAPHCOL_VMAX = 512`, `NUM_PHYS_REGS = 6` (r10–r15, phys 0–5). Vregs ≥ 512 auto-spill (never occurs in practice).
-**Why:** Linear scan had an ordering bug (dst allocated before srcs freed) causing unnecessary spills. Graph colouring computes true interference and allocates optimally for straight-line programs.
+### Graph-colouring register allocator — improved version (irgen/ra.asm)
+**File:** `irgen/ra.asm` — full rewrite (replaces prior Chaitin-Briggs draft)
+
+**Algorithm:** Chaitin-Briggs optimistic colouring with five phases:
+1. **Liveness + use-count** — single IR scan; `IR_NOP` records skipped entirely (eliminated instructions must not extend live ranges or inflate use counts).
+2. **Build** — pairwise range-overlap interference graph as a symmetric 512×512-bit bitmap (32 KiB). Two vregs interfere iff `[def₁, last₁] ∩ [def₂, last₂] ≠ ∅`.
+3. **Worklist simplification** — O(V+E): low-degree nodes seeded into a LIFO worklist after the graph is built; when a neighbour's degree drops below `k` in `gc_dn_update`, it is pushed automatically. When the worklist empties, the cheapest potential spill is selected (minimum `use_count`, tiebreak maximum current degree) and pushed optimistically.
+4. **Colouring** — pop the stack; build a used-colour bitmask by scanning the vreg's row with BSF+BTR over 8 × 64-bit words; assign the smallest free colour or mark as spilled.
+5. **Map** — populate `vreg_phys[]` / `vreg_offset[]`; align spill frame to 16 bytes.
+
+**Key improvements over the initial draft:**
+- `gc_dn_update` uses BSF-based 512-bit row scan (8 qword iterations) instead of O(N) linear scan with one `gc_interf_test` call per vreg.
+- Same BSF scan used in Phase 4 colouring (no `gc_interf_test` call at all).
+- `gc_interf_test` function removed entirely.
+- `gc_orig_degree` table removed; replaced by `gc_use_count` for spill cost.
+- `gc_remaining` counter maintained incrementally (no per-iteration full scan).
+- NOP-skipping in Phase 1 prevents phantom vregs from cluttering the graph.
+- Simplification drops from O(V²) per node to O(V+E) total.
+
+**Physical register map:** colours 0–5 → r10–r15. Colour 255 = spilled.
+**Constants:** `GRAPHCOL_VMAX = 512`, `NUM_PHYS_REGS = 6`.
+
+**Why:** The initial draft recomputed the remaining-node count on every simplification iteration (O(V²)) and called `gc_interf_test` for each of the V candidates on every neighbour-decrement (O(V) function calls per decrement). For large programs these costs compound. The worklist + BSF row scan make both operations proportional to the actual graph edges rather than V².
 
 ### Optimizer cache correctness
 **File:** `irgen/opt.asm`
@@ -56,8 +70,8 @@ description: Catalogue of all bugs found and fixed in the Rex NASM compiler, plu
 ---
 
 ## Testing infrastructure
-**Files:** `tests/test_*.rex`, `run_tests.sh`
-**Tests added (all green):**
+**Files:** `tests/test_*.rex`, `tests/test_*.expected`, `run_tests.sh`
+**Tests (all green, 9/9):**
 - `test_arithmetic.rex` — all 5 arithmetic ops, precedence
 - `test_bool.rex` — Łukasiewicz three-valued logic
 - `test_constant_folding.rex` — compile-time integer folding
@@ -67,4 +81,4 @@ description: Catalogue of all bugs found and fixed in the Rex NASM compiler, plu
 - `test_question_ops.rex` — ? token lexing (Bug 1)
 - `test_register_pressure.rex` — 8 variables forcing spills
 - `test_strings.rex` — string literal output
-**Runner:** `run_tests.sh --verbose` extracts `// Expected output:` blocks and diffs actual vs expected. 9/9 pass.
+**Runner:** `run_tests.sh --verbose` diffs actual vs `tests/*.expected`. 9/9 pass.
