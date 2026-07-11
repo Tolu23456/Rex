@@ -359,9 +359,12 @@ pass_load_store_coalescing:
     xor eax, eax
     rep stosw
     
-    ; vreg_alias is intentionally NOT cleared here; constant-folding has
-    ; already established some entries and peephole will add more.
-    ; pass_apply_aliases (run last) will consume the whole table.
+    ; vreg_alias IS cleared here at the start of this pass.
+    ; Constant folding (pass_constant_folding) does NOT write to vreg_alias,
+    ; so there are no entries to preserve.  This pass and pass_peephole
+    ; build all alias entries; pass_apply_aliases (run last) consumes them.
+    ; Clearing here prevents stale entries from a previous compiler invocation
+    ; from corrupting subsequent compilations.
     mov rcx, VREG_MAX
     lea rdi, [vreg_alias]
     xor eax, eax

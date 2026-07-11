@@ -35,37 +35,44 @@ description: Catalogue of all bugs found and fixed in the Rex NASM compiler, plu
 **Symptom:** Float immediate loads were not recorded in `vreg_is_const[]`, so float constants were never folded. Programs with `float z = 1.5 + 2.5` emitted actual SSE arithmetic at runtime instead of a constant.
 **Fix:** Added a `handle_load_fimm` handler in `pass_constant_folding` that stores the bit pattern in `vreg_const_val[]`. Added SSE2 float arithmetic folding (`addsd`/`subsd`/`mulsd`/`divsd`) in `handle_arith` when `type == TYPE_FLOAT`.
 
+### Bug 8 — Optimizer: stale/wrong comment on vreg_alias clear (🟡)
+**File:** `irgen/opt.asm`
+**Symptom:** Comment in `pass_load_store_coalescing` said "vreg_alias is intentionally NOT cleared here" but the code immediately below cleared it with `rep stosw`. Contradictory comment could lead a maintainer to remove the clear, which would cause stale alias entries to persist across compiler invocations.
+**Fix:** Replaced the misleading comment with an accurate explanation: the clear IS intentional, constant folding never writes vreg_alias, and clearing prevents cross-invocation corruption.
+
+### Bug 9 — Codegen: load_src1_phys / load_src2_phys / get_dst_phys clobber RBX (🟡 ABI)
+**File:** `codegen/codegen.asm`
+**Symptom:** All three helper functions used `rbx` (callee-saved, SysV ABI) as a scratch register without push/pop. Currently harmless because `codegen_emit_all` never relies on rbx across these calls, but a latent ABI violation that would corrupt callers if that ever changed.
+**Fix:** Added `push rbx` at entry and `pop rbx` before every `ret` in all three functions.
+
 ---
 
 ## Architectural improvements
 
-### Graph-colouring register allocator — improved version (irgen/ra.asm)
-**File:** `irgen/ra.asm` — full rewrite (replaces prior Chaitin-Briggs draft)
+### Graph-colouring register allocator — full enhanced version (irgen/ra.asm)
+**File:** `irgen/ra.asm`
 
 **Algorithm:** Chaitin-Briggs optimistic colouring with five phases:
-1. **Liveness + use-count** — single IR scan; `IR_NOP` records skipped entirely (eliminated instructions must not extend live ranges or inflate use counts).
-2. **Build** — pairwise range-overlap interference graph as a symmetric 512×512-bit bitmap (32 KiB). Two vregs interfere iff `[def₁, last₁] ∩ [def₂, last₂] ≠ ∅`.
-3. **Worklist simplification** — O(V+E): low-degree nodes seeded into a LIFO worklist after the graph is built; when a neighbour's degree drops below `k` in `gc_dn_update`, it is pushed automatically. When the worklist empties, the cheapest potential spill is selected (minimum `use_count`, tiebreak maximum current degree) and pushed optimistically.
-4. **Colouring** — pop the stack; build a used-colour bitmask by scanning the vreg's row with BSF+BTR over 8 × 64-bit words; assign the smallest free colour or mark as spilled.
+1. **Liveness + use-count + copy-hint** — single IR scan; `IR_NOP` records skipped entirely. For arithmetic ops (`IR_ADD`..`IR_XOR`, `IR_BOOL_AND`/`OR`), records `gc_copy_hint[dst] = src1` for use in Phase 4 biased colouring.
+2. **Build** — pairwise range-overlap interference graph as a symmetric 512×512-bit bitmap (32 KiB). Two vregs interfere iff `[def₁, last₁] ∩ [def₂, last₂] ≠ ∅`. Outer loop v1: 1..gc_max_vreg-1 (jge); inner loop v2: v1+1..gc_max_vreg (jg) — covers every pair exactly once.
+3. **Worklist simplification** — low-degree nodes seeded after build; `gc_dn_update` BSF-scans the interference row (8 qwords) and pushes neighbours that drop below k. When worklist empties, selects the cheapest potential spill using ratio heuristic (see below) and pushes optimistically.
+4. **Biased colouring** — pop stack; build used-colour bitmask via BSF+BTR over 8 × 64-bit row words. **Biased colouring first:** if `gc_copy_hint[v]` names an already-coloured, non-spilled vreg whose colour is free, assign that colour immediately — eliminates the `mov dst_reg, src1_reg` copy in `codegen.asm`. Otherwise fall back to smallest free colour or spill.
 5. **Map** — populate `vreg_phys[]` / `vreg_offset[]`; align spill frame to 16 bytes.
 
-**Key improvements over the initial draft:**
-- `gc_dn_update` uses BSF-based 512-bit row scan (8 qword iterations) instead of O(N) linear scan with one `gc_interf_test` call per vreg.
-- Same BSF scan used in Phase 4 colouring (no `gc_interf_test` call at all).
-- `gc_interf_test` function removed entirely.
-- `gc_orig_degree` table removed; replaced by `gc_use_count` for spill cost.
-- `gc_remaining` counter maintained incrementally (no per-iteration full scan).
-- NOP-skipping in Phase 1 prevents phantom vregs from cluttering the graph.
-- Simplification drops from O(V²) per node to O(V+E) total.
+**Spill heuristic (Bug 10 fix + enhancement):**
+Classic Chaitin: minimise `use_count / (degree + 1)`. Implemented without division via cross-multiplication:
+  candidate c beats current best b iff `use_count[c] * (degree[b]+1) < use_count[b] * (degree[c]+1)`
+Max product: 2 * IR_MAX_RECORDS * GRAPHCOL_VMAX = 2048 * 512 = 1 048 576 — fits in a 32-bit register. No overflow.
+
+**Copy-hint biased colouring:**
+`gc_copy_hint resw GRAPHCOL_VMAX` table zeroed in Phase 0. Phase 1 fills it for arithmetic ops. Phase 4 tries the hint colour before the generic pick loop — when honoured, the codegen's `mov dst_reg, src1_reg` pre-copy becomes a `mov r_x, r_x` no-op that the peephole can eliminate, or the codegen skips it entirely.
 
 **Physical register map:** colours 0–5 → r10–r15. Colour 255 = spilled.
 **Constants:** `GRAPHCOL_VMAX = 512`, `NUM_PHYS_REGS = 6`.
 
-**Why:** The initial draft recomputed the remaining-node count on every simplification iteration (O(V²)) and called `gc_interf_test` for each of the V candidates on every neighbour-decrement (O(V) function calls per decrement). For large programs these costs compound. The worklist + BSF row scan make both operations proportional to the actual graph edges rather than V².
-
 ### Optimizer cache correctness
 **File:** `irgen/opt.asm`
-**Improvement:** `pass_load_store_coalescing` now guards the load-miss path with `cmp rax, -1; je .next` before using `rax` as a symbol index, preventing `var_cached_vreg[-1]` writes. `opt_follow_alias` follows full alias chains (not just one level).
+**Improvement:** `pass_load_store_coalescing` guards the load-miss path with `cmp rax, -1; je .next` before using `rax` as a symbol index, preventing `var_cached_vreg[-1]` writes. `opt_follow_alias` follows full alias chains (not just one level).
 
 ---
 

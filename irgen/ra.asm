@@ -1,13 +1,16 @@
 ; Rex Graph-Colouring Register Allocator
 ; written in x86-64 NASM assembly
 ;
-; Algorithm: Chaitin-Briggs optimistic colouring with a low-degree worklist.
+; Algorithm: Chaitin-Briggs optimistic colouring with a low-degree worklist,
+;            copy-hint biased colouring, and ratio-based spill cost.
 ;
-; Five phases
-; -----------
+; Six phases
+; ----------
 ;   1. Liveness    — single IR scan: gc_def[v], gc_last_use[v], gc_use_count[v].
 ;                    IR_NOP records are skipped entirely so eliminated instructions
 ;                    do not create phantom live ranges.
+;                    For arithmetic ops (dst = src1 op src2) the pair (dst, src1)
+;                    is also recorded as a copy-coalescing hint in gc_copy_hint[].
 ;   2. Build       — pairwise range-overlap interference graph stored as a
 ;                    symmetric 512×512-bit bitmap (32 KiB).
 ;   2.5 Worklist   — seed the simplification worklist with all defined vregs
@@ -18,18 +21,30 @@
 ;                        gc_dn_update() which decrements each neighbour's degree
 ;                        with a fast BSF-based row scan and re-seeds the worklist
 ;                        when a neighbour drops below the threshold.
-;                      • If worklist empty (all degrees ≥ k): select the node
-;                        with the minimum use-count as a potential spill (ties
-;                        broken by highest current degree) and push it to the
-;                        colouring stack anyway (optimistic colouring).
+;                      • If worklist empty (all degrees >= k): select the node
+;                        with the minimum use_count/(degree+1) ratio as a
+;                        potential spill (cross-multiplication avoids division)
+;                        and push it to the colouring stack anyway (optimistic).
 ;   4. Colour      — pop the colouring stack; for each vreg build a used-colour
-;                    bitmask by scanning its interference row with BSF, then
-;                    assign the smallest free colour (0-5) or mark as spilled.
+;                    bitmask by scanning its interference row with BSF, then:
+;                      a. If gc_copy_hint[v] names a coloured non-spilled vreg
+;                         whose colour is free, assign that colour immediately
+;                         (biased colouring — eliminates the src1→dst copy).
+;                      b. Otherwise assign the smallest free colour (0-5)
+;                         or mark as spilled.
 ;   5. Map         — populate vreg_phys[] and vreg_offset[]; align spill frame.
 ;
 ; Physical register map (NUM_PHYS_REGS = 6)
 ;   colour 0 → r10    colour 1 → r11    colour 2 → r12
 ;   colour 3 → r13    colour 4 → r14    colour 5 → r15
+;
+; Spill heuristic
+;   Classic Chaitin: minimise use_count / (degree + 1).
+;   Implemented without division via cross-multiplication:
+;     candidate c is better than current best b iff
+;       use_count[c] * (degree[b]+1) < use_count[b] * (degree[c]+1)
+;   Max product: 2*IR_MAX_RECORDS * GRAPHCOL_VMAX = 2048 * 512 = 1 048 576
+;   which fits comfortably in a 32-bit signed register.
 ;
 ; Interface (unchanged from previous version)
 ;   vreg_phys[v]     = colour (0-5) or 255 (spilled)
@@ -62,6 +77,9 @@ section .bss
     gc_def              resd GRAPHCOL_VMAX           ; first-definition instruction index
     gc_last_use         resd GRAPHCOL_VMAX           ; last src-read instruction index
     gc_use_count        resd GRAPHCOL_VMAX           ; total src appearances (spill cost)
+
+    ; ---- copy-coalescing hints (Phase 1, used in Phase 4 biased colouring) ----
+    gc_copy_hint        resw GRAPHCOL_VMAX           ; dst vreg → src1 vreg (0 = none)
 
     ; ---- interference graph (symmetric bitmap) ----
     gc_interf           resb GRAPHCOL_VMAX * GRAPHCOL_BPR   ; 32 KiB
@@ -128,18 +146,23 @@ allocate_registers:
     mov eax, UNSET_IDX
     rep stosd
 
-    ; gc_last_use, gc_use_count, gc_degree ← 0  (three consecutive dword arrays)
-    ; gc_last_use is immediately after gc_def in BSS, so we can continue rdi
-    ; Actually they are not contiguous in BSS as declared; zero each explicitly.
+    ; gc_last_use ← 0
     mov ecx, GRAPHCOL_VMAX
     lea rdi, [gc_last_use]
     xor eax, eax
     rep stosd
 
+    ; gc_use_count ← 0
     mov ecx, GRAPHCOL_VMAX
     lea rdi, [gc_use_count]
     xor eax, eax
     rep stosd
+
+    ; gc_copy_hint ← 0  (no hints yet)
+    mov ecx, GRAPHCOL_VMAX
+    lea rdi, [gc_copy_hint]
+    xor eax, eax
+    rep stosw
 
     ; gc_interf ← 0  (32 KiB; use qwords for speed)
     mov ecx, GRAPHCOL_VMAX * GRAPHCOL_BPR / 8
@@ -147,6 +170,7 @@ allocate_registers:
     xor eax, eax
     rep stosq
 
+    ; gc_degree ← 0
     mov ecx, GRAPHCOL_VMAX
     lea rdi, [gc_degree]
     xor eax, eax
@@ -182,18 +206,21 @@ allocate_registers:
     jz .done_alloc          ; no vregs at all
 
     ; ----------------------------------------------------------
-    ; Phase 1: liveness + use-count scan
+    ; Phase 1: liveness + use-count + copy-hint scan
     ; ----------------------------------------------------------
     ; For each non-NOP IR record i:
     ;   if dst  ≠ 0: record first definition
     ;   if src1 ≠ 0: update last-use, increment use_count
     ;   if src2 ≠ 0: update last-use, increment use_count
+    ;   if opcode is arithmetic (IR_ADD..IR_XOR or IR_BOOL_AND/OR/NOT):
+    ;     record gc_copy_hint[dst] = src1  (biased colouring hint)
+    ;
     ; NOP records are skipped so eliminated instructions don't
     ; extend live ranges or inflate use counts.
 
     mov r12d, [ir_count]
     test r12d, r12d
-    jz .build_start         ; no IR → skip to building (graph stays empty)
+    jz .build_start         ; no IR → skip to building
 
     xor ebx, ebx            ; i = 0
 .phase1_loop:
@@ -230,11 +257,51 @@ allocate_registers:
 .p1_src2:
     movzx eax, word [r13 + 6]      ; src2
     test ax, ax
-    jz .phase1_next
+    jz .p1_hint
     cmp eax, GRAPHCOL_VMAX
-    jae .phase1_next
+    jae .p1_hint
     mov [gc_last_use + rax * 4], ebx
     inc dword [gc_use_count + rax * 4]
+
+.p1_hint:
+    ; For arithmetic ops, record copy-coalescing hint: gc_copy_hint[dst] = src1
+    ; Biased colouring in Phase 4 will try to assign dst the same colour as src1,
+    ; which eliminates the "mov dst_reg, src1_reg" copy emitted by codegen.
+    movzx eax, byte [r13]          ; opcode
+    cmp al, IR_ADD
+    je .p1_do_hint
+    cmp al, IR_SUB
+    je .p1_do_hint
+    cmp al, IR_MUL
+    je .p1_do_hint
+    cmp al, IR_DIV
+    je .p1_do_hint
+    cmp al, IR_MOD
+    je .p1_do_hint
+    cmp al, IR_AND
+    je .p1_do_hint
+    cmp al, IR_OR
+    je .p1_do_hint
+    cmp al, IR_XOR
+    je .p1_do_hint
+    cmp al, IR_BOOL_AND
+    je .p1_do_hint
+    cmp al, IR_BOOL_OR
+    je .p1_do_hint
+    jmp .phase1_next
+
+.p1_do_hint:
+    movzx ecx, word [r13 + 2]      ; dst vreg
+    test cx, cx
+    jz .phase1_next
+    cmp ecx, GRAPHCOL_VMAX
+    jae .phase1_next
+    movzx edx, word [r13 + 4]      ; src1 vreg
+    test dx, dx
+    jz .phase1_next
+    cmp edx, GRAPHCOL_VMAX
+    jae .phase1_next
+    mov [gc_copy_hint + rcx * 2], dx   ; dst → src1 hint
 
 .phase1_next:
     inc ebx
@@ -250,6 +317,10 @@ allocate_registers:
     ; Overlap condition: def[v1] ≤ last_use[v2] AND def[v2] ≤ last_use[v1]
     ;
     ; Only defined vregs (gc_def ≠ UNSET_IDX) are considered.
+    ;
+    ; Outer loop v1: 1 .. gc_max_vreg-1  (uses jge to stop when v1==gc_max_vreg)
+    ; Inner loop v2: v1+1 .. gc_max_vreg (uses jg  to stop when v2>gc_max_vreg)
+    ; Together they cover every unique pair exactly once.
 
 .build_start:
     mov r12d, [gc_max_vreg]
@@ -257,7 +328,7 @@ allocate_registers:
     mov r14d, 1             ; v1
 .build_outer:
     cmp r14d, r12d
-    jge .build_done
+    jge .build_done         ; stop when v1 >= gc_max_vreg (all pairs covered)
 
     cmp dword [gc_def + r14 * 4], UNSET_IDX
     je .build_next_outer
@@ -267,7 +338,7 @@ allocate_registers:
 
 .build_inner:
     cmp r15d, r12d
-    jg .build_next_outer
+    jg .build_next_outer    ; stop when v2 > gc_max_vreg
 
     cmp dword [gc_def + r15 * 4], UNSET_IDX
     je .build_next_inner
@@ -304,14 +375,12 @@ allocate_registers:
     ; Phase 2.5: seed the simplification worklist
     ; ----------------------------------------------------------
     ; Add every defined, non-removed vreg with degree < NUM_PHYS_REGS.
-    ; At this point nothing is removed, so the second check is redundant
-    ; but kept for clarity.
 
     mov r12d, [gc_max_vreg]
     mov r14d, 1
 .seed_wl:
     cmp r14d, r12d
-    jg .seed_wl_done
+    jg .seed_wl_done        ; inclusive: processes vregs 1 .. gc_max_vreg
 
     cmp dword [gc_def + r14 * 4], UNSET_IDX
     je .seed_next
@@ -363,12 +432,23 @@ allocate_registers:
 
     jmp .simplify_loop
 
-    ; --- Spill selection: min use_count, tiebreak max degree ---
+    ; --- Spill selection: minimise use_count / (degree+1) ---
+    ; Uses cross-multiplication to avoid division:
+    ;   candidate c beats best b iff
+    ;   use_count[c] * (degree[b]+1) < use_count[b] * (degree[c]+1)
+    ;
+    ; Registers during scan:
+    ;   r12d = gc_max_vreg
+    ;   r13d = best vreg ID (-1 = none yet)
+    ;   r14d = best use_count   (stored for cross-multiply)
+    ;   r15d = best degree      (stored for cross-multiply)
+    ;   ecx  = current candidate vreg
+    ;   ebx  = scratch for cross-multiply
 .find_spill:
     mov r12d, [gc_max_vreg]
-    mov r13d, -1                ; best candidate vreg ID (-1 = none yet)
-    mov r14d, 0xFFFFFFFF        ; best use_count (lower = better spill)
-    mov r15d, 0                 ; best degree   (higher = better tiebreak)
+    mov r13d, -1
+    mov r14d, 0
+    mov r15d, 0
 
     mov ecx, 1
 .spill_scan:
@@ -380,24 +460,24 @@ allocate_registers:
     cmp byte [gc_removed + rcx], 0
     jne .spill_next
 
-    mov eax, [gc_use_count + rcx * 4]
-    cmp eax, r14d
-    ja  .spill_next             ; higher use_count → worse candidate
-    je  .spill_check_degree     ; equal → compare degree
+    cmp r13d, -1
+    je .new_best_spill                  ; first candidate — accept immediately
 
-    ; Lower use_count → better
-    mov r13d, ecx
-    mov r14d, eax
-    mov r15d, [gc_degree + rcx * 4]
-    jmp .spill_next
+    ; Cross-multiply comparison:
+    ;   new_use * (best_deg+1) vs best_use * (new_deg+1)
+    mov eax, [gc_use_count + rcx * 4]  ; new_use
+    mov edx, [gc_degree    + rcx * 4]  ; new_deg
+    lea ebx, [r15 + 1]                 ; best_deg + 1
+    imul ebx, eax                      ; ebx = new_use * (best_deg+1)
+    lea eax, [rdx + 1]                 ; new_deg + 1
+    imul eax, r14d                     ; eax = best_use * (new_deg+1)
+    cmp ebx, eax
+    jge .spill_next                    ; current >= best → no improvement
 
-.spill_check_degree:
-    mov eax, [gc_degree + rcx * 4]
-    cmp eax, r15d
-    jle .spill_next             ; same or lower degree → no improvement
+.new_best_spill:
     mov r13d, ecx
-    mov r15d, eax
-    ; r14d unchanged (same use_count)
+    mov r14d, [gc_use_count + rcx * 4]
+    mov r15d, [gc_degree    + rcx * 4]
 
 .spill_next:
     inc ecx
@@ -423,14 +503,22 @@ allocate_registers:
 .simplify_done:
 
     ; ----------------------------------------------------------
-    ; Phase 4: colouring
+    ; Phase 4: colouring with biased colouring
     ; ----------------------------------------------------------
     ; Pop each vreg from the colouring stack.
-    ; Scan its interference row with BSF to find which colours are
-    ; already taken by coloured neighbours, then assign the smallest
-    ; free colour.  If no colour is free the vreg is spilled.
+    ;
+    ; Step A: Scan interference row with BSF to build a bitmask of
+    ;         colours used by already-coloured neighbours.
+    ;
+    ; Step B (biased colouring): If gc_copy_hint[v] names a vreg that
+    ;         has already been assigned a valid colour c not in the
+    ;         used-colour bitmask, assign c immediately.  This tends to
+    ;         assign the same physical register to dst and src1 in
+    ;         arithmetic ops, eliminating the src1→dst copy in codegen.
+    ;
+    ; Step C: Fall back to smallest free colour (0-5) or spill.
 
-    ; gc_max_vreg was last set in Phase 3's spill scan — recompute for safety
+    ; Re-clamp gc_max_vreg in case vreg_counter was updated (defensive)
     mov eax, [vreg_counter]
     dec eax
     cmp eax, GRAPHCOL_VMAX - 1
@@ -447,13 +535,12 @@ allocate_registers:
     mov eax, [gc_stack_top]
     movzx ebx, word [gc_stack + rax * 2]    ; vreg being coloured
 
-    ; --- Build used-colour bitmask via BSF row scan ---
-    ; Compute row pointer for vreg ebx
+    ; --- Step A: Build used-colour bitmask via BSF row scan ---
     imul eax, ebx, GRAPHCOL_BPR
-    lea rsi, [gc_interf + rax]              ; rsi = row start
-    lea rdi, [rsi + GRAPHCOL_BPR]          ; rdi = row end  (past last byte)
+    lea rsi, [gc_interf + rax]              ; row start
+    lea rdi, [rsi + GRAPHCOL_BPR]           ; row end
     xor r14d, r14d                          ; used_colours bitmask
-    xor r15d, r15d                          ; bit base (0, 64, 128, ...)
+    xor r15d, r15d                          ; bit base (0, 64, 128, …)
 
 .cscan_word:
     cmp rsi, rdi
@@ -467,13 +554,15 @@ allocate_registers:
 .cscan_bits:
     bsf rcx, rax                            ; rcx = lowest set bit index (0-63)
     lea rdx, [r15 + rcx]                    ; rdx = neighbour vreg ID
-    btr rax, rcx                            ; clear that bit; rcx still = bit index
+    btr rax, rcx                            ; clear that bit
 
-    movzx ecx, byte [gc_color + rdx]        ; ecx = neighbour's colour (reuse rcx)
+    movzx ecx, byte [gc_color + rdx]        ; neighbour's colour
     cmp cl, COLOR_NONE
     je .cscan_cont
     cmp cl, COLOR_SPILL
     je .cscan_cont
+    cmp cl, NUM_PHYS_REGS
+    jae .cscan_cont                         ; invalid colour — defensive
     bts r14d, ecx                           ; mark colour as used
 
 .cscan_cont:
@@ -485,9 +574,33 @@ allocate_registers:
     jmp .cscan_word
 
 .cscan_done:
-    ; --- Assign smallest free colour ---
-    xor ecx, ecx                            ; colour candidate = 0
+    ; --- Step B: biased colouring — try copy hint first ---
+    movzx eax, word [gc_copy_hint + rbx * 2]   ; hint vreg (0 = none)
+    test ax, ax
+    jz .pick                                    ; no hint → generic assignment
+
+    movzx ecx, byte [gc_color + rax]            ; hint vreg's colour
+    cmp cl, COLOR_NONE
+    je .pick                                    ; hint not yet coloured
+    cmp cl, COLOR_SPILL
+    je .pick                                    ; hint was spilled
+    cmp cl, NUM_PHYS_REGS
+    jae .pick                                   ; invalid — defensive
+
+    ; Check that the hint colour is actually free for this vreg
+    mov edx, 1
+    shl edx, cl
+    test r14d, edx
+    jnz .pick                                   ; hint colour taken by a neighbour
+
+    ; Hint colour is free — assign it (this eliminates the src1→dst copy move)
+    mov byte [gc_color + rbx], cl
+    jmp .colour_loop
+
+    ; --- Step C: generic assignment — smallest free colour ---
 .pick:
+    xor ecx, ecx                            ; colour candidate = 0
+.pick_loop:
     cmp ecx, NUM_PHYS_REGS
     je .spill_vreg
     mov edx, 1
@@ -495,7 +608,7 @@ allocate_registers:
     test r14d, edx
     jz .assign_colour
     inc ecx
-    jmp .pick
+    jmp .pick_loop
 
 .assign_colour:
     mov byte [gc_color + rbx], cl
@@ -582,7 +695,7 @@ gc_dn_update:
     imul eax, r12d, GRAPHCOL_BPR
     lea r13, [gc_interf + rax]  ; r13 = row start
     lea r14, [r13 + GRAPHCOL_BPR] ; r14 = row end
-    xor r15d, r15d              ; bit base (0, 64, 128, ...)
+    xor r15d, r15d              ; bit base (0, 64, 128, …)
 
 .dn_word:
     cmp r13, r14
@@ -596,10 +709,10 @@ gc_dn_update:
 .dn_bits:
     bsf rbx, rax                ; rbx = bit index within this word (0-63)
     lea rdx, [r15 + rbx]        ; rdx = neighbour vreg ID
-    btr rax, rbx                ; clear bit (rbx = bit index still valid)
+    btr rax, rbx                ; clear bit
 
     cmp edx, r12d
-    je .dn_cont                 ; skip self (shouldn't appear, defensive)
+    je .dn_cont                 ; skip self (defensive)
 
     cmp byte [gc_removed + rdx], 0
     jne .dn_cont                ; skip already-removed neighbours

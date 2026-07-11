@@ -1091,7 +1091,9 @@ codegen_emit_all:
 
 
 ; Helper to load src1 into a physical register (or r14 if spilled)
+; Bug 9 fix: rbx is callee-saved (SysV ABI); save/restore it.
 load_src1_phys:
+    push rbx
     movzx rbx, ax ; save vreg id
     movzx rax, byte [vreg_phys + rbx]
     cmp al, 255
@@ -1108,10 +1110,13 @@ load_src1_phys:
     call emit_d
     mov al, 6 ; return r14
 .done:
+    pop rbx
     ret
 
 ; Helper to load src2 into a physical register (or r15 if spilled)
+; Bug 9 fix: rbx is callee-saved (SysV ABI); save/restore it.
 load_src2_phys:
+    push rbx
     movzx rbx, ax ; save vreg id
     movzx rax, byte [vreg_phys + rbx]
     cmp al, 255
@@ -1127,10 +1132,13 @@ load_src2_phys:
     call emit_d
     mov al, 7 ; return r15
 .done:
+    pop rbx
     ret
 
 ; Helper to get dst register (or r14 if spilled). Sets dst_spilled_vreg.
+; Bug 9 fix: rbx is callee-saved (SysV ABI); save/restore it.
 get_dst_phys:
+    push rbx
     movzx rbx, ax
     movzx rax, byte [vreg_phys + rbx]
     cmp al, 255
@@ -1138,9 +1146,11 @@ get_dst_phys:
     ; Spilled! We will use r14 (ID 6)
     mov [dst_spilled_vreg], ebx
     mov al, 6
+    pop rbx
     ret
 .done:
     mov dword [dst_spilled_vreg], 0
+    pop rbx
     ret
 
 ; Helper to store dst back if it was spilled
