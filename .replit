@@ -1,0 +1,30 @@
+modules = ["bash"]
+[agent]
+expertMode = true
+stack = "BEST_EFFORT_FALLBACK"
+
+[nix]
+channel = "stable-25_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Build Rex Compiler"
+
+[[workflows.workflow]]
+name = "Build Rex Compiler"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "make clean && make all && echo 'Rex compiler built successfully! Run: ./rexc <source.rex> [-o output]'"
+
+[workflows.workflow.metadata]
+outputType = "console"
