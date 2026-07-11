@@ -9,18 +9,18 @@ BITS 64
     jg .print_true
     je .print_neutral
 
-    ; print "false"
-    mov rsi, .str_false
+    ; print "false\n"
+    lea rsi, [rel .str_false]
     mov rdx, 6
     jmp .print
-    
+
 .print_neutral:
-    mov rsi, .str_neutral
+    lea rsi, [rel .str_neutral]
     mov rdx, 8
     jmp .print
 
 .print_true:
-    mov rsi, .str_true
+    lea rsi, [rel .str_true]
     mov rdx, 5
 
 .print:
@@ -30,13 +30,12 @@ BITS 64
 
     mov rsp, rbp
     pop rbp
+    pop rbx
     ret
+
+.str_true    db "true",    10
+.str_neutral db "neutral", 10
+.str_false   db "false",   10
 
 ; Pad to exactly 256 bytes
 times 256 - ($ - $$) db 0
-
-section .rodata
-    .str_true db "true", 10
-    .str_neutral db "neutral", 10
-    .str_false db "false", 10
-

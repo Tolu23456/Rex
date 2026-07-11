@@ -37,8 +37,8 @@ BITS 64
 .done:
     mov rsp, rbp
     pop rbp
+    pop rbx
     ret
 
 ; Pad to exactly 512 bytes
 times 512 - ($ - $$) db 0
-

@@ -3,6 +3,8 @@ BITS 64
 
     push rbx
     push rbp
+    push r12
+    push r13
     mov rbp, rsp
     sub rsp, 48         ; Scratch buffer
 
@@ -23,7 +25,7 @@ BITS 64
     movapd xmm0, xmm2
     
     ; Negate xmm0
-    movsd xmm1, qword [.float_neg_one]
+    movsd xmm1, qword [rel .float_neg_one]
     mulsd xmm0, xmm1
 
 .positive:
@@ -65,7 +67,7 @@ BITS 64
     subsd xmm0, xmm1    ; xmm0 = fractional part (0 <= xmm0 < 1)
     
     ; Multiply by 1,000,000
-    mulsd xmm0, qword [.float_1m]
+    mulsd xmm0, qword [rel .float_1m]
     cvttsd2si rax, xmm0 ; rax = fractional part as integer (0 <= rax < 1,000,000)
 
     ; Format exactly 6 digits with leading zeros
@@ -98,13 +100,14 @@ BITS 64
     syscall
 
     mov rsp, rbp
+    pop r13
+    pop r12
     pop rbp
+    pop rbx
     ret
+
+.float_neg_one dq -1.0
+.float_1m      dq 1000000.0
 
 ; Pad to exactly 512 bytes
 times 512 - ($ - $$) db 0
-
-section .rodata
-    .float_neg_one dq -1.0
-    .float_1m      dq 1000000.0
-

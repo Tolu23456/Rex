@@ -141,7 +141,7 @@ _start:
     
     ; 5. Generate ELF64 executable bytes
     call codegen_init
-    ; call codegen_emit_all
+    call codegen_emit_all
     call codegen_finish
     
     ; Write output file

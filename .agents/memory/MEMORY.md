@@ -1,0 +1,1 @@
+- [Rex compiler bug fixes](rex-bugs.md) — catalogue of all bugs found and fixed in the Rex NASM compiler

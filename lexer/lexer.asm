@@ -243,7 +243,11 @@ next_token:
     call read_char
     inc qword [line_num]
 .no_lf:
-    ; Still at line start, loop
+    ; If at EOF after consuming empty lines, return TOK_EOF (or pending dedents)
+    ; Otherwise retry for the next non-empty line
+    call peek_char
+    test rax, rax
+    jz .eof
     jmp next_token
 
 .process_indent:
@@ -640,6 +644,7 @@ next_token:
 
 .frac_done:
     movq [tok_fval], xmm0
+    mov dword [tok_type], TOK_FLOAT_LIT
     jmp .num_finish
 
 .num_done:

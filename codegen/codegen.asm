@@ -110,12 +110,13 @@ emit_block:
     push rsi
     push rdi
     push rcx
-    mov rdi, [out_idx]
+    mov eax, ecx            ; save length before rep movsb destroys rcx
+    mov edi, [out_idx]      ; read 32-bit out_idx, zero-extend to rdi
     lea rdi, [out_buffer + rdi]
     ; rsi already points to source
     ; rcx contains length
-    rep movsb
-    add [out_idx], rcx
+    rep movsb               ; rcx reaches 0 after this
+    add [out_idx], eax      ; advance out_idx by original length
     pop rcx
     pop rdi
     pop rsi
@@ -286,11 +287,11 @@ emit_runtime_call:
     ; rel32 = target - current_offset - 5
     mov eax, [out_idx]
     add eax, 5
-    sub edi, eax ; rel32
-    
-    mov dil, 0xE8 ; call
+    sub edi, eax ; edi = rel32
+    push rdi     ; save rel32 before emit_b corrupts dil
+    mov dil, 0xE8 ; call opcode
     call emit_b
-    mov edi, eax
+    pop rdi      ; restore rel32
     call emit_d
     ret
 
@@ -317,6 +318,12 @@ codegen_emit_all:
 
     cmp al, IR_LOAD_VAR
     je .load_var
+
+    cmp al, IR_LOAD_BOOL
+    je .load_bool
+
+    cmp al, IR_LOAD_STR
+    je .load_str
     
     cmp al, IR_STORE_VAR
     je .store_var
@@ -469,6 +476,60 @@ codegen_emit_all:
     call store_dst_spill
     jmp .next_ir
 
+.load_bool:
+    ; IR_LOAD_BOOL: same layout as IR_LOAD_IMM (imm = 1/0/-1 for true/neutral/false)
+    jmp .load_imm
+
+.load_str:
+    ; IR_LOAD_STR: embed string inline in code stream, load address via RIP-relative LEA
+    ; IR record: imm=[r14+8] = tok_str_ptr (compiler-space), aux=[r14+16] = tok_str_len
+    movzx eax, word [r14 + 2] ; dst vreg
+    call get_dst_phys
+    mov r15b, al              ; phys reg (0-5 => r8-r13)
+
+    ; Push string pointer and length onto stack for safe scratch access
+    ; (r12/r13 are the loop counter/total and must not be clobbered)
+    push qword [r14 + 16]    ; [rsp+8]  = tok_str_len (aux)
+    push qword [r14 + 8]     ; [rsp]    = tok_str_ptr (imm)
+
+    ; --- Emit: jmp over string+null ---
+    ; E9 <rel32>  where rel32 = tok_str_len + 1
+    mov dil, 0xE9
+    call emit_b
+    mov edi, [rsp + 8]        ; tok_str_len
+    inc edi                   ; +1 for null terminator
+    call emit_d
+
+    ; --- Emit string bytes ---
+    mov rsi, [rsp]            ; tok_str_ptr
+    mov rcx, [rsp + 8]        ; tok_str_len
+    call emit_block
+
+    ; --- Emit null terminator ---
+    xor dil, dil
+    call emit_b
+
+    ; --- Emit: lea r(dst), [rip + disp32] ---
+    ; String starts (len+1) bytes before the LEA; LEA itself is 7 bytes.
+    ; disp32 = str_start - (end_of_lea) = -(tok_str_len + 1 + 7) = -(tok_str_len + 8)
+    mov dil, 0x4C             ; REX.W | REX.R
+    call emit_b
+    mov dil, 0x8D             ; LEA opcode
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0x05               ; ModRM: mod=00, reg=phys, rm=101 (RIP-relative)
+    mov dil, al
+    call emit_b
+    mov edi, [rsp + 8]        ; tok_str_len
+    add edi, 8                ; +1 null +7 LEA bytes
+    neg edi                   ; negative displacement (backward)
+    call emit_d
+
+    add rsp, 16               ; restore stack
+    call store_dst_spill
+    jmp .next_ir
+
 .store_var:
     ; IR_STORE_VAR: store src1 register to variable
     ; imm = variable offset
@@ -527,7 +588,12 @@ codegen_emit_all:
     call emit_b
 
 .op_emit:
-    ; Emit operation: dst = dst op src2
+    ; If float type, use SSE scalar double instructions instead of integer ops
+    movzx eax, byte [r14 + 1] ; type
+    cmp al, TYPE_FLOAT
+    je .op_emit_float
+
+    ; --- Integer arithmetic ---
     movzx eax, byte [r14 + 0] ; opcode
     cmp al, IR_ADD
     je .emit_add
@@ -598,10 +664,11 @@ codegen_emit_all:
 .emit_div:
 .emit_mod:
     ; idiv src2 -> divides rdx:rax by src2
-    ; 1. mov rax, dst -> 49 89 C0 + dst
+    ; 1. mov rax, r(8+dst) -> 49 8B C0 + dst
+    ; REX.W + REX.B (extends rm), opcode 8B = MOV r64,r/m64: rax <- r(8+dst)
     mov dil, 0x49
     call emit_b
-    mov dil, 0x89
+    mov dil, 0x8B
     call emit_b
     mov al, 0xC0
     add al, r8b
@@ -614,7 +681,7 @@ codegen_emit_all:
     mov dil, 0x99
     call emit_b
     
-    ; 3. idiv src2 -> 49 F7 ModRM(F8 | src2)
+    ; 3. idiv r(8+src2) -> 49 F7 ModRM(F8 | src2)
     mov dil, 0x49
     call emit_b
     mov dil, 0xF7
@@ -628,9 +695,9 @@ codegen_emit_all:
     cmp al, IR_MOD
     je .emit_mod_store
     
-    ; 4. mov dst, rax -> 49 89 C0 + (0<<3) + dst? Wait.
-    ; mov dst, rax -> 4C 89 C0 | (0<<3) | dst -> 4C 89 C0 + dst
-    mov dil, 0x4C
+    ; 4. mov r(8+dst), rax -> 49 89 C0 + dst
+    ; REX.W + REX.B, opcode 89 = MOV r/m64,r64: r(8+dst) <- rax (reg=0=rax)
+    mov dil, 0x49
     call emit_b
     mov dil, 0x89
     call emit_b
@@ -642,8 +709,9 @@ codegen_emit_all:
     jmp .next_ir
 
 .emit_mod_store:
-    ; 4. mov dst, rdx -> 4C 89 D0 + dst
-    mov dil, 0x4C
+    ; 4. mov r(8+dst), rdx -> 49 89 D0 + dst
+    ; REX.W + REX.B, opcode 89 = MOV r/m64,r64: r(8+dst) <- rdx (reg=2=rdx)
+    mov dil, 0x49
     call emit_b
     mov dil, 0x89
     call emit_b
@@ -758,6 +826,87 @@ codegen_emit_all:
     shl al, 3
     or al, 0xC0
     or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp .next_ir
+
+.op_emit_float:
+    ; Float arithmetic: move values through XMM0/XMM1, use SSE scalar double ops
+    ; r8b=dst_phys, r9b=src2_phys; dst already holds src1 value (moved above)
+    ;
+    ; Step 1: movq xmm0, r(8+dst)   [66 49 0F 6E (0xC0|dst)]
+    mov dil, 0x66
+    call emit_b
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x6E
+    call emit_b
+    mov al, r8b
+    or al, 0xC0         ; mod=11, xmm0 reg=0, rm=dst_phys
+    mov dil, al
+    call emit_b
+    ;
+    ; Step 2: movq xmm1, r(8+src2)  [66 49 0F 6E (0xC8|src2)]
+    mov dil, 0x66
+    call emit_b
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x6E
+    call emit_b
+    mov al, r9b
+    or al, 0xC8         ; mod=11, xmm1 reg=1, rm=src2_phys
+    mov dil, al
+    call emit_b
+    ;
+    ; Step 3: F2 0F <op> C1   (xmm0 = xmm0 op xmm1)
+    mov dil, 0xF2
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    movzx eax, byte [r14 + 0] ; opcode
+    cmp al, IR_ADD
+    je .fop_add
+    cmp al, IR_SUB
+    je .fop_sub
+    cmp al, IR_MUL
+    je .fop_mul
+    cmp al, IR_DIV
+    je .fop_div
+.fop_add:
+    mov dil, 0x58       ; addsd
+    call emit_b
+    jmp .fop_modrm
+.fop_sub:
+    mov dil, 0x5C       ; subsd
+    call emit_b
+    jmp .fop_modrm
+.fop_mul:
+    mov dil, 0x59       ; mulsd
+    call emit_b
+    jmp .fop_modrm
+.fop_div:
+    mov dil, 0x5E       ; divsd
+    call emit_b
+.fop_modrm:
+    mov dil, 0xC1       ; mod=11, reg=xmm0, rm=xmm1
+    call emit_b
+    ;
+    ; Step 4: movq r(8+dst), xmm0   [66 49 0F 7E (0xC0|dst)]
+    mov dil, 0x66
+    call emit_b
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x7E
+    call emit_b
+    mov al, r8b
+    or al, 0xC0         ; mod=11, xmm0 reg=0, rm=dst_phys
     mov dil, al
     call emit_b
     call store_dst_spill
