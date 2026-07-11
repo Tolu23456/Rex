@@ -25,6 +25,7 @@ RT_BINS=$(RUNTIME_DIR)/rt_pri.bin \
 # Compiler Object Files
 OBJS=$(MAIN_DIR)/main.o \
      $(LEXER_DIR)/lexer.o \
+     $(PARSER_DIR)/type_reg.o \
      $(PARSER_DIR)/symtab.o \
      $(PARSER_DIR)/parser.o \
      $(IRGEN_DIR)/irgen.o \
@@ -51,6 +52,9 @@ $(LEXER_DIR)/lexer.o: $(LEXER_DIR)/lexer.asm
 	$(ASM) -f elf64 -I ./ $< -o $@
 
 $(PARSER_DIR)/symtab.o: $(PARSER_DIR)/symtab.asm
+	$(ASM) -f elf64 -I ./ $< -o $@
+
+$(PARSER_DIR)/type_reg.o: $(PARSER_DIR)/type_reg.asm
 	$(ASM) -f elf64 -I ./ $< -o $@
 
 $(PARSER_DIR)/parser.o: $(PARSER_DIR)/parser.asm

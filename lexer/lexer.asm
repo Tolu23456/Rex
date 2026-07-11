@@ -27,6 +27,9 @@ section .data
     str_true    db "true", 0
     str_false   db "false", 0
     str_neutral db "neutral", 0
+    str_and     db "and", 0
+    str_or      db "or", 0
+    str_not     db "not", 0
 
 section .bss
     global src_ptr
@@ -517,7 +520,7 @@ next_token:
     xor r8, r8 ; whole part value (integer) (using r8 instead of r12)
     xor r9, r9 ; float flag (0 = int, 1 = float) (using r9 instead of r13)
     
-    ; check hex
+    ; check hex / binary / octal prefix
     call peek_char
     cmp rax, '0'
     jne .num_loop
@@ -531,6 +534,14 @@ next_token:
     je .hex_start
     cmp bl, 'X'
     je .hex_start
+    cmp bl, 'b'
+    je .bin_start
+    cmp bl, 'B'
+    je .bin_start
+    cmp bl, 'o'
+    je .oct_start
+    cmp bl, 'O'
+    je .oct_start
     jmp .num_loop
 
 .hex_start:
@@ -577,6 +588,51 @@ next_token:
 .hex_under:
     call read_char
     jmp .hex_loop
+
+.bin_start:
+    call read_char ; consume 0
+    call read_char ; consume b
+.bin_loop:
+    call peek_char
+    cmp rax, '_'
+    je .bin_under
+    cmp rax, '0'
+    je .bin_zero
+    cmp rax, '1'
+    je .bin_one
+    jmp .num_done
+.bin_zero:
+    call read_char
+    shl r8, 1
+    jmp .bin_loop
+.bin_one:
+    call read_char
+    shl r8, 1
+    or r8, 1
+    jmp .bin_loop
+.bin_under:
+    call read_char
+    jmp .bin_loop
+
+.oct_start:
+    call read_char ; consume 0
+    call read_char ; consume o
+.oct_loop:
+    call peek_char
+    cmp rax, '_'
+    je .oct_under
+    cmp rax, '0'
+    jl .num_done
+    cmp rax, '7'
+    jg .num_done
+    call read_char
+    sub rax, '0'
+    imul r8, 8
+    add r8, rax
+    jmp .oct_loop
+.oct_under:
+    call read_char
+    jmp .oct_loop
 
 .num_loop:
     call peek_char
@@ -642,7 +698,64 @@ next_token:
     call read_char
     jmp .frac_loop
 
+.frac_sci:
+    ; Scientific notation: e or E followed by optional +/- and digits
+    call read_char ; consume 'e' or 'E'
+    ; check sign
+    xor r10, r10 ; r10 = exponent sign: 0 = positive, 1 = negative
+    call peek_char
+    cmp rax, '+'
+    je .sci_plus
+    cmp rax, '-'
+    je .sci_minus
+    jmp .sci_exp_digits
+.sci_plus:
+    call read_char
+    jmp .sci_exp_digits
+.sci_minus:
+    call read_char
+    mov r10, 1
+.sci_exp_digits:
+    xor r11, r11 ; r11 = exponent value
+.sci_exp_loop:
+    call peek_char
+    cmp rax, '0'
+    jl .sci_exp_done
+    cmp rax, '9'
+    jg .sci_exp_done
+    call read_char
+    sub rax, '0'
+    imul r11, 10
+    add r11, rax
+    jmp .sci_exp_loop
+.sci_exp_done:
+    ; Apply exponent: multiply or divide by 10^r11
+    test r10, r10
+    jnz .sci_neg_exp
+.sci_pos_exp:
+    test r11, r11
+    jz .sci_done
+    mulsd xmm0, xmm1 ; multiply by 10.0
+    dec r11
+    jmp .sci_pos_exp
+.sci_neg_exp:
+    test r11, r11
+    jz .sci_done
+    divsd xmm0, xmm1 ; divide by 10.0
+    dec r11
+    jmp .sci_neg_exp
+.sci_done:
+    movq [tok_fval], xmm0
+    mov dword [tok_type], TOK_FLOAT_LIT
+    jmp .num_finish
+
 .frac_done:
+    ; Check for scientific notation after fractional part
+    call peek_char
+    cmp rax, 'e'
+    je .frac_sci
+    cmp rax, 'E'
+    je .frac_sci
     movq [tok_fval], xmm0
     mov dword [tok_type], TOK_FLOAT_LIT
     jmp .num_finish
@@ -650,7 +763,8 @@ next_token:
 .num_done:
     test r9, r9
     jnz .num_finish
-    ; Integer literal
+    ; Check for scientific notation on plain integer that becomes float (e.g. 1e4)
+    ; For now just finalize as integer
     mov [tok_ival], r8
     mov dword [tok_type], TOK_INT_LIT
 
@@ -878,6 +992,33 @@ section .text
     mov qword [tok_ival], 0
     ret
 .not_neutral:
+    mov rdi, str_and
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_and_kw
+    mov dword [tok_type], TOK_BOOL_AND
+    ret
+.not_and_kw:
+    mov rdi, str_or
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_or_kw
+    mov dword [tok_type], TOK_BOOL_OR
+    ret
+.not_or_kw:
+    mov rdi, str_not
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_not_kw
+    mov dword [tok_type], TOK_BOOL_NOT
+    ret
+.not_not_kw:
     mov dword [tok_type], TOK_IDENT
     ret
 

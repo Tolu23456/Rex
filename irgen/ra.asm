@@ -21,9 +21,9 @@ section .bss
     global vreg_offset
     global stack_frame_size
 
-    vreg_phys           resb 65536 ; Maps vreg -> phys reg ID (255 if spilled/unallocated)
-    vreg_offset         resd 65536 ; Maps vreg -> stack offset (negative from RBP)
-    last_use            resd 65536 ; Maps vreg -> last IR instruction index
+    vreg_phys           resb VREG_MAX ; Maps vreg -> phys reg ID (255 if spilled/unallocated)
+    vreg_offset         resd VREG_MAX ; Maps vreg -> stack offset (negative from RBP)
+    last_use            resd VREG_MAX ; Maps vreg -> last IR instruction index
     stack_frame_size    resd 1
 
 section .text
@@ -38,18 +38,18 @@ allocate_registers:
 
     ; Initialize tables
     ; vreg_phys initialized to 255 (unallocated)
-    mov rcx, 65536
+    mov rcx, VREG_MAX
     lea rdi, [vreg_phys]
     mov al, 255
     rep stosb
 
     ; vreg_offset, last_use initialized to 0
-    mov rcx, 65536
+    mov rcx, VREG_MAX
     lea rdi, [vreg_offset]
     xor eax, eax
     rep stosd
     
-    mov rcx, 65536
+    mov rcx, VREG_MAX
     lea rdi, [last_use]
     xor eax, eax
     rep stosd

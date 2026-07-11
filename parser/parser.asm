@@ -191,29 +191,102 @@ parse_stmt:
 
 .struct_decl:
     call advance ; consume struct
-    mov edi, TOK_IDENT
-    call expect
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne .expected_ident
+    
+    call save_ident
+    call advance ; consume IDENT
+    
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    mov rdi, TYPE_COMPLEX
+    xor rsi, rsi ; size = 0 initially
+    mov rdx, ident_buf
+    mov rcx, [ident_len]
+    xor r8, r8
+    extern type_reg_add
+    call type_reg_add ; returns type_id in rax
+    mov r12, rax ; r12 = struct_type_id
+    
     mov edi, TOK_COLON
     call expect
     mov edi, TOK_NEWLINE
     call expect
     mov edi, TOK_INDENT
     call expect
+    
+    xor r13, r13 ; r13 = accumulated size
+
 .struct_loop:
     mov eax, [current_token]
     cmp eax, TOK_DEDENT
     je .struct_done
-    ; expect TYPE IDENT NEWLINE
-    mov edi, TOK_TYPE
-    call expect
-    mov edi, TOK_IDENT
-    call expect
+    
+    cmp eax, TOK_TYPE
+    jne .struct_syntax_err
+    
+    mov r14, [tok_ival] ; field_type_id
+    call advance ; consume TYPE
+    
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne .struct_syntax_err
+    
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call advance ; consume IDENT
+    
     mov edi, TOK_NEWLINE
     call expect
+    
+    ; Add field
+    mov rdi, r12 ; struct_type_id
+    mov rcx, r14 ; field_type_id
+    mov r8, r13 ; field_offset
+    extern type_struct_add_field
+    call type_struct_add_field
+    
+    ; Add field size
+    push rsi
+    push rdx
+    mov rdi, r14
+    extern type_get_size
+    call type_get_size
+    add r13, rax
+    pop rdx
+    pop rsi
+    
     jmp .struct_loop
+
 .struct_done:
     call advance ; consume DEDENT
+    
+    ; Set struct size
+    mov rdi, r12
+    mov rsi, r13
+    extern type_set_size
+    call type_set_size
+    
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
+
+.struct_syntax_err:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    mov rdi, err_syntax
+    jmp compile_error
 
 .enum_decl:
     call advance ; consume enum
@@ -225,25 +298,123 @@ parse_stmt:
     call expect
     mov edi, TOK_INDENT
     call expect
+    
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    xor r14, r14 ; enum value
+
 .enum_loop:
     mov eax, [current_token]
     cmp eax, TOK_DEDENT
     je .enum_done
-    ; expect IDENT NEWLINE
-    mov edi, TOK_IDENT
-    call expect
+    
+    cmp eax, TOK_IDENT
+    jne .enum_syntax_err
+    
+    call save_ident
+    call advance
+    
     mov eax, [current_token]
     cmp eax, TOK_ASSIGN
-    jne .enum_no_assign
+    jne .enum_emit
+    
     call advance
-    call parse_expr
-.enum_no_assign:
+    mov eax, [current_token]
+    cmp eax, TOK_INT_LIT
+    jne .enum_syntax_err
+    mov r14, [tok_ival]
+    call advance
+
+.enum_emit:
+    call alloc_vreg
+    mov r12, rax
+    
+    push r12
+    mov rdi, IR_LOAD_IMM
+    mov rsi, TYPE_INT
+    mov rdx, r12
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, r14
+    xor r10, r10
+    call emit_ir
+    pop r12
+    
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    call determine_scope
+    mov rcx, rax
+    mov rdx, TYPE_INT
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    call sym_add
+    cmp rax, -2
+    je .enum_dup_err
+    cmp rax, -1
+    je .enum_full_err
+    mov r13, rax
+    
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax
+    
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_INT
+    xor rdx, rdx
+    mov rcx, r12
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+    
+    mov rdi, r13
+    mov rsi, 1
+    call sym_set_init
+    
+    inc r14
+    
     mov edi, TOK_NEWLINE
     call expect
     jmp .enum_loop
+
 .enum_done:
     call advance ; consume DEDENT
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
+
+.enum_syntax_err:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    mov rdi, err_syntax
+    jmp compile_error
+
+.enum_dup_err:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    mov rdi, err_dup_decl
+    jmp compile_error
+
+.enum_full_err:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    mov rdi, err_dup_decl
+    jmp compile_error
 
 .explicit_decl:
     ; explicit_decl: type_expr [ "[" expr "]" ] [ ":" ] <IDENT> [ "=" expr ]
@@ -507,24 +678,48 @@ parse_stmt:
     ret
 
 .output_stmt:
-    ; output_stmt: output "(" expr ")"
+    ; output_stmt: output "(" expr ["," integer_literal] ")"
+    push r13     ; Preserve r13
+    
     call advance ; consume output
     mov edi, TOK_LPAREN
     call expect ; consume '('
     
     call parse_expr ; rax = vreg, rdx = type
     mov r12, rdx ; Save type
+    push rax     ; save expr vreg on stack
+
+    ; Check if there is a comma
+    xor r13, r13 ; Default precision immediate = 0 (means not specified)
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .no_precision
+
+    ; Consume comma
+    call advance
     
-    push rax
+    ; Expect integer literal for precision
+    mov eax, [current_token]
+    cmp eax, TOK_INT_LIT
+    jne .error_syntax_prec
+
+    ; Save the integer literal value as precision
+    mov r13, [tok_ival]
+    call advance ; consume TOK_INT_LIT
+
+.no_precision:
     mov edi, TOK_RPAREN
     call expect ; consume ')'
-    pop rcx ; src1 vreg
+    pop rcx ; restore src1 vreg
     
-    ; Emit correct IR_OUT depending on type
-    cmp r12, TYPE_INT
-    je .out_int
+    ; If type is not float, but precision is specified (r13 != 0), it's a type mismatch
     cmp r12, TYPE_FLOAT
     je .out_float
+    test r13, r13
+    jnz .error_prec_type_mismatch
+    
+    cmp r12, TYPE_INT
+    je .out_int
     cmp r12, TYPE_BOOL
     je .out_bool
     cmp r12, TYPE_STR
@@ -534,24 +729,38 @@ parse_stmt:
     mov rdi, err_type_mismatch
     jmp compile_error
 
+.error_syntax_prec:
+    mov rdi, err_syntax
+    jmp compile_error
+
+.error_prec_type_mismatch:
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
 .out_int:
     mov rdi, IR_OUT_INT
+    xor r9, r9
     jmp .emit_out
 .out_float:
     mov rdi, IR_OUT_FLOAT
+    mov r9, r13  ; Pass precision in r9 (imm)
     jmp .emit_out
 .out_bool:
     mov rdi, IR_OUT_BOOL
+    xor r9, r9
     jmp .emit_out
 .out_str:
     mov rdi, IR_OUT_STR
+    xor r9, r9
 .emit_out:
     mov rsi, r12 ; type
     xor rdx, rdx ; no dst
     xor r8, r8
-    xor r9, r9
+    ; r9 already contains the precision
     xor r10, r10
     call emit_ir
+    
+    pop r13      ; Restore r13
     ret
 
 ; Parse Expression
@@ -564,7 +773,7 @@ parse_null_coalesce:
     push r13
     push r14
     push r15
-    call parse_bitwise_or
+    call parse_bool_or
     mov r12, rax
     mov r13, rdx
 .loop:
@@ -607,6 +816,99 @@ parse_null_coalesce:
 ; Binary Operator Parser Macro Structure
 ; Since NASM macros for complex logic are tricky, we use explicit blocks.
 ; ==========================================================
+
+; Parse Bool OR expression (lowest bool precedence: 'or' = max)
+parse_bool_or:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    call parse_bool_and
+    mov r12, rax
+    mov r13, rdx
+.loop:
+    mov eax, [current_token]
+    cmp eax, TOK_BOOL_OR
+    jne .done
+    call advance
+    push r12
+    call parse_bool_and
+    mov r15, rax
+    pop r12
+    ; Both operands must be bool
+    push r12
+    push r15
+    call alloc_vreg
+    mov rbx, rax
+    pop r15
+    pop r12
+    mov rdi, IR_BOOL_OR
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r15
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_BOOL
+    jmp .loop
+.done:
+    mov rax, r12
+    mov rdx, r13
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; Parse Bool AND expression ('and' = min)
+parse_bool_and:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    call parse_bitwise_or
+    mov r12, rax
+    mov r13, rdx
+.loop:
+    mov eax, [current_token]
+    cmp eax, TOK_BOOL_AND
+    jne .done
+    call advance
+    push r12
+    call parse_bitwise_or
+    mov r15, rax
+    pop r12
+    push r12
+    push r15
+    call alloc_vreg
+    mov rbx, rax
+    pop r15
+    pop r12
+    mov rdi, IR_BOOL_AND
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r15
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_BOOL
+    jmp .loop
+.done:
+    mov rax, r12
+    mov rdx, r13
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
 
 parse_bitwise_or:
     push rbx
@@ -901,6 +1203,8 @@ parse_term:
     je .ident
     cmp eax, TOK_LPAREN
     je .paren
+    cmp eax, TOK_BOOL_NOT
+    je .bool_not
     
     mov rdi, err_syntax
     jmp compile_error
@@ -1080,6 +1384,26 @@ parse_term:
     call expect ; consume ')'
     pop rdx
     pop rax
+    ret
+
+.bool_not:
+    call advance ; consume 'not'
+    call parse_term ; parse the operand
+    push rax
+    push rdx
+    call alloc_vreg
+    mov rbx, rax
+    pop rdx  ; operand type
+    pop rcx  ; operand vreg
+    mov rdi, IR_BOOL_NOT
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    mov rax, rbx
+    mov rdx, TYPE_BOOL
     ret
 
 

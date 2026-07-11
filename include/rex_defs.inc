@@ -42,6 +42,9 @@ TOK_DOT         equ 40 ; .
 TOK_NULL        equ 41 ; null
 TOK_QUESTION    equ 42 ; ?
 TOK_QQ          equ 43 ; ??
+TOK_BOOL_AND    equ 44 ; and (bool keyword)
+TOK_BOOL_OR     equ 45 ; or  (bool keyword)
+TOK_BOOL_NOT    equ 46 ; not (bool keyword)
 
 ; Control Tokens
 TOK_NEWLINE     equ 30
@@ -82,7 +85,13 @@ SYM_MAX         equ 256
 LOAD_BASE        equ 0x00400000
 VAR_STORAGE_BASE equ 0x00440000
 VAR_ENTRY_SIZE   equ 64
+VAR_ENTRY_SIZE_LOG2 equ 6
 VAR_MAX          equ 256
 HEADERS_SIZE     equ 120
 RT_TOTAL_SIZE    equ 8448
 CODE_START       equ 8573
+
+VREG_MAX         equ 65536
+SRC_FILE_MAX     equ 65536
+OUT_BUF_MAX      equ 131072
+VAR_MEM_OFFSET   equ (VAR_STORAGE_BASE - LOAD_BASE) + (VAR_MAX * VAR_ENTRY_SIZE)

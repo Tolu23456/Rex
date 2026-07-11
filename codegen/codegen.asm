@@ -45,7 +45,7 @@ section .data
 section .bss
     global out_buffer
     global out_idx
-    out_buffer  resb 131072
+    out_buffer  resb OUT_BUF_MAX
     out_idx     resd 1
     dst_spilled_vreg resd 1
 
@@ -64,7 +64,7 @@ section .text
 ; Emit 1 byte
 emit_b:
     mov ecx, [out_idx]
-    cmp ecx, 131072
+    cmp ecx, OUT_BUF_MAX
     jae .overflow
     mov [out_buffer + rcx], dil
     inc dword [out_idx]
@@ -79,7 +79,7 @@ emit_b:
 emit_d:
     push rbx
     mov ecx, [out_idx]
-    cmp ecx, 131072 - 4
+    cmp ecx, OUT_BUF_MAX - 4
     jae .overflow
     mov [out_buffer + rcx], edi
     add dword [out_idx], 4
@@ -94,7 +94,7 @@ emit_d:
 emit_q:
     push rbx
     mov ecx, [out_idx]
-    cmp ecx, 131072 - 8
+    cmp ecx, OUT_BUF_MAX - 8
     jae .overflow
     mov [out_buffer + rcx], rdi
     add dword [out_idx], 8
@@ -351,6 +351,15 @@ codegen_emit_all:
     
     cmp al, IR_XOR
     je .arith_op
+
+    cmp al, IR_BOOL_AND
+    je .bool_and_op
+
+    cmp al, IR_BOOL_OR
+    je .bool_or_op
+
+    cmp al, IR_BOOL_NOT
+    je .bool_not_op
     
     cmp al, IR_OUT_INT
     je .output_val
@@ -831,6 +840,86 @@ codegen_emit_all:
     call store_dst_spill
     jmp .next_ir
 
+; -------- Bool keyword op handlers --------
+; IR_BOOL_AND: dst = min(src1, src2) — Łukasiewicz AND
+.bool_and_op:
+    movzx eax, word [r14 + 4]   ; src1 vreg
+    call load_src1_phys
+    mov r15b, al                 ; src1 phys
+    movzx eax, word [r14 + 6]   ; src2 vreg
+    call load_src2_phys
+    mov r9b, al                  ; src2 phys
+    movzx eax, word [r14 + 2]   ; dst vreg
+    call get_dst_phys
+    mov r8b, al                  ; dst phys
+    ; mov dst, src1
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    jmp .emit_bool_and
+
+; IR_BOOL_OR: dst = max(src1, src2) — Łukasiewicz OR
+.bool_or_op:
+    movzx eax, word [r14 + 4]   ; src1 vreg
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 6]   ; src2 vreg
+    call load_src2_phys
+    mov r9b, al
+    movzx eax, word [r14 + 2]   ; dst vreg
+    call get_dst_phys
+    mov r8b, al
+    ; mov dst, src1
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    jmp .emit_bool_or
+
+; IR_BOOL_NOT: dst = -src1 — bool not (negate signed value)
+.bool_not_op:
+    movzx eax, word [r14 + 4]   ; src1 vreg
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]   ; dst vreg
+    call get_dst_phys
+    mov r8b, al
+    ; mov dst, src1
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    ; neg dst -> 49 F7 D8+dst
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0xF7
+    call emit_b
+    mov al, 0xD8
+    add al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp .next_ir
+
 .op_emit_float:
     ; Float arithmetic: move values through XMM0/XMM1, use SSE scalar double ops
     ; r8b=dst_phys, r9b=src2_phys; dst already holds src1 value (moved above)
@@ -973,6 +1062,20 @@ codegen_emit_all:
     mov dil, 0xC7
     call emit_b
     
+    ; Load precision from IR record (imm field)
+    mov rax, [r14 + 8]
+    test rax, rax
+    jnz .use_custom_prec
+    mov rax, 16         ; Default precision
+.use_custom_prec:
+    
+    ; Pass precision in rdi (edi) according to SysV ABI
+    ; mov edi, eax -> BF <eax>
+    mov dil, 0xBF
+    call emit_b
+    mov edi, eax
+    call emit_d
+    
     mov edi, 1405
     call emit_runtime_call
     call store_dst_spill
@@ -1067,7 +1170,7 @@ codegen_finish:
     mov [out_buffer + 96], ecx
     
     ; Patch memsz at offset 64 + 40 = 104
-    ; memsz covers code size + variables storage (0x44000)
-    add ecx, 0x44000
+    ; memsz covers code size + variables storage (VAR_MEM_OFFSET)
+    add ecx, VAR_MEM_OFFSET
     mov [out_buffer + 104], ecx
     ret

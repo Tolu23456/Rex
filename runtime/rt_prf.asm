@@ -6,7 +6,20 @@ BITS 64
     push r12
     push r13
     mov rbp, rsp
-    sub rsp, 48         ; Scratch buffer
+    sub rsp, 64         ; Scratch buffer (aligned, room for precision at [rbp-56])
+
+    ; Cap precision (passed in rdi) between 1 and 48
+    cmp rdi, 1
+    jge .prec_min_ok
+    mov rdi, 1
+.prec_min_ok:
+    cmp rdi, 48
+    jle .prec_max_ok
+    mov rdi, 48
+.prec_max_ok:
+
+    ; Save precision to stack slot [rbp-56]
+    mov [rbp-56], rdi
 
     ; Check sign
     xorpd xmm1, xmm1
@@ -66,27 +79,40 @@ BITS 64
     cvtsi2sd xmm1, r12
     subsd xmm0, xmm1    ; xmm0 = fractional part (0 <= xmm0 < 1)
     
-    ; Multiply by 1,000,000
-    mulsd xmm0, qword [rel .float_1m]
-    cvttsd2si rax, xmm0 ; rax = fractional part as integer (0 <= rax < 1,000,000)
-
-    ; Format exactly 6 digits with leading zeros
-    mov rbx, 10
-    lea rcx, [rbp-1]
-    mov r13d, 6         ; 6 digits
+    ; Format exactly [rbp-56] digits
+    mov r13, [rbp-56]   ; Loop counter
+    lea rcx, [rbp-48]
+    movsd xmm2, qword [rel .float_10]
 .frac_loop:
-    xor rdx, rdx
-    div rbx
-    add dl, '0'
-    mov [rcx], dl
-    dec rcx
+    mulsd xmm0, xmm2    ; xmm0 = xmm0 * 10
+    cvttsd2si rax, xmm0
+    cvtsi2sd xmm1, rax
+    subsd xmm0, xmm1    ; subtract digit
+    
+    add al, '0'
+    mov [rcx], al
+    inc rcx
     dec r13d
     jnz .frac_loop
 
-    ; Print 6 fractional digits
-    inc rcx
-    mov rsi, rcx
-    mov rdx, 6
+    ; Strip trailing zeroes
+    ; rsi = [rbp-48] (buffer start)
+    ; rdx = original precision [rbp-56]
+    lea rsi, [rbp-48]
+    mov rdx, [rbp-56]
+    mov rcx, rdx
+.strip_loop:
+    cmp rcx, 1
+    jle .strip_done
+    movzx eax, byte [rsi + rcx - 1]
+    cmp al, '0'
+    jne .strip_done
+    dec rcx
+    jmp .strip_loop
+.strip_done:
+    mov rdx, rcx
+
+    ; Print fractional digits
     mov rax, 1          ; sys_write
     mov rdi, 1          ; stdout
     syscall
@@ -107,7 +133,7 @@ BITS 64
     ret
 
 .float_neg_one dq -1.0
-.float_1m      dq 1000000.0
+.float_10      dq 10.0
 
 ; Pad to exactly 512 bytes
 times 512 - ($ - $$) db 0

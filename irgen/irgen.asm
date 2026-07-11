@@ -26,8 +26,21 @@ ir_init:
 
 alloc_vreg:
     mov eax, [vreg_counter]
+    cmp eax, 65535
+    jae err_vreg_overflow
     inc dword [vreg_counter]
     ret
+
+err_vreg_overflow:
+    mov rax, 1
+    mov rdi, 2
+    mov rsi, err_vreg_msg
+    mov rdx, err_vreg_len
+    syscall
+    
+    mov rax, 60
+    mov rdi, 1
+    syscall
 
 ; Emit IR instruction
 ; rdi = opcode, rsi = type, rdx = dst, rcx = src1, r8 = src2, r9 = imm, r10 = aux
@@ -69,3 +82,5 @@ emit_ir:
 section .rodata
     .err_msg db "Error: IR buffer overflow", 10
     .err_len equ $ - .err_msg
+    err_vreg_msg db "Error: Virtual register overflow", 10
+    err_vreg_len equ $ - err_vreg_msg

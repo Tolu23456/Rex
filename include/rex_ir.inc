@@ -23,6 +23,11 @@ IR_AND          equ 0x1A
 IR_OR           equ 0x1B
 IR_XOR          equ 0x1C
 
+; Category 3: Bool Ternary Logic (Łukasiewicz)
+IR_BOOL_AND     equ 0x20  ; min(a, b) over {-1, 0, 1}
+IR_BOOL_OR      equ 0x21  ; max(a, b) over {-1, 0, 1}
+IR_BOOL_NOT     equ 0x22  ; negation: -x
+
 ; Category 5: Comparison
 IR_CMP          equ 0x41
 

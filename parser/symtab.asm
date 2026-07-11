@@ -3,6 +3,10 @@
 
 %include "include/rex_defs.inc"
 
+section .data
+    global current_stack_offset
+    current_stack_offset dd VAR_STORAGE_BASE
+
 section .bss
     global sym_table
     global sym_count
@@ -23,10 +27,12 @@ section .text
     global sym_set_init
     global sym_get_offset
     global sym_set_offset
+    global sym_find_by_offset
 
 ; Clear the symbol table
 sym_clear:
     mov dword [sym_count], 0
+    mov dword [current_stack_offset], VAR_STORAGE_BASE
     ret
 
 ; Compare entry name at rdi (null-terminated) with string at rsi of length rdx
@@ -92,7 +98,7 @@ sym_add:
     
     ; Match found! Check scope
     imul eax, ebx, SYM_ENTRY_SIZE
-    movzx eax, byte [sym_table + rax + 33] ; entry scope
+    movzx eax, byte [sym_table + rax + 36] ; entry scope
     cmp eax, r15d
     je .err_dup ; duplicate in same scope!
     
@@ -124,15 +130,22 @@ sym_add:
     imul eax, ebx, SYM_ENTRY_SIZE
     lea rdi, [sym_table + rax]
     
-    mov [rdi + 32], r14b ; type
-    mov [rdi + 33], r15b ; scope
-    mov byte [rdi + 34], 0 ; is_mutable = 0 (by default)
-    mov byte [rdi + 35], 0 ; is_init = 0 (by default)
+    mov [rdi + 32], r14d ; type_id (dword)
+    mov [rdi + 36], r15b ; scope
+    mov byte [rdi + 37], 0 ; is_mutable = 0 (by default)
+    mov byte [rdi + 38], 0 ; is_init = 0 (by default)
     
-    ; Default offset is slot index mapped to VAR_STORAGE_BASE
-    imul edx, ebx, 64
-    add edx, VAR_STORAGE_BASE
-    mov [rdi + 36], edx ; offset
+    ; Set offset to current_stack_offset
+    mov edx, [current_stack_offset]
+    mov [rdi + 40], edx ; offset
+
+    ; Get type size and increment current_stack_offset
+    extern type_get_size
+    push rdi
+    mov rdi, r14 ; type_id
+    call type_get_size
+    pop rdi
+    add [current_stack_offset], eax ; increment offset
 
     ; Increment sym_count
     inc dword [sym_count]
@@ -164,9 +177,6 @@ sym_add:
     pop rbx
     ret
 
-; Lookup a symbol (searches from innermost scope to outermost, so back to front)
-; rdi = name_ptr, rsi = name_len
-; Returns rax = symbol index, or -1 if not found
 ; Lookup a symbol (searches from innermost scope to outermost, so back to front)
 ; rdi = name_ptr, rsi = name_len
 ; Returns rax = symbol index, or -1 if not found
@@ -216,49 +226,73 @@ sym_lookup:
 
 sym_get_type:
     imul edi, edi, SYM_ENTRY_SIZE
-    movzx rax, byte [sym_table + rdi + 32]
+    mov eax, [sym_table + rdi + 32]
     ret
 
 sym_set_type:
     ; rdi = index, rsi = type
     imul edi, edi, SYM_ENTRY_SIZE
-    mov [sym_table + rdi + 32], sil
+    mov [sym_table + rdi + 32], esi
     ret
 
 sym_get_scope:
     imul edi, edi, SYM_ENTRY_SIZE
-    movzx rax, byte [sym_table + rdi + 33]
+    movzx rax, byte [sym_table + rdi + 36]
     ret
 
 sym_is_mutable:
     imul edi, edi, SYM_ENTRY_SIZE
-    movzx rax, byte [sym_table + rdi + 34]
+    movzx rax, byte [sym_table + rdi + 37]
     ret
 
 sym_set_mutable:
     ; rdi = index, rsi = mutable (0/1)
     imul edi, edi, SYM_ENTRY_SIZE
-    mov [sym_table + rdi + 34], sil
+    mov [sym_table + rdi + 37], sil
     ret
 
 sym_is_init:
     imul edi, edi, SYM_ENTRY_SIZE
-    movzx rax, byte [sym_table + rdi + 35]
+    movzx rax, byte [sym_table + rdi + 38]
     ret
 
 sym_set_init:
     ; rdi = index, rsi = init (0/1)
     imul edi, edi, SYM_ENTRY_SIZE
-    mov [sym_table + rdi + 35], sil
+    mov [sym_table + rdi + 38], sil
     ret
 
 sym_get_offset:
     imul edi, edi, SYM_ENTRY_SIZE
-    mov eax, [sym_table + rdi + 36]
+    mov eax, [sym_table + rdi + 40]
     ret
 
 sym_set_offset:
     ; rdi = index, rsi = offset
     imul edi, edi, SYM_ENTRY_SIZE
-    mov [sym_table + rdi + 36], esi
+    mov [sym_table + rdi + 40], esi
+    ret
+
+sym_find_by_offset:
+    push rbx
+    mov ebx, [sym_count]
+    dec ebx
+.loop:
+    cmp ebx, 0
+    jl .not_found
+    
+    imul eax, ebx, SYM_ENTRY_SIZE
+    mov eax, [sym_table + rax + 40] ; offset is at 40
+    cmp eax, edi
+    je .found
+    
+    dec ebx
+    jmp .loop
+.not_found:
+    mov rax, -1
+    pop rbx
+    ret
+.found:
+    mov rax, rbx
+    pop rbx
     ret

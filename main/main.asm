@@ -18,7 +18,7 @@ section .data
     success_len     equ $ - success_msg
 
 section .bss
-    src_file_buf    resb 65536
+    src_file_buf    resb SRC_FILE_MAX
     src_file_size   resq 1
     out_filename    resq 1
 
@@ -26,6 +26,7 @@ section .text
     global _start
     
     extern lex_init
+    extern type_reg_init
     extern sym_clear
     extern ir_init
     extern parse_program
@@ -126,7 +127,8 @@ _start:
     mov rsi, [src_file_size]
     call lex_init
     
-    ; 2. Initialize Symbol Table & IR Emitter
+    ; 2. Initialize Type Registry, Symbol Table & IR Emitter
+    call type_reg_init
     call sym_clear
     call ir_init
     
@@ -134,8 +136,8 @@ _start:
     call parse_program
     
     ; 3.5 Run Optimization Passes
-    ; call run_optimizations
-    
+    call run_optimizations
+
     ; 4. Linear Scan Register Allocation
     call allocate_registers
     

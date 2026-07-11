@@ -7,17 +7,18 @@
 section .bss
     extern ir_buffer
     extern ir_count
+    extern sym_find_by_offset
 
-    vreg_is_const   resb 65536
-    vreg_const_val  resq 65536
+    vreg_is_const   resb VREG_MAX
+    vreg_const_val  resq VREG_MAX
     
-    var_is_const    resb 256
-    var_const_val   resq 256
+    var_is_const    resb VAR_MAX
+    var_const_val   resq VAR_MAX
 
-    var_is_read     resb 256
+    var_is_read     resb VAR_MAX
     
-    var_cached_vreg resw 256
-    vreg_alias      resw 65536
+    var_cached_vreg resw VAR_MAX
+    vreg_alias      resw VREG_MAX
 
 section .text
     global run_optimizations
@@ -43,12 +44,12 @@ run_optimizations:
 
 pass_constant_folding:
     ; Initialize state
-    mov rcx, 65536
+    mov rcx, VREG_MAX
     lea rdi, [vreg_is_const]
     xor eax, eax
     rep stosb
     
-    mov rcx, 256
+    mov rcx, VAR_MAX
     lea rdi, [var_is_const]
     xor eax, eax
     rep stosb
@@ -105,9 +106,9 @@ pass_constant_folding:
 
 .handle_store_var:
     movzx ecx, word [r13 + 4] ; src1 vreg
-    mov r8, [r13 + 8] ; var offset/idx
-    sub r8, 0x00440000
-    shr r8, 6
+    mov rdi, [r13 + 8] ; var offset
+    call sym_find_by_offset
+    mov r8, rax
     cmp byte [vreg_is_const + rcx], 1
     jne .not_const_store
     mov byte [var_is_const + r8], 1
@@ -120,9 +121,9 @@ pass_constant_folding:
 
 .handle_load_var:
     movzx ecx, word [r13 + 2] ; dst vreg
-    mov r8, [r13 + 8] ; var offset/idx
-    sub r8, 0x00440000
-    shr r8, 6
+    mov rdi, [r13 + 8] ; var offset
+    call sym_find_by_offset
+    mov r8, rax
     cmp byte [var_is_const + r8], 1
     jne .next
     ; Replace with LOAD_IMM
@@ -215,7 +216,7 @@ pass_constant_folding:
 
 pass_dead_store_elimination:
     ; Scan backwards from ir_count-1 down to 0
-    mov rcx, 256
+    mov rcx, VAR_MAX
     lea rdi, [var_is_read]
     xor eax, eax
     rep stosb
@@ -240,16 +241,16 @@ pass_dead_store_elimination:
     jmp .next_dse
 
 .dse_load_var:
-    mov r8, [r13 + 8] ; imm = offset
-    sub r8, 0x00440000
-    shr r8, 6
+    mov rdi, [r13 + 8] ; imm = offset
+    call sym_find_by_offset
+    mov r8, rax
     mov byte [var_is_read + r8], 1
     jmp .next_dse
 
 .dse_store_var:
-    mov r8, [r13 + 8] ; imm = offset
-    sub r8, 0x00440000
-    shr r8, 6
+    mov rdi, [r13 + 8] ; imm = offset
+    call sym_find_by_offset
+    mov r8, rax
     cmp byte [var_is_read + r8], 0
     je .kill_store
     ; It was read! But this store overwrites earlier stores, so reset read flag for earlier code.
@@ -270,12 +271,12 @@ pass_dead_store_elimination:
 
 pass_load_store_coalescing:
     ; Initialize state
-    mov rcx, 256
+    mov rcx, VAR_MAX
     lea rdi, [var_cached_vreg]
     xor eax, eax
     rep stosw
     
-    mov rcx, 65536
+    mov rcx, VREG_MAX
     lea rdi, [vreg_alias]
     xor eax, eax
     rep stosw
@@ -317,9 +318,9 @@ pass_load_store_coalescing:
     jmp .next
 
 .store:
-    mov r8, [r13 + 8] ; var offset
-    sub r8, 0x00440000
-    shr r8, 6
+    mov rdi, [r13 + 8] ; var offset
+    call sym_find_by_offset
+    mov r8, rax
     mov cx, [r13 + 4] ; src1 vreg
     ; apply alias to src1 if any
     mov dx, [vreg_alias + rcx * 2]
@@ -332,9 +333,9 @@ pass_load_store_coalescing:
     jmp .next
 
 .load:
-    mov r8, [r13 + 8] ; var offset
-    sub r8, 0x00440000
-    shr r8, 6
+    mov rdi, [r13 + 8] ; var offset
+    call sym_find_by_offset
+    mov r8, rax
     mov cx, [var_cached_vreg + r8 * 2]
     test cx, cx
     jz .load_miss
