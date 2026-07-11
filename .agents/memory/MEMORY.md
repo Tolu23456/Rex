@@ -1,1 +1,1 @@
-- [Rex compiler bug fixes](rex-bugs.md) — catalogue of all bugs found and fixed in the Rex NASM compiler
+- [Rex compiler bug fixes](rex-bugs.md) — catalogue of all bugs found and fixed in the Rex NASM compiler, plus graph-colouring RA and test suite

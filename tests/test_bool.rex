@@ -1,0 +1,31 @@
+// test_bool.rex
+// Tests Łukasiewicz three-valued boolean logic.
+// true=1  neutral=0  false=-1
+//
+// Expected output:
+//   true
+//   false
+//   neutral
+//   true
+//   false
+//   true
+
+bool t = true
+bool f = false
+bool n = neutral
+
+output(t)
+output(f)
+output(n)
+
+// AND (min): true and true = true
+bool and1 = t and t
+output(and1)
+
+// AND (min): true and false = false
+bool and2 = t and f
+output(and2)
+
+// OR  (max): false or true = true
+bool or1 = f or t
+output(or1)

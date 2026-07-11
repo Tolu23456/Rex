@@ -540,8 +540,12 @@ codegen_emit_all:
     jmp .next_ir
 
 .store_var:
-    ; IR_STORE_VAR: store src1 register to variable
-    ; imm = variable offset
+    ; IR_STORE_VAR: store src1 register to variable.
+    ; This instruction has NO dst vreg, so we must clear dst_spilled_vreg
+    ; before returning.  Calling store_dst_spill without first calling
+    ; get_dst_phys left a stale value that caused spurious spill writes
+    ; (Bug 3 fix: reset dst_spilled_vreg here, not via store_dst_spill).
+    mov dword [dst_spilled_vreg], 0   ; <-- Bug 3 fix
     movzx eax, word [r14 + 4] ; src1 vreg
     call load_src1_phys
     
@@ -563,7 +567,7 @@ codegen_emit_all:
     
     mov edi, [r14 + 8] ; offset / addr32
     call emit_d
-    call store_dst_spill
+    ; No store_dst_spill — dst_spilled_vreg is already 0 (cleared above)
     jmp .next_ir
 
 .arith_op:
@@ -1002,7 +1006,9 @@ codegen_emit_all:
     jmp .next_ir
 
 .output_val:
-    ; output: prints value in src1
+    ; IR_OUT_*: prints value in src1.  No dst vreg — clear dst_spilled_vreg
+    ; so a stale value from a previous instruction isn't written (Bug 3 fix).
+    mov dword [dst_spilled_vreg], 0   ; <-- Bug 3 fix
     movzx eax, word [r14 + 4] ; src1 vreg
     call load_src1_phys
     mov r15b, al ; phys
@@ -1035,17 +1041,14 @@ codegen_emit_all:
 .call_pri:
     mov edi, 125
     call emit_runtime_call
-    call store_dst_spill
-    jmp .next_ir
+    jmp .next_ir     ; dst_spilled_vreg already cleared in .output_val
 .call_prs:
     mov edi, 637
     call emit_runtime_call
-    call store_dst_spill
     jmp .next_ir
 .call_prb:
     mov edi, 1149
     call emit_runtime_call
-    call store_dst_spill
     jmp .next_ir
 .call_prf:
     ; Float printer expects argument in XMM0 (according to SysV ABI)!
@@ -1078,12 +1081,12 @@ codegen_emit_all:
     
     mov edi, 1405
     call emit_runtime_call
-    call store_dst_spill
-    jmp .next_ir
+    jmp .next_ir     ; dst_spilled_vreg already cleared in .output_val
 
 .halt:
+    ; IR_HALT: no dst vreg — clear dst_spilled_vreg (Bug 3 fix)
+    mov dword [dst_spilled_vreg], 0   ; <-- Bug 3 fix
     call emit_epilogue_and_exit
-    call store_dst_spill
     jmp .next_ir
 
 

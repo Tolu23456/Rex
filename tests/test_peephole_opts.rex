@@ -1,0 +1,37 @@
+// test_peephole_opts.rex
+// Tests peephole optimizer: identity operations should be eliminated.
+// All outputs should equal the original value of x (= 7).
+//
+// Expected output:
+//   7
+//   7
+//   7
+//   7
+//   0
+//   14
+
+int x = 7
+
+// x + 0  =>  alias x
+int a = x + 0
+output(a)
+
+// x - 0  =>  alias x
+int b = x - 0
+output(b)
+
+// x * 1  =>  alias x
+int c = x * 1
+output(c)
+
+// x / 1  =>  alias x
+int d = x / 1
+output(d)
+
+// x * 0  =>  0
+int e = x * 0
+output(e)
+
+// x * 2  =>  x + x  =>  14
+int f = x * 2
+output(f)

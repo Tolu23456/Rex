@@ -1,46 +1,70 @@
 ---
 name: Rex compiler bug fixes
-description: All bugs found and fixed in the Rex self-hosting x86-64 NASM compiler
+description: Catalogue of all bugs found and fixed in the Rex NASM compiler, plus architectural improvements.
 ---
 
-# Rex Compiler — Bug Catalogue
+## Fixed bugs
 
-**Why:** Documents non-obvious root causes so future work avoids re-introducing them.
+### Bug 1 — Lexer: double read_char in .question handler (🔴 critical)
+**File:** `lexer/lexer.asm`
+**Symptom:** After reading `?`, the handler called `read_char` a second time, consuming the character immediately following `?`. This broke `?` and `??` tokenization and corrupted all subsequent tokens.
+**Fix:** Removed the redundant `call read_char`; the `?` was already consumed by the generic operator dispatch block. Now uses `peek_char` + conditional consume for `??` detection only.
 
-## Fixed Bugs (chronological)
+### Bug 2 — Optimizer: peephole aliases never applied (🔴 critical)
+**File:** `irgen/opt.asm`
+**Symptom:** `pass_peephole` wrote `vreg_alias` entries for identity ops (`+0`, `*1`, etc.) but the downstream IR was never updated to use the canonical vreg. NOP'd instructions left their dst vregs unwritten → garbage at runtime.
+**Fix:** Added `pass_apply_aliases` (called last in `run_optimizations`) that follows the full alias chain for every src1/src2 reference across all IR records.
 
-### Fix 1 — Float token type never set (lexer/lexer.asm)
-After lexing a fractional part the `.frac_done` path never wrote `TOK_FLOAT_LIT` to `tok_type`.
-Added `mov dword [tok_type], TOK_FLOAT_LIT` in `.frac_done`.
+### Bug 3 — Codegen: spurious spill writes (🔴 critical)
+**File:** `codegen/codegen.asm`
+**Symptom:** `IR_STORE_VAR`, `IR_OUT_*`, and `IR_HALT` handlers called `store_dst_spill` without first calling `get_dst_phys` to reset `dst_spilled_vreg`. A stale vreg ID from the previous instruction caused a phantom `mov [rbp+offset], r14` write, corrupting live values under register pressure.
+**Fix:** Added `mov dword [dst_spilled_vreg], 0` at the top of each handler and removed the trailing `call store_dst_spill` from those same handlers.
 
-### Fix 2–4 — Runtime blobs stack corruption + unreachable rodata (runtime/*.asm)
-- All three runtimes (`rt_prb`, `rt_prs`, `rt_prf`) pushed `rbx`/`rbp` but returned via `ret` without popping → stack corruption crash. Added matching `pop` pairs before each `ret`.
-- String/float constants in `.rodata` sections are unreachable from flat `-f bin` blobs. Moved them inline in the code section and used `lea rsi, [rel .label]` / `[rel .float_1m]`.
-- `rt_prf.asm` clobbered r12/r13 (used by codegen outer loop). Added `push r12`/`push r13` + matching pops.
+### Bug 4 — Lexer: check_empty_line clobbers RBX (🟡 dormant ABI violation)
+**File:** `lexer/lexer.asm`
+**Symptom:** `check_empty_line` used `rbx` (callee-saved in SysV ABI) without push/pop. Any caller relying on `rbx` across this call would see corruption.
+**Fix:** Added `push rbx` / `pop rbx` at entry/exit of `check_empty_line`.
 
-### Fix 5–6 — codegen emit_runtime_call and div/mod encoding (codegen/codegen.asm)
-- `emit_runtime_call`: `push rdi` before `mov dil, 0xE8` saved the rel32 target; restored with `pop rdi`. Without this the jmp target was always 0xE8.
-- `.emit_div` / `.emit_mod` step 1: wrong opcode `0x89` (store) → `0x8B` (load) for `mov rax, r(8+dst)`. Step 4 REX prefix: `0x4C` → `0x49` for `mov r(8+dst), rax/rdx`.
+### Bug 5 — Parser: sym_table-full error uses wrong message (🟡)
+**Files:** `parser/parser.asm`, `parser/symtab.asm`
+**Symptom:** When the symbol table is full, `sym_add` returns -1 (correct). The parser's `.full_error` and `.enum_full_err` labels both printed `err_dup_decl` ("Duplicate variable declaration") instead of a "table full" message.
+**Fix:** Added `err_sym_full db "Compile Error: Symbol table full (too many variables)", 0` to parser.asm's data section, and updated both error labels to use it.
 
-### Fix 7 — Lexer infinite loop at EOF (lexer/lexer.asm)
-When `at_line_start=1` and the file has been fully consumed, `check_empty_line` returns "empty" (because src_idx ≥ src_len), `skip_spaces` does nothing, no newline is consumed, and `jmp next_token` loops forever. Added `call peek_char; test rax,rax; jz .eof` after `.no_lf` to break the loop at EOF.
+### Bug 7 — Optimizer: IR_LOAD_FIMM not tracked in constant folding (🟡)
+**File:** `irgen/opt.asm`
+**Symptom:** Float immediate loads were not recorded in `vreg_is_const[]`, so float constants were never folded. Programs with `float z = 1.5 + 2.5` emitted actual SSE arithmetic at runtime instead of a constant.
+**Fix:** Added a `handle_load_fimm` handler in `pass_constant_folding` that stores the bit pattern in `vreg_const_val[]`. Added SSE2 float arithmetic folding (`addsd`/`subsd`/`mulsd`/`divsd`) in `handle_arith` when `type == TYPE_FLOAT`.
 
-### Fix 8 — emit_block never advances out_idx (codegen/codegen.asm)
-`rep movsb` decrements `rcx` to 0, then `add [out_idx], rcx` adds 0. Every `emit_block` call wrote at offset 0, overwriting the ELF header. Also read `[out_idx]` as 64-bit (`mov rdi`) instead of 32-bit. Fixed: save length in `eax` before `rep movsb`, use `add [out_idx], eax`, and read with `mov edi`.
+---
 
-### Fix 9 — codegen_emit_all commented out (main/main.asm)
-`; call codegen_emit_all` meant user code was never emitted → binary contained only headers/runtime, resulting in "Not an ELF file" or wrong magic. Uncommented the call.
+## Architectural improvements
 
-### Fix 10 — IR_LOAD_BOOL and IR_LOAD_STR unhandled in codegen (codegen/codegen.asm)
-Both opcodes fell through to `.next_ir` leaving destination registers at zero/null. Fixed:
-- `IR_LOAD_BOOL`: `jmp .load_imm` (imm holds 1/0/−1 same as integer).
-- `IR_LOAD_STR`: emit jmp-over-string + string bytes + null + RIP-relative LEA pattern so the string is embedded inline in the code stream and the register gets the correct runtime address. displacement = -(tok_str_len + 8).
+### Graph-colouring register allocator (replaces linear scan)
+**File:** `irgen/ra.asm` — full rewrite
+**Algorithm:** Chaitin-Briggs four-phase graph colouring:
+1. Liveness: compute `gc_def[v]` and `gc_last_use[v]` from IR.
+2. Build: interference graph as 512×512-bit symmetric bitmap; two vregs interfere iff their live ranges [def, last_use] overlap.
+3. Simplify: repeatedly push nodes with degree < 6 onto the colouring stack; when stuck, push highest-degree node as potential spill (optimistic colouring).
+4. Colour: pop stack, assign smallest colour not used by already-coloured neighbours; uncolourable → spill (colour 255).
+**Key constants:** `GRAPHCOL_VMAX = 512`, `NUM_PHYS_REGS = 6` (r10–r15, phys 0–5). Vregs ≥ 512 auto-spill (never occurs in practice).
+**Why:** Linear scan had an ordering bug (dst allocated before srcs freed) causing unnecessary spills. Graph colouring computes true interference and allocates optimally for straight-line programs.
 
-### Fix 11 — Float arithmetic used integer ADD/SUB/etc on IEEE 754 bits (codegen/codegen.asm)
-`.op_emit` had no type check; float values stored as bit patterns in r8–r13 were operated on with integer instructions. Added type check at top of `.op_emit`: if TYPE_FLOAT, use `.op_emit_float` which does: `movq xmm0, r(8+dst)` → SSE op (addsd/subsd/mulsd/divsd) xmm0,xmm1 → `movq r(8+dst), xmm0`. Encoding: 66 49 0F 6E/7E for integer↔XMM, F2 0F 58/5C/59/5E C1 for the SSE ops.
+### Optimizer cache correctness
+**File:** `irgen/opt.asm`
+**Improvement:** `pass_load_store_coalescing` now guards the load-miss path with `cmp rax, -1; je .next` before using `rax` as a symbol index, preventing `var_cached_vreg[-1]` writes. `opt_follow_alias` follows full alias chains (not just one level).
 
-## Key Invariants
-- Runtime blobs use `-f bin` BITS 64 flat format with `times N-($ - $$) db 0` padding. All data must be reachable via RIP-relative addressing — no absolute `.rodata` sections.
-- `emit_block` is the only function that bulk-copies bytes; `emit_b`/`emit_d`/`emit_q` handle individual byte/dword/qword emission and correctly maintain `out_idx` (32-bit `resd 1`).
-- Physical registers 0–5 map to r8–r13. The outer codegen loop owns r12 (total count), r13 (index), r14 (IR record ptr). Handlers may use r8, r9, r15 as scratch without saving, but must not touch r12/r13/r14.
-- `at_line_start` is 1 at program start; the first `next_token` call processes indent (finds 0 = same as stack) then proceeds to the first real token.
+---
+
+## Testing infrastructure
+**Files:** `tests/test_*.rex`, `run_tests.sh`
+**Tests added (all green):**
+- `test_arithmetic.rex` — all 5 arithmetic ops, precedence
+- `test_bool.rex` — Łukasiewicz three-valued logic
+- `test_constant_folding.rex` — compile-time integer folding
+- `test_float_fold.rex` — compile-time float folding (Bug 7)
+- `test_hex_bin_oct.rex` — 0x/0b/0o integer literal formats
+- `test_peephole_opts.rex` — identity ops (+0, *1, *0, *2)
+- `test_question_ops.rex` — ? token lexing (Bug 1)
+- `test_register_pressure.rex` — 8 variables forcing spills
+- `test_strings.rex` — string literal output
+**Runner:** `run_tests.sh --verbose` extracts `// Expected output:` blocks and diffs actual vs expected. 9/9 pass.

@@ -16,6 +16,8 @@ section .data
     err_type_mismatch db "Compile Error: Type mismatch", 0
     err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable name", 0
     err_newline_req db "Syntax Error: Expected newline or EOF at end of statement", 0
+    ; Bug 5 fix: distinct message for symbol-table-full (was reusing err_dup_decl)
+    err_sym_full    db "Compile Error: Symbol table full (too many variables)", 0
 
 section .bss
     ; For storing name string buffers during parsing
@@ -413,7 +415,7 @@ parse_stmt:
     pop r13
     pop r12
     pop rbx
-    mov rdi, err_dup_decl
+    mov rdi, err_sym_full
     jmp compile_error
 
 .explicit_decl:
@@ -543,8 +545,8 @@ parse_stmt:
     mov rdi, err_dup_decl
     jmp compile_error
 .full_error:
-    ; Symbol table overflow
-    mov rdi, err_dup_decl
+    ; Symbol table overflow (Bug 5 fix: was incorrectly using err_dup_decl)
+    mov rdi, err_sym_full
     jmp compile_error
 .type_error:
     mov rdi, err_type_mismatch

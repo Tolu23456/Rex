@@ -1,0 +1,40 @@
+// test_arithmetic.rex
+// Tests all integer arithmetic operators and operator precedence.
+//
+// Expected output:
+//   15
+//   5
+//   50
+//   2
+//   0
+//   17
+//   100
+
+int a = 10
+int b = 5
+
+// Basic operators
+int sum = a + b
+output(sum)
+
+int diff = a - b
+output(diff)
+
+int prod = a * b
+output(prod)
+
+int quot = a / b
+output(quot)
+
+int rem = a % b
+output(rem)
+
+// Precedence: should be 10 + (2 * 3) + 1 = 17
+int c = 2
+int d = 3
+int prec = a + c * d + 1
+output(prec)
+
+// Chained: (10 * 5) * 2 = 100
+int chain = a * b * 2
+output(chain)

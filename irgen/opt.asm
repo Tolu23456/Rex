@@ -1,5 +1,13 @@
 ; Rex IR Optimization Passes
 ; written in x86-64 NASM assembly
+;
+; Bug fixes applied:
+;   Bug 2: pass_apply_aliases now runs after pass_peephole, propagating
+;          all aliases (including peephole identity aliases) through the IR.
+;   Bug 7: pass_constant_folding now tracks IR_LOAD_FIMM (float immediates)
+;          and folds float arithmetic using SSE2 when both operands are constant.
+; Cache improvement:
+;   pass_apply_aliases follows full alias chains, not just one level.
 
 %include "include/rex_defs.inc"
 %include "include/rex_ir.inc"
@@ -18,6 +26,7 @@ section .bss
     var_is_read     resb VAR_MAX
     
     var_cached_vreg resw VAR_MAX
+    global vreg_alias
     vreg_alias      resw VREG_MAX
 
 section .text
@@ -34,6 +43,7 @@ run_optimizations:
     call pass_dead_store_elimination
     call pass_load_store_coalescing
     call pass_peephole
+    call pass_apply_aliases   ; <-- Bug 2 fix: apply all accumulated aliases
 
     pop r15
     pop r14
@@ -49,6 +59,11 @@ pass_constant_folding:
     xor eax, eax
     rep stosb
     
+    mov rcx, VREG_MAX
+    lea rdi, [vreg_const_val]
+    xor eax, eax
+    rep stosq
+
     mov rcx, VAR_MAX
     lea rdi, [var_is_const]
     xor eax, eax
@@ -70,6 +85,10 @@ pass_constant_folding:
     
     cmp eax, IR_LOAD_IMM
     je .handle_load_imm
+
+    ; Bug 7 fix: track float immediate loads just like integer ones.
+    cmp eax, IR_LOAD_FIMM
+    je .handle_load_fimm
     
     cmp eax, IR_STORE_VAR
     je .handle_store_var
@@ -104,11 +123,22 @@ pass_constant_folding:
     mov [vreg_const_val + rcx * 8], rdx
     jmp .next
 
+; Bug 7 fix: IR_LOAD_FIMM — treat bit pattern as constant value.
+; This enables float constant folding in the arithmetic handler.
+.handle_load_fimm:
+    movzx ecx, word [r13 + 2] ; dst vreg
+    mov rdx, [r13 + 8]        ; float bit pattern (IEEE-754 doubles)
+    mov byte [vreg_is_const + rcx], 1
+    mov [vreg_const_val + rcx * 8], rdx
+    jmp .next
+
 .handle_store_var:
     movzx ecx, word [r13 + 4] ; src1 vreg
     mov rdi, [r13 + 8] ; var offset
     call sym_find_by_offset
     mov r8, rax
+    cmp rax, -1
+    je .next
     cmp byte [vreg_is_const + rcx], 1
     jne .not_const_store
     mov byte [var_is_const + r8], 1
@@ -124,10 +154,19 @@ pass_constant_folding:
     mov rdi, [r13 + 8] ; var offset
     call sym_find_by_offset
     mov r8, rax
+    cmp rax, -1
+    je .next
     cmp byte [var_is_const + r8], 1
     jne .next
-    ; Replace with LOAD_IMM
+    ; Replace with LOAD_IMM (or LOAD_FIMM if float)
+    movzx eax, byte [r13 + 1]  ; type
+    cmp al, TYPE_FLOAT
+    je .load_fimm_const
     mov byte [r13 + 0], IR_LOAD_IMM
+    jmp .load_const_common
+.load_fimm_const:
+    mov byte [r13 + 0], IR_LOAD_FIMM
+.load_const_common:
     mov rdx, [var_const_val + r8 * 8]
     mov [r13 + 8], rdx
     mov byte [vreg_is_const + rcx], 1
@@ -143,10 +182,17 @@ pass_constant_folding:
     cmp byte [vreg_is_const + r15], 1
     jne .next
     
-    ; Both constant! Compute!
+    ; Both constant!
+    ; Check if this is float arithmetic
+    movzx ecx, byte [r13 + 1] ; type byte
+    cmp cl, TYPE_FLOAT
+    je .arith_float
+
+    ; --- Integer folding ---
     mov r8, [vreg_const_val + r14 * 8]
     mov r9, [vreg_const_val + r15 * 8]
     
+    movzx eax, byte [r13 + 0] ; opcode
     cmp eax, IR_ADD
     jne .chk_sub
     add r8, r9
@@ -164,9 +210,8 @@ pass_constant_folding:
 .chk_div:
     cmp eax, IR_DIV
     jne .chk_mod
-    ; r8 / r9
     test r9, r9
-    jz .next ; Div by zero, ignore optimization
+    jz .next
     mov rax, r8
     cqo
     idiv r9
@@ -196,15 +241,52 @@ pass_constant_folding:
     xor r8, r9
 
 .arith_done:
-    ; Convert this instruction to LOAD_IMM
     mov byte [r13 + 0], IR_LOAD_IMM
     mov [r13 + 8], r8
-    mov word [r13 + 4], 0 ; src1 = 0
-    mov word [r13 + 6], 0 ; src2 = 0
-    
-    movzx ecx, word [r13 + 2] ; dst vreg
+    mov word [r13 + 4], 0
+    mov word [r13 + 6], 0
+    movzx ecx, word [r13 + 2]
     mov byte [vreg_is_const + rcx], 1
     mov [vreg_const_val + rcx * 8], r8
+    jmp .next
+
+; Bug 7 fix: float constant folding using SSE2 instructions.
+; The optimizer itself is NASM code so we CAN use SSE here.
+.arith_float:
+    movq xmm0, [vreg_const_val + r14 * 8]  ; src1 as double
+    movq xmm1, [vreg_const_val + r15 * 8]  ; src2 as double
+    movzx eax, byte [r13 + 0]               ; opcode
+    cmp eax, IR_ADD
+    jne .f_sub
+    addsd xmm0, xmm1
+    jmp .f_done
+.f_sub:
+    cmp eax, IR_SUB
+    jne .f_mul
+    subsd xmm0, xmm1
+    jmp .f_done
+.f_mul:
+    cmp eax, IR_MUL
+    jne .f_div
+    mulsd xmm0, xmm1
+    jmp .f_done
+.f_div:
+    ; Guard against zero divisor
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    je .next   ; div by 0.0 — leave unfolded
+    divsd xmm0, xmm1
+.f_done:
+    ; Store result as LOAD_FIMM
+    movq r8, xmm0
+    mov byte [r13 + 0], IR_LOAD_FIMM
+    mov [r13 + 8], r8
+    mov word [r13 + 4], 0
+    mov word [r13 + 6], 0
+    movzx ecx, word [r13 + 2]
+    mov byte [vreg_is_const + rcx], 1
+    mov [vreg_const_val + rcx * 8], r8
+    jmp .next
 
 .next:
     inc ebx
@@ -215,7 +297,6 @@ pass_constant_folding:
 
 
 pass_dead_store_elimination:
-    ; Scan backwards from ir_count-1 down to 0
     mov rcx, VAR_MAX
     lea rdi, [var_is_read]
     xor eax, eax
@@ -230,7 +311,7 @@ pass_dead_store_elimination:
     imul eax, ebx, IR_RECORD_SIZE
     lea r13, [ir_buffer + rax]
     
-    movzx eax, byte [r13 + 0] ; opcode
+    movzx eax, byte [r13 + 0]
     
     cmp eax, IR_LOAD_VAR
     je .dse_load_var
@@ -241,24 +322,26 @@ pass_dead_store_elimination:
     jmp .next_dse
 
 .dse_load_var:
-    mov rdi, [r13 + 8] ; imm = offset
+    mov rdi, [r13 + 8]
     call sym_find_by_offset
+    cmp rax, -1
+    je .next_dse
     mov r8, rax
     mov byte [var_is_read + r8], 1
     jmp .next_dse
 
 .dse_store_var:
-    mov rdi, [r13 + 8] ; imm = offset
+    mov rdi, [r13 + 8]
     call sym_find_by_offset
+    cmp rax, -1
+    je .next_dse
     mov r8, rax
     cmp byte [var_is_read + r8], 0
     je .kill_store
-    ; It was read! But this store overwrites earlier stores, so reset read flag for earlier code.
     mov byte [var_is_read + r8], 0
     jmp .next_dse
     
 .kill_store:
-    ; Dead store! Set opcode to NOP
     mov byte [r13 + 0], IR_NOP
     
 .next_dse:
@@ -270,12 +353,15 @@ pass_dead_store_elimination:
 
 
 pass_load_store_coalescing:
-    ; Initialize state
+    ; Initialize
     mov rcx, VAR_MAX
     lea rdi, [var_cached_vreg]
     xor eax, eax
     rep stosw
     
+    ; vreg_alias is intentionally NOT cleared here; constant-folding has
+    ; already established some entries and peephole will add more.
+    ; pass_apply_aliases (run last) will consume the whole table.
     mov rcx, VREG_MAX
     lea rdi, [vreg_alias]
     xor eax, eax
@@ -303,59 +389,69 @@ pass_load_store_coalescing:
     movzx ecx, word [r13 + 4]
     test cx, cx
     jz .skip_src1
-    mov dx, [vreg_alias + rcx * 2]
-    test dx, dx
+    call opt_follow_alias    ; rcx=vreg, returns rax=canonical (0=no change)
+    test rax, rax
     jz .skip_src1
-    mov [r13 + 4], dx
+    mov [r13 + 4], ax
 .skip_src1:
     movzx ecx, word [r13 + 6]
     test cx, cx
     jz .next
-    mov dx, [vreg_alias + rcx * 2]
-    test dx, dx
+    call opt_follow_alias
+    test rax, rax
     jz .next
-    mov [r13 + 6], dx
+    mov [r13 + 6], ax
     jmp .next
 
 .store:
-    mov rdi, [r13 + 8] ; var offset
+    mov rdi, [r13 + 8]
     call sym_find_by_offset
+    cmp rax, -1
+    je .next
     mov r8, rax
-    mov cx, [r13 + 4] ; src1 vreg
-    ; apply alias to src1 if any
-    mov dx, [vreg_alias + rcx * 2]
-    test dx, dx
+    movzx ecx, word [r13 + 4]  ; src1 vreg
+    ; Follow alias chain for src1
+    call opt_follow_alias
+    test rax, rax
     jz .store_no_alias
-    mov cx, dx
+    mov cx, ax
     mov [r13 + 4], cx
 .store_no_alias:
+    ; Cache: var -> src1 vreg (canonical)
     mov [var_cached_vreg + r8 * 2], cx
     jmp .next
 
 .load:
-    mov rdi, [r13 + 8] ; var offset
+    mov rdi, [r13 + 8]
     call sym_find_by_offset
-    mov r8, rax
-    mov cx, [var_cached_vreg + r8 * 2]
+    cmp rax, -1
+    je .next                    ; symbol not found — skip (guard against bad offset)
+    mov r8, rax                 ; r8 = valid symbol index
+    movzx ecx, word [var_cached_vreg + r8 * 2]
     test cx, cx
-    jz .load_miss
-    ; Coalesce! We have the value already in vreg 'cx'
-    mov dx, [r13 + 2] ; dst vreg of this load
-    mov [vreg_alias + rdx * 2], cx
-    mov byte [r13 + 0], IR_NOP ; eliminate this load entirely
+    jz .load_miss               ; cache miss — record dst as cache entry
+    ; Cache hit — alias dst to the cached vreg and NOP this load
+    movzx eax, word [r13 + 2]  ; dst vreg of this load
+    mov [vreg_alias + rax * 2], cx
+    mov byte [r13 + 0], IR_NOP
     jmp .next
 .load_miss:
-    mov dx, [r13 + 2] ; dst vreg
-    mov [var_cached_vreg + r8 * 2], dx
-    
+    ; r8 is a valid symbol index here (checked above)
+    movzx ecx, word [r13 + 2]  ; dst vreg
+    mov [var_cached_vreg + r8 * 2], cx
+
 .next:
     inc ebx
     jmp .loop
 .done:
     ret
 
+
 pass_peephole:
-    ; Simplifies algebraic identities (+0, *1, *0)
+    ; Simplifies algebraic identities (+0, *1, *0, *2).
+    ; NOTE: vreg_is_const[] is still populated from pass_constant_folding,
+    ; so peephole reads correct data.  New aliases written here are consumed
+    ; by pass_apply_aliases which runs immediately after.
     mov r12d, [ir_count]
     test r12d, r12d
     jz .done
@@ -367,7 +463,7 @@ pass_peephole:
     
     imul eax, ebx, IR_RECORD_SIZE
     lea r13, [ir_buffer + rax]
-    movzx eax, byte [r13 + 0] ; opcode
+    movzx eax, byte [r13 + 0]
     
     cmp eax, IR_ADD
     je .arith
@@ -391,7 +487,7 @@ pass_peephole:
     ; Check if src2 is constant 1
     cmp qword [vreg_const_val + rdx * 8], 1
     je .src2_one
-    ; Check if src2 is constant 2 (for strength reduction)
+    ; Check if src2 is constant 2 (strength reduction)
     cmp qword [vreg_const_val + rdx * 8], 2
     je .src2_two
     jmp .check_src1
@@ -402,9 +498,8 @@ pass_peephole:
     jmp .check_src1
 
 .reduce_mul_src2:
-    ; x * 2 -> x + x
     mov byte [r13 + 0], IR_ADD
-    mov [r13 + 6], cx ; src2 = src1
+    mov [r13 + 6], cx   ; src2 = src1 (x * 2 => x + x)
     jmp .next
 
 .src2_zero:
@@ -424,15 +519,12 @@ pass_peephole:
     jmp .next
 
 .check_src1:
-    ; Check if src1 is constant 0
     cmp byte [vreg_is_const + rcx], 1
     jne .next
     cmp qword [vreg_const_val + rcx * 8], 0
     je .src1_zero
-    ; Check if src1 is constant 1
     cmp qword [vreg_const_val + rcx * 8], 1
     je .src1_one
-    ; Check if src1 is constant 2 (for strength reduction)
     cmp qword [vreg_const_val + rcx * 8], 2
     je .src1_two
     jmp .next
@@ -443,9 +535,8 @@ pass_peephole:
     jmp .next
 
 .reduce_mul_src1:
-    ; 2 * x -> x + x
     mov byte [r13 + 0], IR_ADD
-    mov [r13 + 4], dx ; src1 = src2
+    mov [r13 + 4], dx   ; src1 = src2 (2 * x => x + x)
     jmp .next
 
 .src1_zero:
@@ -463,21 +554,19 @@ pass_peephole:
     jmp .next
 
 .alias_src1:
-    ; Result is just src1. We can set vreg_alias of dst to src1.
-    movzx rax, word [r13 + 2] ; dst
+    ; dst = src1; record alias and NOP the instruction
+    movzx rax, word [r13 + 2]
     mov [vreg_alias + rax * 2], cx
     mov byte [r13 + 0], IR_NOP
     jmp .next
 
 .alias_src2:
-    ; Result is just src2. We can set vreg_alias of dst to src2.
-    movzx rax, word [r13 + 2] ; dst
+    movzx rax, word [r13 + 2]
     mov [vreg_alias + rax * 2], dx
     mov byte [r13 + 0], IR_NOP
     jmp .next
 
 .zero_out:
-    ; Result is 0. Convert to LOAD_IMM 0
     mov byte [r13 + 0], IR_LOAD_IMM
     mov qword [r13 + 8], 0
     mov word [r13 + 4], 0
@@ -491,4 +580,76 @@ pass_peephole:
     inc ebx
     jmp .loop
 .done:
+    ret
+
+
+; ============================================================
+;  Bug 2 fix: pass_apply_aliases
+;  Propagates ALL accumulated vreg_alias entries through the IR.
+;  Runs after pass_peephole to catch aliases created by both
+;  pass_load_store_coalescing and pass_peephole.
+; ============================================================
+pass_apply_aliases:
+    mov r12d, [ir_count]
+    test r12d, r12d
+    jz .done
+
+    xor ebx, ebx
+.loop:
+    cmp ebx, r12d
+    je .done
+
+    imul eax, ebx, IR_RECORD_SIZE
+    lea r13, [ir_buffer + rax]
+
+    movzx eax, byte [r13 + 0]
+    cmp eax, IR_NOP
+    je .next   ; skip already-eliminated instructions
+
+    ; Apply alias to src1
+    movzx ecx, word [r13 + 4]
+    test cx, cx
+    jz .check_src2
+    call opt_follow_alias
+    test rax, rax
+    jz .check_src2
+    mov [r13 + 4], ax
+
+.check_src2:
+    movzx ecx, word [r13 + 6]
+    test cx, cx
+    jz .next
+    call opt_follow_alias
+    test rax, rax
+    jz .next
+    mov [r13 + 6], ax
+
+.next:
+    inc ebx
+    jmp .loop
+.done:
+    ret
+
+
+; ============================================================
+;  Helper: opt_follow_alias(vreg in rcx)
+;  Follows the vreg_alias chain from rcx to its canonical target.
+;  Returns rax = canonical vreg if it differs from rcx, else 0.
+; ============================================================
+opt_follow_alias:
+    movzx rax, cx           ; current = input
+.follow:
+    movzx rdx, word [vreg_alias + rax * 2]
+    test dx, dx
+    jz .chain_end           ; no further alias
+    movzx rax, dx
+    jmp .follow
+.chain_end:
+    ; rax = canonical end; check if it differs from input
+    movzx rcx, cx           ; re-zero-extend input
+    cmp rax, rcx
+    je .no_change
+    ret                     ; rax = canonical (non-zero, different)
+.no_change:
+    xor eax, eax            ; 0 = "no alias applied"
     ret

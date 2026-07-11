@@ -1,0 +1,37 @@
+// test_register_pressure.rex
+// Declares many variables simultaneously to exceed the 6 physical registers.
+// The graph-colouring allocator must spill some vregs to the stack.
+// All values should still be correct.
+//
+// Expected output:
+//   1
+//   2
+//   3
+//   4
+//   5
+//   6
+//   7
+//   8
+//   36
+
+int a = 1
+int b = 2
+int c = 3
+int d = 4
+int e = 5
+int f = 6
+int g = 7
+int h = 8
+
+output(a)
+output(b)
+output(c)
+output(d)
+output(e)
+output(f)
+output(g)
+output(h)
+
+// sum: 1+2+3+4+5+6+7+8 = 36
+int sum = a + b + c + d + e + f + g + h
+output(sum)

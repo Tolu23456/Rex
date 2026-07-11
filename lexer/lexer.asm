@@ -1,5 +1,9 @@
 ; Rex Lexer Implementation
 ; written in x86-64 NASM assembly
+;
+; Bug fixes applied:
+;   - check_empty_line now saves/restores RBX (Bug 4: ABI violation)
+;   - .question handler removed redundant read_char (Bug 1: double-consume)
 
 %include "include/rex_defs.inc"
 
@@ -109,7 +113,9 @@ read_char:
 
 ; Check if the current line starting from src_idx is empty or a comment
 ; Returns rax = 1 if empty/comment, 0 otherwise
+; BUG FIX (Bug 4): push/pop rbx so callers' RBX is preserved (SysV ABI)
 check_empty_line:
+    push rbx                    ; <-- FIX: save callee-saved RBX
     mov rsi, [src_ptr]
     mov rcx, [src_idx]
 .loop:
@@ -132,17 +138,19 @@ check_empty_line:
     inc rdx
     cmp rdx, [src_len]
     jae .not_empty
-    movzx rbx, byte [rsi + rdx]
+    movzx rbx, byte [rsi + rdx]  ; rbx is now saved, safe to use
     cmp bl, '/'
     je .empty
 .not_empty:
     xor rax, rax
+    pop rbx                     ; <-- FIX: restore before returning
     ret
 .next:
     inc rcx
     jmp .loop
 .empty:
     mov rax, 1
+    pop rbx                     ; <-- FIX: restore before returning
     ret
 
 ; Skip whitespace (spaces and tabs only)
@@ -1075,8 +1083,13 @@ section .text
     mov dword [tok_type], TOK_DOT
     mov qword [tok_str_len], 1
     ret
+
+; BUG FIX (Bug 1): The '?' character was already consumed by the generic
+; read_char at the operator dispatch block above.  The old code called
+; read_char a second time, discarding the character that follows '?'.
+; Fix: use peek_char / read_char only as needed for look-ahead.
 .question:
-    call read_char ; consume '?'
+    ; '?' already consumed above — just peek at the next character
     call peek_char
     cmp rax, '?'
     je .qq
@@ -1084,10 +1097,11 @@ section .text
     mov qword [tok_str_len], 1
     ret
 .qq:
-    call read_char ; consume second '?'
+    call read_char ; consume the second '?'
     mov dword [tok_type], TOK_QQ
     mov qword [tok_str_len], 2
     ret
+
 .mod:
     mov dword [tok_type], TOK_MOD
     mov qword [tok_str_len], 1
