@@ -1582,8 +1582,6 @@ section .rodata
     .line_suffix db " at line ", 0
     .line_suffix_len equ $ - .line_suffix
 
-section .text
-
 ; ======================================================
 ; ident_is: compare method_buf against null-terminated string in rdi
 ; Returns: rax=1 if match, rax=0 otherwise
@@ -1630,6 +1628,22 @@ ident_is:
 ; r13 = current type
 ; ======================================================
 parse_postfix:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    call parse_term
+    ; stub: no method dispatch, just return result
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; original parse_postfix body saved below (method dispatch)
+parse_postfix_full:
     push rbx
     push r12
     push r13

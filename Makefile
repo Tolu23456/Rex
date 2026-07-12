@@ -17,21 +17,22 @@ TARGET=rexc
 
 # Runtime Binary Blobs
 RT_BINS=$(RUNTIME_DIR)/rt_pri.bin \
-        $(RUNTIME_DIR)/rt_prs.bin \
-        $(RUNTIME_DIR)/rt_prb.bin \
-        $(RUNTIME_DIR)/rt_prf.bin \
-        $(RUNTIME_DIR)/rt_prq.bin
+	$(RUNTIME_DIR)/rt_prs.bin \
+	$(RUNTIME_DIR)/rt_prb.bin \
+	$(RUNTIME_DIR)/rt_prf.bin \
+	$(RUNTIME_DIR)/rt_prc.bin \
+	$(RUNTIME_DIR)/rt_prq.bin
 
 # Compiler Object Files
 OBJS=$(MAIN_DIR)/main.o \
-     $(LEXER_DIR)/lexer.o \
-     $(PARSER_DIR)/type_reg.o \
-     $(PARSER_DIR)/symtab.o \
-     $(PARSER_DIR)/parser.o \
-     $(IRGEN_DIR)/irgen.o \
-     $(IRGEN_DIR)/ra.o \
-     $(IRGEN_DIR)/opt.o \
-     $(CODEGEN_DIR)/codegen.o
+	$(LEXER_DIR)/lexer.o \
+	$(PARSER_DIR)/type_reg.o \
+	$(PARSER_DIR)/symtab.o \
+	$(PARSER_DIR)/parser.o \
+	$(IRGEN_DIR)/irgen.o \
+	$(IRGEN_DIR)/ra.o \
+	$(IRGEN_DIR)/opt.o \
+	$(CODEGEN_DIR)/codegen.o
 
 .PHONY: all clean runtimes
 
