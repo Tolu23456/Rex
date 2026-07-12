@@ -1,7 +1,6 @@
 ; rt_prs.asm - print null-terminated string in RDI to stdout followed by newline
 BITS 64
 
-    push rbx
     push rbp
     mov rbp, rsp
     
@@ -37,7 +36,6 @@ BITS 64
 .done:
     mov rsp, rbp
     pop rbp
-    pop rbx
     ret
 
 ; Pad to exactly 512 bytes

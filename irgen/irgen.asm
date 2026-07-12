@@ -49,7 +49,15 @@ emit_ir:
     mov eax, [ir_count]
     cmp eax, IR_MAX_RECORDS
     jae .overflow
-    
+
+    ; Validate vreg IDs are within range
+    cmp edx, VREG_MAX
+    jae .overflow
+    cmp ecx, VREG_MAX
+    jae .overflow
+    cmp r8d, VREG_MAX
+    jae .overflow
+
     imul eax, eax, IR_RECORD_SIZE
     lea rbx, [ir_buffer + rax]
     

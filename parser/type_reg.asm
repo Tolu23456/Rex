@@ -22,6 +22,8 @@ section .data
 
 section .bss
     global type_table
+    global type_name_buf
+    global type_name_idx
     type_table resb TYPE_REG_SIZE * TYPE_REG_MAX
     type_name_buf resb 4096
     type_name_idx resd 1
@@ -150,6 +152,10 @@ type_reg_add:
     jz .name_done
 
     mov ebx, [type_name_idx]
+    ; Bounds check: ensure name fits in buffer
+    lea rax, [rbx + r15 + 1]
+    cmp rax, 4096
+    jae .name_done          ; skip name if it won't fit
     lea rdi, [type_name_buf + rbx] ; destination
     
     ; Copy loop

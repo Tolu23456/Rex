@@ -21,11 +21,20 @@ BITS 64
     ; Save precision to stack slot [rbp-56]
     mov [rbp-56], rdi
 
-    ; Check sign
-    xorpd xmm1, xmm1
-    ucomisd xmm0, xmm1
-    jae .positive
-    jp .positive        ; if NaN, treat as positive for now
+    ; Check for NaN/Inf (exponent field = 0x7FF)
+    movq rax, xmm0
+    mov rcx, rax
+    mov rdx, [rel .mask_exp]
+    and rcx, rdx
+    cmp rcx, rdx
+    je .print_nan_or_inf
+
+    ; Check sign (bit-level: handles -0.0 correctly)
+    test rax, rax
+    jns .positive
+    ; Sign bit set — check if -0.0 (only sign bit, no magnitude)
+    shl rax, 1
+    jz .positive            ; -0.0 → treat as positive
 
     ; Print minus sign '-'
     movapd xmm2, xmm0   ; Save xmm0
@@ -86,6 +95,14 @@ BITS 64
 .frac_loop:
     mulsd xmm0, xmm2    ; xmm0 = xmm0 * 10
     cvttsd2si rax, xmm0
+    cmp rax, 9
+    jle .digit_ok
+    mov rax, 9
+.digit_ok:
+    test rax, rax
+    jns .digit_nn
+    xor rax, rax
+.digit_nn:
     cvtsi2sd xmm1, rax
     subsd xmm0, xmm1    ; subtract digit
     
@@ -134,6 +151,51 @@ BITS 64
 
 .float_neg_one dq -1.0
 .float_10      dq 10.0
+.mask_exp      dq 0x7FF0000000000000
+
+.print_nan_or_inf:
+    ; Check if NaN (fraction bits != 0) or Inf (fraction bits == 0)
+    movq rax, xmm0
+    test rax, 0x000FFFFFFFFFFFFF
+    jnz .print_nan
+    ; Inf — check sign
+    test rax, rax
+    jns .print_inf_pos
+    ; Print "-inf"
+    mov byte [rbp-8], '-'
+    mov byte [rbp-7], 'i'
+    mov byte [rbp-6], 'n'
+    mov byte [rbp-5], 'f'
+    mov byte [rbp-4], 10
+    lea rsi, [rbp-8]
+    mov rdx, 5
+    jmp .print_nan_inf_write
+.print_inf_pos:
+    mov byte [rbp-8], 'i'
+    mov byte [rbp-7], 'n'
+    mov byte [rbp-6], 'f'
+    mov byte [rbp-5], 10
+    lea rsi, [rbp-8]
+    mov rdx, 4
+    jmp .print_nan_inf_write
+.print_nan:
+    ; Print "nan"
+    mov byte [rbp-8], 'n'
+    mov byte [rbp-7], 'a'
+    mov byte [rbp-6], 'n'
+    mov byte [rbp-5], 10
+    lea rsi, [rbp-8]
+    mov rdx, 4
+.print_nan_inf_write:
+    mov rax, 1
+    mov rdi, 1
+    syscall
+    mov rsp, rbp
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
 
 ; Pad to exactly 512 bytes
 times 512 - ($ - $$) db 0

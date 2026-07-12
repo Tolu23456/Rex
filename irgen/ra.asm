@@ -54,9 +54,9 @@
 %include "include/rex_defs.inc"
 %include "include/rex_ir.inc"
 
-GRAPHCOL_VMAX   equ 512         ; max vregs tracked (must be power of 2)
-GRAPHCOL_BPR    equ 64          ; bytes per row = GRAPHCOL_VMAX / 8
-GRAPHCOL_QPR    equ 8           ; qwords per row = GRAPHCOL_BPR / 8
+GRAPHCOL_VMAX   equ 1024        ; max vregs tracked (must be power of 2)
+GRAPHCOL_BPR    equ 128         ; bytes per row = GRAPHCOL_VMAX / 8
+GRAPHCOL_QPR    equ 16          ; qwords per row = GRAPHCOL_BPR / 8
 NUM_PHYS_REGS   equ 6
 UNSET_IDX       equ 0xFFFFFFFF  ; sentinel: vreg never defined
 COLOR_NONE      equ 0xFE        ; not yet coloured
@@ -198,6 +198,7 @@ allocate_registers:
     dec eax
     cmp eax, GRAPHCOL_VMAX - 1
     jbe .set_max_vreg
+    ; Warn: vreg count exceeds graph capacity — excess vregs will be spilled
     mov eax, GRAPHCOL_VMAX - 1
 .set_max_vreg:
     mov [gc_max_vreg], eax
@@ -264,10 +265,11 @@ allocate_registers:
     inc dword [gc_use_count + rax * 4]
 
 .p1_hint:
-    ; For arithmetic ops, record copy-coalescing hint: gc_copy_hint[dst] = src1
+    ; For ops with dst = f(src1), record copy-coalescing hint: gc_copy_hint[dst] = src1
     ; Biased colouring in Phase 4 will try to assign dst the same colour as src1,
     ; which eliminates the "mov dst_reg, src1_reg" copy emitted by codegen.
     movzx eax, byte [r13]          ; opcode
+    ; Binary arithmetic
     cmp al, IR_ADD
     je .p1_do_hint
     cmp al, IR_SUB
@@ -287,6 +289,110 @@ allocate_registers:
     cmp al, IR_BOOL_AND
     je .p1_do_hint
     cmp al, IR_BOOL_OR
+    je .p1_do_hint
+    ; Unary ops
+    cmp al, IR_NEG
+    je .p1_do_hint
+    cmp al, IR_ABS_INT
+    je .p1_do_hint
+    cmp al, IR_SIGNUM
+    je .p1_do_hint
+    cmp al, IR_BOOL_NOT
+    je .p1_do_hint
+    ; Shifts
+    cmp al, IR_SHL
+    je .p1_do_hint
+    cmp al, IR_SHR
+    je .p1_do_hint
+    ; Bit ops
+    cmp al, IR_POPCOUNT
+    je .p1_do_hint
+    cmp al, IR_CLZ
+    je .p1_do_hint
+    cmp al, IR_CTZ
+    je .p1_do_hint
+    cmp al, IR_BSWAP
+    je .p1_do_hint
+    cmp al, IR_ROL
+    je .p1_do_hint
+    cmp al, IR_ROR
+    je .p1_do_hint
+    cmp al, IR_SWAP_NIB
+    je .p1_do_hint
+    cmp al, IR_CLZ8
+    je .p1_do_hint
+    ; Float ops
+    cmp al, IR_ABS_FLOAT
+    je .p1_do_hint
+    cmp al, IR_SQRT
+    je .p1_do_hint
+    cmp al, IR_TRUNC_F
+    je .p1_do_hint
+    cmp al, IR_CEIL
+    je .p1_do_hint
+    cmp al, IR_FLOOR
+    je .p1_do_hint
+    cmp al, IR_ROUND
+    je .p1_do_hint
+    ; Type casts
+    cmp al, IR_CAST_ITF
+    je .p1_do_hint
+    cmp al, IR_CAST_FTI
+    je .p1_do_hint
+    cmp al, IR_CAST_BTI
+    je .p1_do_hint
+    cmp al, IR_CAST_CTI
+    je .p1_do_hint
+    cmp al, IR_CAST_CTB
+    je .p1_do_hint
+    cmp al, IR_CAST_BCI
+    je .p1_do_hint
+    cmp al, IR_CAST_BTC
+    je .p1_do_hint
+    ; Char predicates
+    cmp al, IR_IS_ALPHA
+    je .p1_do_hint
+    cmp al, IR_IS_DIGIT_C
+    je .p1_do_hint
+    cmp al, IR_IS_ALNUM
+    je .p1_do_hint
+    cmp al, IR_IS_SPACE
+    je .p1_do_hint
+    cmp al, IR_IS_PRINT
+    je .p1_do_hint
+    cmp al, IR_IS_UPPER
+    je .p1_do_hint
+    cmp al, IR_IS_LOWER_C
+    je .p1_do_hint
+    cmp al, IR_IS_PUNCT
+    je .p1_do_hint
+    cmp al, IR_IS_EVEN
+    je .p1_do_hint
+    cmp al, IR_IS_ODD
+    je .p1_do_hint
+    ; Char transforms
+    cmp al, IR_TO_UPPER
+    je .p1_do_hint
+    cmp al, IR_TO_LOWER
+    je .p1_do_hint
+    cmp al, IR_TO_DIGIT
+    je .p1_do_hint
+    ; Float predicates
+    cmp al, IR_IS_NAN
+    je .p1_do_hint
+    cmp al, IR_IS_INF
+    je .p1_do_hint
+    cmp al, IR_IS_FINITE
+    je .p1_do_hint
+    cmp al, IR_IS_ZERO_F
+    je .p1_do_hint
+    cmp al, IR_IS_POS_F
+    je .p1_do_hint
+    cmp al, IR_IS_NEG_F
+    je .p1_do_hint
+    ; Comparison
+    cmp al, IR_CMP_BOOL
+    je .p1_do_hint
     je .p1_do_hint
     jmp .phase1_next
 

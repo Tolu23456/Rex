@@ -28,6 +28,8 @@ section .data
     str_dict    db "dict", 0
     str_null    db "null", 0
     str_output  db "output", 0
+    str_prot    db "prot", 0
+    str_return  db "return", 0
     str_true    db "true", 0
     str_false   db "false", 0
     str_neutral db "neutral", 0
@@ -54,6 +56,7 @@ section .bss
     src_len         resq 1
     src_idx         resq 1
     line_num        resq 1
+    line_start_idx  resq 1
     
     tok_type        resd 1
     tok_str_ptr     resq 1
@@ -76,6 +79,7 @@ lex_init:
     mov [src_len], rsi
     mov qword [src_idx], 0
     mov qword [line_num], 1
+    mov qword [line_start_idx], 0
     mov dword [pending_dedents], 0
     mov byte [at_line_start], 1
     
@@ -85,7 +89,7 @@ lex_init:
     ret
 
 ; Helper to peek next character without advancing
-; Returns rax = char, or 0 if EOF
+; Returns rax = char, or -1 if EOF
 peek_char:
     mov rsi, [src_ptr]
     mov rdi, [src_idx]
@@ -94,11 +98,11 @@ peek_char:
     movzx rax, byte [rsi + rdi]
     ret
 .eof:
-    xor rax, rax
+    or rax, -1
     ret
 
 ; Helper to read current character and advance
-; Returns rax = char, or 0 if EOF
+; Returns rax = char, or -1 if EOF
 read_char:
     mov rsi, [src_ptr]
     mov rdi, [src_idx]
@@ -108,7 +112,7 @@ read_char:
     inc qword [src_idx]
     ret
 .eof:
-    xor rax, rax
+    or rax, -1
     ret
 
 ; Check if the current line starting from src_idx is empty or a comment
@@ -170,6 +174,8 @@ skip_spaces:
 skip_comment:
 .loop:
     call peek_char
+    cmp rax, -1
+    je .done
     cmp rax, 0
     je .done
     cmp rax, 10     ; LF
@@ -212,8 +218,9 @@ strcmp_len:
 ; Returns: rax = line, rdx = column
 get_error_loc:
     mov rax, [line_num]
-    ; Simple approximation of column for now
     mov rdx, [src_idx]
+    sub rdx, [line_start_idx]
+    inc rdx
     ret
 
 ; Main entry point to get next token
@@ -246,19 +253,33 @@ next_token:
     call peek_char
     cmp rax, 13
     jne .no_cr
-    call read_char
+    call read_char            ; consume CR
+    mov rax, [src_idx]
+    mov [line_start_idx], rax
+    inc qword [line_num]      ; count CR as line ending
+    ; Check if followed by LF (CR+LF)
+    call peek_char
+    cmp rax, 10
+    jne .no_lf
+    call read_char            ; consume LF after CR (already counted)
+    mov rax, [src_idx]
+    mov [line_start_idx], rax
+    jmp .lf_done
 .no_cr:
     call peek_char
     cmp rax, 10
     jne .no_lf
-    call read_char
+    call read_char            ; consume lone LF
+    mov rax, [src_idx]
+    mov [line_start_idx], rax
     inc qword [line_num]
 .no_lf:
+.lf_done:
     ; If at EOF after consuming empty lines, return TOK_EOF (or pending dedents)
     ; Otherwise retry for the next non-empty line
     call peek_char
     test rax, rax
-    jz .eof
+    js .eof
     jmp next_token
 
 .process_indent:
@@ -295,9 +316,15 @@ next_token:
 .indent_indent:
     ; Push r8d to stack
     mov eax, [indent_stack_len]
+    cmp eax, 32
+    jae .indent_overflow
     mov [indent_stack + eax * 4], r8d
     inc dword [indent_stack_len]
     mov dword [tok_type], TOK_INDENT
+    ret
+
+.indent_overflow:
+    mov dword [tok_type], TOK_EOF
     ret
 
 .indent_dedent:
@@ -336,13 +363,13 @@ next_token:
     ; Check EOF
     call peek_char
     test rax, rax
-    jz .eof
+    js .eof
     
     ; Save token start pointer
     mov rsi, [src_ptr]
     mov rdi, [src_idx]
-    lea rbx, [rsi + rdi]
-    mov [tok_str_ptr], rbx
+    lea r11, [rsi + rdi]
+    mov [tok_str_ptr], r11
     
     ; Handle Newline
     cmp rax, 13
@@ -423,8 +450,9 @@ next_token:
     cmp rax, '^'
     je .xor
 
-    ; Unknown token character, skip it or return EOF
-    jmp next_token
+    ; Unknown token character — return TOK_ERROR
+    mov dword [tok_type], TOK_ERROR
+    ret
 
 .eof:
     ; Check if we need to emit remaining dedents to reach 0
@@ -449,6 +477,8 @@ next_token:
     jne .no_cr2
     call read_char
 .no_cr2:
+    mov rax, [src_idx]
+    mov [line_start_idx], rax
     inc qword [line_num]
     mov byte [at_line_start], 1
     mov dword [tok_type], TOK_NEWLINE
@@ -477,21 +507,41 @@ next_token:
     call read_char ; consume opening quote
     mov rsi, [src_ptr]
     mov rdi, [src_idx]
-    lea rbx, [rsi + rdi]
-    mov [tok_str_ptr], rbx ; store string content start pointer
+    lea r11, [rsi + rdi]
+    mov [tok_str_ptr], r11 ; store string content start pointer
     
     xor r8, r8 ; string length count (using r8 instead of r12)
 .str_loop:
     call read_char
     test rax, rax
-    jz .str_error
+    js .str_error          ; EOF
+    jz .str_error          ; null byte not allowed in strings
     cmp rax, '"'
     je .str_done
+    cmp rax, '\'
+    je .str_escape
     cmp rax, 10
     je .str_newline
     inc r8
     jmp .str_loop
+.str_escape:
+    ; Consume the character after backslash (escape sequence)
+    call read_char
+    test rax, rax
+    js .str_error
+    cmp rax, 10
+    je .str_escape_newline
+    inc r8           ; count escape sequence as one character
+    jmp .str_loop
+.str_escape_newline:
+    mov rax, [src_idx]
+    mov [line_start_idx], rax
+    inc qword [line_num]
+    inc r8
+    jmp .str_loop
 .str_newline:
+    mov rax, [src_idx]
+    mov [line_start_idx], rax
     inc qword [line_num]
     inc r8
     jmp .str_loop
@@ -501,20 +551,31 @@ next_token:
     ret
 .str_error:
     mov dword [tok_type], TOK_EOF
+    mov qword [tok_str_ptr], 0
+    mov qword [tok_str_len], 0
     ret
 
 .char_literal:
     call read_char ; consume opening quote
     mov rsi, [src_ptr]
     mov rdi, [src_idx]
-    lea rbx, [rsi + rdi]
-    mov [tok_str_ptr], rbx
+    lea r11, [rsi + rdi]
+    mov [tok_str_ptr], r11
     
     call read_char
     test rax, rax
-    jz .str_error
+    js .str_error
+    ; Handle escape sequences in char literals
+    cmp rax, '\'
+    je .char_escape
     mov [tok_ival], rax ; store char ASCII/UTF-8 byte
-    
+    jmp .char_after
+.char_escape:
+    call read_char
+    test rax, rax
+    js .str_error
+    mov [tok_ival], rax ; store escaped char
+.char_after:
     call read_char
     cmp rax, 39 ; closing quote
     jne .str_error
@@ -537,18 +598,18 @@ next_token:
     inc rdi
     cmp rdi, [src_len]
     jae .num_loop
-    movzx rbx, byte [rsi + rdi]
-    cmp bl, 'x'
+    movzx r11, byte [rsi + rdi]
+    cmp r11b, 'x'
     je .hex_start
-    cmp bl, 'X'
+    cmp r11b, 'X'
     je .hex_start
-    cmp bl, 'b'
+    cmp r11b, 'b'
     je .bin_start
-    cmp bl, 'B'
+    cmp r11b, 'B'
     je .bin_start
-    cmp bl, 'o'
+    cmp r11b, 'o'
     je .oct_start
-    cmp bl, 'O'
+    cmp r11b, 'O'
     je .oct_start
     jmp .num_loop
 
@@ -670,12 +731,12 @@ next_token:
     inc rdi
     cmp rdi, [src_len]
     jae .num_done
-    movzx rbx, byte [rsi + rdi]
-    cmp bl, '.'
-    je .num_done ; '..' range operator
-    cmp bl, '0'
+    movzx r11, byte [rsi + rdi]
+    cmp r11b, '.'
+    je .num_done ; second dot — stop number parsing, dots lexed separately
+    cmp r11b, '0'
     jl .num_done
-    cmp bl, '9'
+    cmp r11b, '9'
     jg .num_done
     
     ; It is a float!
@@ -771,10 +832,19 @@ next_token:
 .num_done:
     test r9, r9
     jnz .num_finish
-    ; Check for scientific notation on plain integer that becomes float (e.g. 1e4)
-    ; For now just finalize as integer
+    ; Check for scientific notation on plain integer (e.g. 1e4 → 10000.0)
+    call peek_char
+    cmp rax, 'e'
+    je .int_to_sci
+    cmp rax, 'E'
+    je .int_to_sci
     mov [tok_ival], r8
     mov dword [tok_type], TOK_INT_LIT
+    jmp .num_finish
+.int_to_sci:
+    ; Promote integer to float and enter scientific notation handler
+    cvtsi2sd xmm0, r8
+    movq xmm1, qword [.float_ten]
 
 .num_finish:
     ; Calculate token string length
@@ -939,7 +1009,7 @@ section .text
     test rax, rax
     jz .not_seq
     mov dword [tok_type], TOK_TYPE
-    mov qword [tok_ival], 6 ; TYPE_SEQ
+    mov qword [tok_ival], TYPE_SEQ
     ret
 .not_seq:
     mov rdi, str_dict
@@ -949,7 +1019,7 @@ section .text
     test rax, rax
     jz .not_dict
     mov dword [tok_type], TOK_TYPE
-    mov qword [tok_ival], 7 ; TYPE_DICT
+    mov qword [tok_ival], TYPE_DICT
     ret
 .not_dict:
     mov rdi, str_null
@@ -970,6 +1040,24 @@ section .text
     mov dword [tok_type], TOK_OUTPUT
     ret
 .not_output:
+    mov rdi, str_prot
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_prot
+    mov dword [tok_type], TOK_PROT
+    ret
+.not_prot:
+    mov rdi, str_return
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_return
+    mov dword [tok_type], TOK_RETURN
+    ret
+.not_return:
     mov rdi, str_true
     mov rsi, [tok_str_ptr]
     mov rdx, [tok_str_len]

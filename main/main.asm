@@ -4,17 +4,17 @@
 %include "include/rex_defs.inc"
 
 section .data
-    usage_msg       db "Usage: rexc <source.rex> [-o <output>]", 10, 0
+    usage_msg       db "Usage: rexc <source.rex> [-o <output>]", 10
     usage_len       equ $ - usage_msg
     
-    err_open_in     db "Error: Cannot open source file", 10, 0
+    err_open_in     db "Error: Cannot open source file", 10
     err_open_in_len equ $ - err_open_in
     
-    err_open_out    db "Error: Cannot open output file", 10, 0
+    err_open_out    db "Error: Cannot open output file", 10
     err_open_out_len equ $ - err_open_out
 
     default_out     db "a.out", 0
-    success_msg     db "Compilation successful!", 10, 0
+    success_msg     db "Compilation successful!", 10
     success_len     equ $ - success_msg
 
 section .bss
@@ -102,6 +102,10 @@ _start:
     syscall
     mov [src_file_size], rax
     
+    ; Bounds check: file size must be < SRC_FILE_MAX
+    cmp rax, SRC_FILE_MAX
+    jge .err_file_too_large
+    
     ; Seek back to 0 (sys_lseek SEEK_SET)
     mov rax, 8          ; sys_lseek
     mov rdi, r13
@@ -115,7 +119,10 @@ _start:
     mov rsi, src_file_buf
     mov rdx, [src_file_size]
     syscall
-    
+
+    cmp rax, 0
+    jl .err_read_source
+
     ; Close source fd
     mov rax, 3          ; sys_close
     mov rdi, r13
@@ -166,12 +173,18 @@ _start:
     mov rsi, out_buffer
     mov edx, [out_idx]
     syscall
-    
+
+    cmp rax, 0
+    jl .err_write_output
+
     ; Close output fd
     mov rax, 3          ; sys_close
     mov rdi, r13
     syscall
-    
+
+    cmp rax, 0
+    jl .err_close_output
+
     ; Print success message
     mov rax, 1          ; sys_write
     mov rdi, 1          ; stdout
@@ -213,6 +226,50 @@ _start:
     mov rdx, err_open_out_len
     syscall
     
+    mov rax, 60
+    mov rdi, 1
+    syscall
+
+.err_file_too_large:
+    mov rax, 1
+    mov rdi, 2
+    mov rsi, err_open_in
+    mov rdx, err_open_in_len
+    syscall
+
+    mov rax, 60
+    mov rdi, 1
+    syscall
+
+.err_write_output:
+    mov rax, 1
+    mov rdi, 2
+    mov rsi, err_open_out
+    mov rdx, err_open_out_len
+    syscall
+
+    mov rax, 60
+    mov rdi, 1
+    syscall
+
+.err_read_source:
+    mov rax, 1
+    mov rdi, 2
+    mov rsi, err_open_in
+    mov rdx, err_open_in_len
+    syscall
+
+    mov rax, 60
+    mov rdi, 1
+    syscall
+
+.err_close_output:
+    mov rax, 1
+    mov rdi, 2
+    mov rsi, err_open_out
+    mov rdx, err_open_out_len
+    syscall
+
     mov rax, 60
     mov rdi, 1
     syscall

@@ -87,13 +87,11 @@ emit_b:
 
 ; Emit 4 bytes
 emit_d:
-    push rbx
     mov ecx, [out_idx]
     cmp ecx, OUT_BUF_MAX - 4
     jae .overflow
     mov [out_buffer + rcx], edi
     add dword [out_idx], 4
-    pop rbx
     ret
 .overflow:
     mov rax, 60
@@ -102,13 +100,11 @@ emit_d:
 
 ; Emit 8 bytes
 emit_q:
-    push rbx
     mov ecx, [out_idx]
     cmp ecx, OUT_BUF_MAX - 8
     jae .overflow
     mov [out_buffer + rcx], rdi
     add dword [out_idx], 8
-    pop rbx
     ret
 .overflow:
     mov rax, 60
@@ -122,6 +118,11 @@ emit_block:
     push rcx
     mov eax, ecx            ; save length before rep movsb destroys rcx
     mov edi, [out_idx]      ; read 32-bit out_idx, zero-extend to rdi
+    ; Bounds check: out_idx + length must not exceed buffer
+    add edi, eax
+    cmp edi, OUT_BUF_MAX
+    jae .overflow
+    sub edi, eax            ; restore original out_idx
     lea rdi, [out_buffer + rdi]
     ; rsi already points to source
     ; rcx contains length
@@ -131,6 +132,10 @@ emit_block:
     pop rdi
     pop rsi
     ret
+.overflow:
+    mov rax, 60
+    mov rdi, 2
+    syscall
 
 ; Write ELF Headers and Runtime Blobs
 codegen_init:
@@ -310,6 +315,11 @@ emit_runtime_call:
 
 ; Emit instruction selection for all IR records
 codegen_emit_all:
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbx
     call emit_prologue
 
     mov r12d, [ir_count]
@@ -478,6 +488,11 @@ codegen_emit_all:
     jmp .loop
 
 .done:
+    pop rbx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
     ret
 
 .load_imm:
@@ -1577,10 +1592,10 @@ cge_popcount_op:
     call store_dst_spill
     jmp  codegen_emit_all.next_ir
 cge_popcount_byte:
-    ; mov rax, r(src1): 4C 89 (0xC0|(src1<<3))  → rax
+    ; mov rax, r(src1): 4C 8B (0xC0|(src1<<3))  → rax
     mov dil, 0x4C
     call emit_b
-    mov dil, 0x89
+    mov dil, 0x8B
     call emit_b
     mov al, r15b
     shl al, 3
@@ -1678,7 +1693,7 @@ cge_ctz_byte:
     ; mov rax, r(src1)
     mov dil, 0x4C
     call emit_b
-    mov dil, 0x89
+    mov dil, 0x8B
     call emit_b
     mov al, r15b
     shl al, 3
@@ -2426,10 +2441,10 @@ cge_char_pred_op:
     jmp  codegen_emit_all.next_ir
 
 cge_cpred_emit_load_rax:
-    ; mov rax, r(src1): 4C 89 (0xC0|(src1<<3))
+    ; mov rax, r(src1): 4C 8B (0xC0|(src1<<3))
     mov dil, 0x4C
     call emit_b
-    mov dil, 0x89
+    mov dil, 0x8B
     call emit_b
     mov al, r15b
     shl al, 3

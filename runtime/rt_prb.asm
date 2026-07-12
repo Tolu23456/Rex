@@ -1,7 +1,6 @@
 ; rt_prb.asm - print tri-state bool (RDI) to stdout followed by newline
 BITS 64
 
-    push rbx
     push rbp
     mov rbp, rsp
 
@@ -30,7 +29,6 @@ BITS 64
 
     mov rsp, rbp
     pop rbp
-    pop rbx
     ret
 
 .str_true    db "true",    10

@@ -15,6 +15,7 @@ section .data
     err_uninit      db "Compile Error: Variable read before initialization", 0
     err_type_mismatch db "Compile Error: Type mismatch", 0
     err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable name", 0
+    err_immutable   db "Compile Error: Cannot mutate an immutable variable", 0
     err_newline_req db "Syntax Error: Expected newline or EOF at end of statement", 0
     ; Bug 5 fix: distinct message for symbol-table-full (was reusing err_dup_decl)
     err_sym_full    db "Compile Error: Symbol table full (too many variables)", 0
@@ -98,10 +99,13 @@ section .text
     extern sym_is_init
     extern sym_set_init
     extern sym_set_mutable
+    extern sym_is_mutable
     extern sym_get_offset
 
     extern alloc_vreg
     extern emit_ir
+    extern type_name_buf
+    extern type_name_idx
 
 ; Advance to the next token
 advance:
@@ -298,6 +302,28 @@ parse_stmt:
     
     mov rsi, [tok_str_ptr]
     mov rdx, [tok_str_len]
+    push rsi
+    push rdx
+    mov rcx, rdx
+    lea rdi, [type_name_buf]
+    cmp rcx, 4095
+    jle .field_name_ok
+    mov rcx, 4095
+.field_name_ok:
+    test rcx, rcx
+    jz .field_name_done
+    xor r8, r8
+.field_name_copy:
+    movzx rax, byte [rsi + r8]
+    mov [rdi + r8], al
+    inc r8
+    cmp r8, rcx
+    jl .field_name_copy
+.field_name_done:
+    mov byte [rdi + rcx], 0
+    mov r8, rcx ; save length
+    pop rdx
+    pop rsi
     call advance ; consume IDENT
     
     mov edi, TOK_NEWLINE
@@ -305,6 +331,8 @@ parse_stmt:
     
     ; Add field
     mov rdi, r12 ; struct_type_id
+    lea rsi, [type_name_buf] ; field_name_ptr (stable copy)
+    mov rdx, r8 ; field_name_len
     mov rcx, r14 ; field_type_id
     mov r8, r13 ; field_offset
     extern type_struct_add_field
@@ -624,6 +652,10 @@ parse_stmt:
     je .undef_error
     
     mov r14, rax ; Save symbol index
+    mov rdi, r14
+    call sym_is_mutable
+    test rax, rax
+    jz .mutation_not_allowed
     call advance ; consume IDENT
     
     mov edi, TOK_ASSIGN
@@ -679,6 +711,10 @@ parse_stmt:
 
 .undef_error:
     mov rdi, err_undef
+    jmp compile_error
+
+.mutation_not_allowed:
+    mov rdi, err_immutable
     jmp compile_error
 
 .ident_stmt:
@@ -847,7 +883,7 @@ parse_null_coalesce:
     mov eax, [current_token]
     cmp eax, TOK_QQ
     jne .done
-    mov r14, IR_OR
+    mov r14, IR_NULL_COALESCE
     call advance
     push r12
     call parse_bitwise_or
@@ -904,6 +940,10 @@ parse_bool_or:
     mov r15, rax
     pop r12
     ; Both operands must be bool
+    cmp r13, TYPE_BOOL
+    jne .bool_type_err
+    cmp rdx, TYPE_BOOL
+    jne .bool_type_err
     push r12
     push r15
     call alloc_vreg
@@ -930,6 +970,9 @@ parse_bool_or:
     pop r12
     pop rbx
     ret
+.bool_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
 
 ; Parse Bool AND expression ('and' = min)
 parse_bool_and:
@@ -950,6 +993,10 @@ parse_bool_and:
     call parse_bitwise_or
     mov r15, rax
     pop r12
+    cmp r13, TYPE_BOOL
+    jne .bool_and_type_err
+    cmp rdx, TYPE_BOOL
+    jne .bool_and_type_err
     push r12
     push r15
     call alloc_vreg
@@ -976,6 +1023,9 @@ parse_bool_and:
     pop r12
     pop rbx
     ret
+.bool_and_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
 
 parse_bitwise_or:
     push rbx
@@ -1760,7 +1810,8 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_int_rol
-    lea rdi, [str_rotate_right];call ident_is
+    lea rdi, [str_rotate_right]
+    call ident_is
     test rax,rax
     jnz .pp_int_ror
     jmp .pp_method_err
@@ -2616,6 +2667,17 @@ parse_postfix:
 .pp_bool_to_int:
     mov edi, TOK_RPAREN
     call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CAST_BTI
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
     mov r13, TYPE_INT
     jmp .pp_loop
 
@@ -2669,7 +2731,9 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_char_is_alnum
-    lea rdi, [str_is_whitespace];call ident_is;test rax,rax
+    lea rdi, [str_is_whitespace]
+    call ident_is
+    test rax,rax
     jnz .pp_char_is_space
     lea rdi, [str_is_upper]
     call ident_is
@@ -2683,7 +2747,8 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_char_is_punct
-    lea rdi, [str_is_printable];call ident_is
+    lea rdi, [str_is_printable]
+    call ident_is
     test rax,rax
     jnz .pp_char_is_print
     lea rdi, [str_is_ascii]
@@ -2792,12 +2857,34 @@ parse_postfix:
 .pp_char_to_int:
     mov edi, TOK_RPAREN
     call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CAST_CTI
+    mov rsi, TYPE_CHAR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
     mov r13, TYPE_INT
     jmp .pp_loop
 
 .pp_char_to_byte:
     mov edi, TOK_RPAREN
     call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CAST_CTB
+    mov rsi, TYPE_CHAR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
     mov r13, TYPE_BYTE
     jmp .pp_loop
 
@@ -2848,12 +2935,18 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_byte_to_char
-    lea rdi, [str_swap_nibbles];call ident_is
+    lea rdi, [str_swap_nibbles]
+    call ident_is
     test rax,rax
     jnz .pp_byte_swap_nib
-    lea rdi, [str_leading_zeros];call ident_is;test rax,rax
+    lea rdi, [str_leading_zeros]
+    call ident_is
+    test rax,rax
     jnz .pp_byte_clz8
-    lea rdi, [str_trailing_zeros];call ident_is;test rax,rax;jnz .pp_byte_ctz
+    lea rdi, [str_trailing_zeros]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_ctz
     jmp .pp_method_err
 
 .pp_byte_popcount:
@@ -2944,12 +3037,34 @@ parse_postfix:
 .pp_byte_to_int:
     mov edi, TOK_RPAREN
     call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CAST_BCI
+    mov rsi, TYPE_BYTE
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
     mov r13, TYPE_INT
     jmp .pp_loop
 
 .pp_byte_to_char:
     mov edi, TOK_RPAREN
     call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CAST_BTC
+    mov rsi, TYPE_BYTE
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
     mov r13, TYPE_CHAR
     jmp .pp_loop
 

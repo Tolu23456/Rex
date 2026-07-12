@@ -1,10 +1,6 @@
 ; rt_prq.asm - print null-terminated error in RDI to stderr, then exit 1
 BITS 64
 
-    push rbx
-    push rbp
-    mov rbp, rsp
-    
     mov rsi, rdi        ; error string pointer
     test rsi, rsi
     jz .exit

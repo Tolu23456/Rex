@@ -13,6 +13,12 @@ IR_LOAD_BOOL    equ 0x06
 IR_LEA_VAR      equ 0x08
 IR_CAST_ITF     equ 0x09  ; int → float (cvtsi2sd)
 IR_CAST_FTI     equ 0x0A  ; float → int (cvttsd2si, truncate toward zero)
+IR_CAST_BTI     equ 0x0B  ; bool → int (no-op, same register repr)
+IR_CAST_CTI     equ 0x0C  ; char → int (no-op)
+IR_CAST_CTB     equ 0x0D  ; char → byte (no-op)
+IR_CAST_BCI     equ 0x0E  ; byte → int (no-op)
+IR_CAST_BTC     equ 0x0F  ; byte → char (no-op)
+IR_NULL_COALESCE equ 0x10 ; dst = src1 != 0 ? src1 : src2 (integer)
 
 ; Category 2: Integer Arithmetic
 IR_ADD          equ 0x11

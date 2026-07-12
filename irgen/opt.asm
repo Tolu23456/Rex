@@ -53,6 +53,11 @@ run_optimizations:
     ret
 
 pass_constant_folding:
+    ; Scan for branching IR opcodes. If any exist, skip this pass entirely
+    ; because linear-scan constant folding is unsound across branches.
+    call has_branching_ir
+    test rax, rax
+    jnz .done              ; branching detected — skip pass
     ; Initialize state
     mov rcx, VREG_MAX
     lea rdi, [vreg_is_const]
@@ -212,6 +217,15 @@ pass_constant_folding:
     jne .chk_mod
     test r9, r9
     jz .next
+    ; Guard against INT64_MIN / -1 (signed overflow fault)
+    cmp r9, -1
+    jne .div_safe
+    test r8, r8
+    jns .div_safe
+    lea rax, [r8 + 1]
+    test rax, rax
+    jz .next
+.div_safe:
     mov rax, r8
     cqo
     idiv r9
@@ -222,6 +236,15 @@ pass_constant_folding:
     jne .chk_and
     test r9, r9
     jz .next
+    ; Guard against INT64_MIN % -1 (signed overflow fault)
+    cmp r9, -1
+    jne .mod_safe
+    test r8, r8
+    jns .mod_safe
+    lea rax, [r8 + 1]
+    test rax, rax
+    jz .next
+.mod_safe:
     mov rax, r8
     cqo
     idiv r9
@@ -297,6 +320,11 @@ pass_constant_folding:
 
 
 pass_dead_store_elimination:
+    ; Scan for branching IR opcodes. If any exist, skip this pass entirely
+    ; because reverse-scan DSE is unsound across branches.
+    call has_branching_ir
+    test rax, rax
+    jnz .done
     mov rcx, VAR_MAX
     lea rdi, [var_is_read]
     xor eax, eax
@@ -476,6 +504,8 @@ pass_peephole:
     je .arith
     cmp eax, IR_DIV
     je .arith
+    cmp eax, IR_MOD
+    je .arith
     jmp .next
 
 .arith:
@@ -548,8 +578,11 @@ pass_peephole:
     cmp eax, IR_MUL
     je .zero_out
     cmp eax, IR_DIV
-    je .zero_out
-    jmp .next
+    jne .next
+    ; For float: 0.0 / 0.0 = NaN, so don't fold
+    cmp byte [r13 + 1], TYPE_FLOAT
+    je .next
+    jmp .zero_out
 
 .src1_one:
     cmp eax, IR_MUL
@@ -570,7 +603,15 @@ pass_peephole:
     jmp .next
 
 .zero_out:
+    ; Use IR_LOAD_FIMM for float types, IR_LOAD_IMM for others
+    movzx eax, byte [r13 + 1]  ; type byte
+    cmp al, TYPE_FLOAT
+    je .zero_out_float
     mov byte [r13 + 0], IR_LOAD_IMM
+    jmp .zero_out_common
+.zero_out_float:
+    mov byte [r13 + 0], IR_LOAD_FIMM
+.zero_out_common:
     mov qword [r13 + 8], 0
     mov word [r13 + 4], 0
     mov word [r13 + 6], 0
@@ -641,7 +682,10 @@ pass_apply_aliases:
 ; ============================================================
 opt_follow_alias:
     movzx rax, cx           ; current = input
+    mov r9d, VREG_MAX       ; iteration limit for cycle detection
 .follow:
+    dec r9d
+    jz .chain_end           ; cycle or depth limit — stop
     movzx rdx, word [vreg_alias + rax * 2]
     test dx, dx
     jz .chain_end           ; no further alias
@@ -655,4 +699,34 @@ opt_follow_alias:
     ret                     ; rax = canonical (non-zero, different)
 .no_change:
     xor eax, eax            ; 0 = "no alias applied"
+    ret
+
+
+; ============================================================
+;  Helper: has_branching_ir
+;  Scans IR buffer for IR_JCC, IR_JMP, or IR_LABEL opcodes.
+;  Returns rax = 1 if branching IR found, 0 otherwise.
+; ============================================================
+has_branching_ir:
+    mov ecx, [ir_count]
+    test ecx, ecx
+    jz .no_branches
+    xor edx, edx            ; index = 0
+.scan:
+    imul eax, edx, IR_RECORD_SIZE
+    movzx eax, byte [ir_buffer + rax]
+    cmp eax, IR_JCC
+    je .found
+    cmp eax, IR_JMP
+    je .found
+    cmp eax, IR_LABEL
+    je .found
+    inc edx
+    cmp edx, ecx
+    jb .scan
+.no_branches:
+    xor eax, eax
+    ret
+.found:
+    mov eax, 1
     ret

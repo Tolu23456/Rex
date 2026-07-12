@@ -10,6 +10,21 @@ BITS 64
     cmp rax, 0
     jge .positive
 
+    ; Check for INT64_MIN (negation would overflow)
+    mov rcx, rax
+    inc rcx
+    jnz .not_min
+    ; INT64_MIN: print directly from constant
+    lea rsi, [rel .str_min]
+    mov rdx, 20
+    push rax
+    mov rax, 1
+    mov rdi, 1
+    syscall
+    pop rax
+    jmp .print_newline
+.not_min:
+
     ; Print negative sign '-'
     push rax
     mov rax, 1          ; sys_write
@@ -45,6 +60,7 @@ BITS 64
     mov rdi, 1          ; stdout
     syscall
 
+.print_newline:
     ; Print newline
     mov byte [rbp-1], 10
     lea rsi, [rbp-1]
@@ -57,6 +73,8 @@ BITS 64
     pop rbp
     pop rbx
     ret
+
+.str_min db "-9223372036854775808"
 
 ; Pad to exactly 512 bytes
 times 512 - ($ - $$) db 0

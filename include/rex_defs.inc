@@ -8,6 +8,7 @@ TOK_FLOAT_LIT   equ 3
 TOK_STR_LIT     equ 4
 TOK_BOOL_LIT    equ 5  ; true, false, neutral
 TOK_CHAR_LIT    equ 6
+TOK_ERROR       equ 7  ; unrecognized character
 
 ; Keywords
 TOK_TYPE        equ 10 ; int, float, bool, str, char, byte
@@ -72,12 +73,12 @@ SCOPE_BLOCK     equ 2
 ; Symbol Table Entry Layout (64 bytes total)
 ; Offset  Size  Field
 ; 0       32    name (null-terminated string)
-; 32      1     type (TYPE_*)
-; 33      1     scope (SCOPE_*)
-; 34      1     is_mutable (0 = no, 1 = yes)
-; 35      1     is_init (0 = no, 1 = yes)
-; 36      4     offset (offset on stack or memory address)
-; 40      24    _pad (unused)
+; 32      4     type_id (dword, TYPE_*)
+; 36      1     scope (SCOPE_*)
+; 37      1     is_mutable (0 = no, 1 = yes)
+; 38      1     is_init (0 = no, 1 = yes)
+; 40      4     offset (offset on stack or memory address)
+; 44      20    _pad (unused)
 SYM_ENTRY_SIZE  equ 64
 SYM_MAX         equ 256
 

@@ -149,7 +149,6 @@ sym_add:
 
     ; Increment sym_count
     inc dword [sym_count]
-    mov rax, r15 ; return index
     mov eax, ebx
     
     pop r15
