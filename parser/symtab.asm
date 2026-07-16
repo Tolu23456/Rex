@@ -26,13 +26,113 @@ section .text
     global sym_is_init
     global sym_set_init
     global sym_get_offset
-    global sym_set_offset
     global sym_find_by_offset
+    global sym_set_private
+    global sym_remove_block_scope
 
 ; Clear the symbol table
 sym_clear:
     mov dword [sym_count], 0
     mov dword [current_stack_offset], VAR_STORAGE_BASE
+    ret
+
+; Remove all block-scoped symbols (SCOPE_BLOCK) from the symbol table.
+; Called when exiting an indented block to destroy __-prefixed variables.
+; rdi = saved sym_count at block entry (only remove symbols added after this)
+sym_remove_block_scope:
+    push rbx
+    push r12
+    push r13
+
+    mov r12d, edi           ; r12 = block_start_count
+    mov ebx, [sym_count]
+
+    ; Walk backwards from current sym_count to block_start_count
+    ; Remove any SCOPE_BLOCK entries by shifting subsequent entries down
+    ; We use a forward scan-and-compact approach:
+    ;   dst = block_start_count (where we write surviving entries)
+    ;   src scans from block_start_count to sym_count
+
+    mov r12d, edi           ; r12 = block_start_count (dst boundary)
+    xor r13d, r13d          ; r13 = dst index, starts at block_start_count
+    mov r13d, r12d
+
+    ; Scan entries from block_start_count onward
+    ; For each entry: if SCOPE_BLOCK, skip it (don't copy); otherwise keep it
+    ; At the end, also restore current_stack_offset to the max offset of surviving entries
+
+    ; First pass: compact — move non-block-scoped entries down
+    mov ecx, r12d           ; ecx = src index
+.compact_loop:
+    cmp ecx, [sym_count]
+    jae .compact_done
+
+    imul eax, ecx, SYM_ENTRY_SIZE
+    lea rsi, [sym_table + rax]
+
+    ; Check if this entry is SCOPE_BLOCK
+    movzx eax, byte [rsi + 36] ; scope
+    cmp eax, SCOPE_BLOCK
+    je .skip_entry            ; block-scoped → remove
+
+    ; Keep this entry: copy to dst position (if dst != src)
+    cmp r13d, ecx
+    je .no_copy
+
+    imul eax, r13d, SYM_ENTRY_SIZE
+    lea rdi, [sym_table + rax]
+
+    ; Copy SYM_ENTRY_SIZE bytes from rsi to rdi
+    push rcx
+    mov rcx, SYM_ENTRY_SIZE
+    rep movsb
+    pop rcx
+
+.no_copy:
+    inc r13d
+.skip_entry:
+    inc ecx
+    jmp .compact_loop
+
+.compact_done:
+    ; Update sym_count to new compacted count
+    mov [sym_count], r13d
+
+    ; Recompute current_stack_offset: find max (offset + size) among surviving entries
+    ; For simplicity, reset to VAR_STORAGE_BASE then walk all surviving entries
+    mov dword [current_stack_offset], VAR_STORAGE_BASE
+
+    xor ebx, ebx
+.recalc_loop:
+    cmp ebx, r13d
+    jae .recalc_done
+
+    imul eax, ebx, SYM_ENTRY_SIZE
+    lea rsi, [sym_table + rax]
+
+    ; Get type and its size
+    push rbx
+    push rsi
+    mov edi, [rsi + 32]       ; type_id
+    extern type_get_size
+    call type_get_size         ; rax = size
+    pop rsi
+    pop rbx
+
+    ; Get this entry's offset
+    mov edx, [rsi + 40]       ; offset
+    add edx, eax              ; offset + size
+    cmp edx, [current_stack_offset]
+    jbe .recalc_next
+    mov [current_stack_offset], edx
+.recalc_next:
+    inc ebx
+    jmp .recalc_loop
+
+.recalc_done:
+    pop r13
+    pop r12
+    pop rbx
     ret
 
 ; Compare entry name at rdi (null-terminated) with string at rsi of length rdx
@@ -134,6 +234,7 @@ sym_add:
     mov [rdi + 36], r15b ; scope
     mov byte [rdi + 37], 0 ; is_mutable = 0 (by default)
     mov byte [rdi + 38], 0 ; is_init = 0 (by default)
+    mov byte [rdi + 39], 0 ; is_private = 0 (by default)
     
     ; Set offset to current_stack_offset
     mov edx, [current_stack_offset]
@@ -270,6 +371,17 @@ sym_set_offset:
     ; rdi = index, rsi = offset
     imul edi, edi, SYM_ENTRY_SIZE
     mov [sym_table + rdi + 40], esi
+    ret
+
+sym_is_private:
+    imul edi, edi, SYM_ENTRY_SIZE
+    movzx rax, byte [sym_table + rdi + 39]
+    ret
+
+sym_set_private:
+    ; rdi = index, rsi = private (0/1)
+    imul edi, edi, SYM_ENTRY_SIZE
+    mov [sym_table + rdi + 39], sil
     ret
 
 sym_find_by_offset:

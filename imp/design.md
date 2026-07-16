@@ -52,7 +52,7 @@ Rex has one immutability rule that covers the entire language:
 > `:name =` anywhere in its scope. The `:` sigil marks every mutation site.**
 
 There is no `let`, `var`, `mut`, or `const` keyword. The compiler infers
-mutability from usage.
+mutability from usage. The `:` sigil appears **only** at mutation sites — never in declarations.
 
 ```rex
 int x = 5           // immutable — no write site exists
@@ -102,7 +102,7 @@ output(scope(steps))        // "local"
 // Immutable with value (true compile-time constant — may be inlined/folded)
 int age = 13
 
-// Mutable with value
+// Mutable with value — mutability is established retroactively by the :count = site below
 int count = 0
 :count = count + 1
 
@@ -112,6 +112,10 @@ int total
 ```
 
 Reading an uninitialised variable is a **compile-time error**.
+
+**The `:` sigil is never used in declarations.** All declarations are immutable by default.
+Mutability is established retroactively when `:name =` appears anywhere in the same scope.
+There is no way to declare a variable as mutable at the point of declaration.
 
 ### 3.3 Type Inference
 
@@ -886,6 +890,43 @@ All six operators: `==`, `!=`, `<`, `>`, `<=`, `>=`
 For `str`: lexicographic byte comparison.
 For `bool`: signed integer comparison over `false (−1) < neutral (0) < true (1)`.
 
+**Chained comparisons** — multiple comparisons can be chained in a single
+expression. Each adjacent pair is evaluated and the results are AND-ed:
+
+```rex
+if 1 < x < 10:           // means: (1 < x) and (x < 10)
+    output("in range")
+
+if a <= b <= c <= d:      // means: (a <= b) and (b <= c) and (c <= d)
+    output("non-decreasing")
+
+bool valid = 0 < score <= 100   // true if score is between 1 and 100 inclusive
+```
+
+The middle operand(s) are evaluated **once** — `f(x) < g(x) < h(x)` calls
+each function exactly once, not twice. This is equivalent to writing
+`f(x) < g(x) and g(x) < h(x>` without the redundant call to `g(x)`.
+
+Any mix of comparison operators is valid in a chain:
+```rex
+if a < b == c <= d:       // (a < b) and (b == c) and (c <= d)
+```
+
+A chain of length 1 (single comparison) behaves identically to a standalone
+comparison. Chaining is purely syntactic sugar — the compiler emits one
+`IR_CMP_BOOL` per adjacent pair and one `IR_BOOL_AND` to combine them.
+
+Chained comparisons work naturally in `if` and `while` conditions:
+
+```rex
+int x = 5
+if 1 < x < 10:
+    output("in range")          // prints
+
+while 0 <= count < 100:
+    :count += 1
+```
+
 ### 5.6 Identity and Membership
 
 ```rex
@@ -962,6 +1003,50 @@ prot exit(int code):
 ```
 
 `$` returns `rax`. Only available inside `#unsafe` protocols.
+
+### 5.11 Compound Assignment
+
+Rex supports compound assignment operators that combine a binary operation
+with assignment. These are syntactic sugar for `:x = x op value`:
+
+| Operator | Example        | Desugars to         |
+|----------|---------------|---------------------|
+| `+=`     | `:x += 1`     | `:x = x + 1`       |
+| `-=`     | `:x -= 1`     | `:x = x - 1`       |
+| `*=`     | `:x *= 2`     | `:x = x * 2`       |
+| `/=`     | `:x /= 3`     | `:x = x / 3`       |
+| `%=`     | `:x %= 5`     | `:x = x % 5`       |
+| `&=`     | `:x &= mask`  | `:x = x & mask`    |
+| `\|=`    | `:x \|= flag` | `:x = x \| flag`   |
+| `^=`     | `:x ^= val`   | `:x = x ^ val`     |
+| `<<=`    | `:x <<= 2`    | `:x = x << 2`      |
+| `>>=`    | `:x >>= 1`    | `:x = x >> 1`      |
+
+```rex
+int total = 0
+:total += 10        // total is now 10
+:total += 20        // total is now 30
+:total /= 3         // total is now 10
+
+int flags = 0xFF
+:flags &= 0x0F      // flags is now 0x0F
+:flags |= 0xF0      // flags is now 0xFF
+
+int bits = 1
+:bits <<= 8         // bits is now 256
+:bits >>= 4         // bits is now 16
+```
+
+**Rules:**
+- The `:` sigil is required if the variable was not already marked mutable
+  in a prior `:name =` site in the same scope. Compound assignment is a
+  mutation, so it follows the same mutability rules as plain assignment.
+- The right-hand side expression is fully evaluated before the operation.
+- Only `int` and `byte` types support all compound operators. `float`
+  supports `+=`, `-=`, `*=`, `/=` only.
+- Chaining is not allowed: `:a += b += c` is a syntax error.
+- The operator and `=` must be contiguous with no whitespace: `+ =` is
+  not the same as `+=`.
 
 ---
 

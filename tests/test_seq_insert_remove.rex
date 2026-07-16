@@ -1,0 +1,15 @@
+// test_seq_insert_remove.rex
+// Tests seq.insert(i, x) and seq.remove(i)
+seq[int] s = [10, 20, 30]
+
+// insert at end
+:s.insert(3, 40)
+output(s.len())
+
+// insert at beginning
+:s.insert(0, 5)
+output(s.len())
+
+// remove from middle (index 2, which is 20)
+:s.remove(2)
+output(s.len())

@@ -258,6 +258,25 @@ allocate_registers:
 .p1_src2:
     movzx eax, word [r13 + 6]      ; src2
     test ax, ax
+    jz .p1_aux
+    cmp eax, GRAPHCOL_VMAX
+    jae .p1_aux
+    mov [gc_last_use + rax * 4], ebx
+    inc dword [gc_use_count + rax * 4]
+
+.p1_aux:
+    ; Track aux vreg for instructions that use aux as a vreg operand
+    movzx eax, byte [r13]          ; opcode
+    cmp al, IR_SEQ_STORE
+    je .p1_aux_track
+    cmp al, IR_SEQ_INSERT
+    je .p1_aux_track
+    cmp al, IR_DICT_STORE
+    je .p1_aux_track
+    jmp .p1_hint
+.p1_aux_track:
+    movzx eax, word [r13 + 16]     ; aux vreg (lower 2 bytes of 8-byte field)
+    test ax, ax
     jz .p1_hint
     cmp eax, GRAPHCOL_VMAX
     jae .p1_hint
@@ -392,7 +411,6 @@ allocate_registers:
     je .p1_do_hint
     ; Comparison
     cmp al, IR_CMP_BOOL
-    je .p1_do_hint
     je .p1_do_hint
     jmp .phase1_next
 

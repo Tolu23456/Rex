@@ -39,4 +39,3 @@ BITS 64
     ret
 
 ; Pad to exactly 512 bytes
-times 512 - ($ - $$) db 0

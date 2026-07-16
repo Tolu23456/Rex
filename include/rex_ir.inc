@@ -10,6 +10,7 @@ IR_LOAD_VAR     equ 0x03
 IR_STORE_VAR    equ 0x04
 IR_LOAD_STR     equ 0x05
 IR_LOAD_BOOL    equ 0x06
+IR_LOAD_DEREF_BYTE equ 0x07 ; dst = byte at [src1 + imm]
 IR_LEA_VAR      equ 0x08
 IR_CAST_ITF     equ 0x09  ; int → float (cvtsi2sd)
 IR_CAST_FTI     equ 0x0A  ; float → int (cvttsd2si, truncate toward zero)
@@ -117,6 +118,46 @@ IR_OUT_STR      equ 0x64
 IR_OUT_CHAR     equ 0x65  ; print char (1 byte via rt_prc)
 IR_HALT         equ 0x67
 
+; Category 8: Collection Operations (0x70-0x7F)
+IR_SEQ_NEW      equ 0x70  ; dst = new seq with capacity from imm
+IR_SEQ_PUSH     equ 0x71  ; seq_push(seq, value)
+IR_SEQ_LOAD     equ 0x72  ; dst = seq[index]
+IR_SEQ_STORE    equ 0x73  ; seq[index] = value
+IR_SEQ_LEN      equ 0x74  ; dst = len(seq)
+IR_ARR_NEW      equ 0x75  ; dst = new arr with size from imm
+IR_ARR_LOAD     equ 0x76  ; dst = arr[index]
+IR_ARR_STORE    equ 0x77  ; arr[index] = value
+IR_SEQ_POP      equ 0x78  ; dst = pop(seq)
+IR_SEQ_INSERT   equ 0x79  ; seq.insert(index, value) — void
+IR_SEQ_REMOVE   equ 0x7A  ; dst = seq.remove(index)
+
+; Category 8b: Dict Operations (0x7B-0x7F)
+IR_DICT_NEW     equ 0x7B  ; dst = new dict
+IR_DICT_LOAD    equ 0x7C  ; dst = dict[key]
+IR_DICT_STORE   equ 0x7D  ; dict[key] = value
+IR_DICT_LEN     equ 0x7E  ; dst = len(dict)
+
+; Category 8c: Extended Seq Operations (0x83-0x8F)
+IR_SEQ_FIRST    equ 0x83  ; dst = seq[0]
+IR_SEQ_LAST     equ 0x84  ; dst = seq[len-1]
+IR_SEQ_CONTAINS equ 0x85  ; dst = bool(seq contains value)
+IR_SEQ_INDEX_OF equ 0x86  ; dst = index of value, -1 if not found
+IR_SEQ_COPY     equ 0x87  ; dst = copy of seq
+IR_SEQ_REVERSE  equ 0x88  ; reverse seq in place
+IR_SEQ_SUM      equ 0x89  ; dst = sum of elements
+IR_SEQ_MIN      equ 0x8A  ; dst = min element
+IR_SEQ_MAX      equ 0x8B  ; dst = max element
+IR_SEQ_SLICE    equ 0x8C  ; dst = seq[lo:hi]
+IR_SEQ_CLEAR    equ 0x8D  ; clear seq (len=0)
+IR_SEQ_RESERVE  equ 0x8E  ; ensure capacity
+IR_SEQ_CAP      equ 0x8F  ; dst = capacity
+IR_SEQ_COUNT_OF equ 0x90  ; dst = count of value in seq
+
+; Category 9: String Operations (0x80-0x8F)
+IR_STR_CONCAT   equ 0x80  ; dst = str1 + str2
+IR_STR_LEN      equ 0x81  ; dst = len(str)
+IR_STR_CMP      equ 0x82  ; dst = strcmp(str1, str2)
+
 ; IR Record Structure (32 bytes per record)
 ; Offset  Size  Field
 ; 0       1     opcode
@@ -129,7 +170,7 @@ IR_HALT         equ 0x67
 ; 24      4     flags (IR_FLAG_*)
 ; 28      4     _pad
 IR_RECORD_SIZE  equ 32
-IR_MAX_RECORDS  equ 1024
+IR_MAX_RECORDS  equ 4096
 
 ; IR flags
 IR_FLAG_CONST   equ 1

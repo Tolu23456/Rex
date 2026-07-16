@@ -67,7 +67,7 @@ _start:
     jne .next_arg
     cmp byte [rsi + 2], 0
     jne .next_arg
-    
+
     ; Found "-o", output file is argv[rbx + 1]
     inc rbx
     cmp rbx, rdi
@@ -147,7 +147,7 @@ _start:
 
     ; 4. Linear Scan Register Allocation
     call allocate_registers
-    
+
     ; 5. Generate ELF64 executable bytes
     call codegen_init
     call codegen_emit_all

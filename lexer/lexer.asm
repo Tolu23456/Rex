@@ -26,6 +26,7 @@ section .data
     str_tup     db "tup", 0
     str_seq     db "seq", 0
     str_dict    db "dict", 0
+    str_arr     db "arr", 0
     str_null    db "null", 0
     str_output  db "output", 0
     str_prot    db "prot", 0
@@ -36,6 +37,26 @@ section .data
     str_and     db "and", 0
     str_or      db "or", 0
     str_not     db "not", 0
+    ; Control flow keywords
+    str_if      db "if", 0
+    str_elif    db "elif", 0
+    str_else    db "else", 0
+    str_for     db "for", 0
+    str_while   db "while", 0
+    str_each    db "each", 0
+    str_repeat  db "repeat", 0
+    str_in      db "in", 0
+    str_step    db "step", 0
+    str_stop    db "stop", 0
+    str_skip    db "skip", 0
+    str_pass    db "pass", 0
+    str_is      db "is", 0
+    str_switch  db "switch", 0
+    str_raise   db "raise", 0
+    str_swap    db "swap", 0
+    str_len     db "len", 0
+    str_scope   db "scope", 0
+    str_assert  db "assert", 0
 
 section .bss
     global src_ptr
@@ -324,7 +345,7 @@ next_token:
     ret
 
 .indent_overflow:
-    mov dword [tok_type], TOK_EOF
+    mov dword [tok_type], TOK_ERROR
     ret
 
 .indent_dedent:
@@ -353,8 +374,8 @@ next_token:
     ret
 
 .dedent_error:
-    ; Set TOK_EOF or handle error
-    mov dword [tok_type], TOK_EOF
+    ; Set TOK_ERROR for indentation mismatch
+    mov dword [tok_type], TOK_ERROR
     ret
 
 .skip_indent_logic:
@@ -449,6 +470,14 @@ next_token:
     je .or
     cmp rax, '^'
     je .xor
+    cmp rax, '<'
+    je .lt
+    cmp rax, '>'
+    je .gt
+    cmp rax, '!'
+    je .bang
+    cmp rax, '~'
+    je .tilde
 
     ; Unknown token character — return TOK_ERROR
     mov dword [tok_type], TOK_ERROR
@@ -495,9 +524,16 @@ next_token:
     call peek_char
     cmp rax, '/'
     je .comment
+    cmp rax, '='
+    je .slash_eq
     ; Otherwise it's TOK_SLASH
     mov dword [tok_type], TOK_SLASH
     mov qword [tok_str_len], 1
+    ret
+.slash_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_SLASH_EQ
+    mov qword [tok_str_len], 2
     ret
 .comment:
     call skip_comment
@@ -550,7 +586,7 @@ next_token:
     mov dword [tok_type], TOK_STR_LIT
     ret
 .str_error:
-    mov dword [tok_type], TOK_EOF
+    mov dword [tok_type], TOK_ERROR
     mov qword [tok_str_ptr], 0
     mov qword [tok_str_len], 0
     ret
@@ -1022,6 +1058,16 @@ section .text
     mov qword [tok_ival], TYPE_DICT
     ret
 .not_dict:
+    mov rdi, str_arr
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_arr
+    mov dword [tok_type], TOK_TYPE
+    mov qword [tok_ival], TYPE_ARR
+    ret
+.not_arr:
     mov rdi, str_null
     mov rsi, [tok_str_ptr]
     mov rdx, [tok_str_len]
@@ -1115,6 +1161,200 @@ section .text
     mov dword [tok_type], TOK_BOOL_NOT
     ret
 .not_not_kw:
+    ; Control flow keywords
+    mov rdi, str_if
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_if_kw
+    mov dword [tok_type], TOK_IF
+    ret
+.not_if_kw:
+    mov rdi, str_elif
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_elif_kw
+    mov dword [tok_type], TOK_ELIF
+    ret
+.not_elif_kw:
+    mov rdi, str_else
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_else_kw
+    mov dword [tok_type], TOK_ELSE
+    ret
+.not_else_kw:
+    mov rdi, str_for
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_for_kw
+    mov dword [tok_type], TOK_FOR
+    ret
+.not_for_kw:
+    mov rdi, str_while
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_while_kw
+    mov dword [tok_type], TOK_WHILE
+    ret
+.not_while_kw:
+    mov rdi, str_each
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_each_kw
+    mov dword [tok_type], TOK_EACH
+    ret
+.not_each_kw:
+    mov rdi, str_repeat
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_repeat_kw
+    mov dword [tok_type], TOK_REPEAT
+    ret
+.not_repeat_kw:
+    mov rdi, str_in
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_in_kw
+    mov dword [tok_type], TOK_IN
+    ret
+.not_in_kw:
+    mov rdi, str_step
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_step_kw
+    mov dword [tok_type], TOK_STEP
+    ret
+.not_step_kw:
+    mov rdi, str_stop
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_stop_kw
+    mov dword [tok_type], TOK_STOP
+    ret
+.not_stop_kw:
+    mov rdi, str_skip
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_skip_kw
+    mov dword [tok_type], TOK_SKIP
+    ret
+.not_skip_kw:
+    mov rdi, str_pass
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_pass_kw
+    mov dword [tok_type], TOK_PASS
+    ret
+.not_pass_kw:
+    mov rdi, str_is
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_is_kw
+    ; Check for 'is not' (bounds-checked)
+    mov rdi, [src_idx]
+    add rdi, 4
+    cmp rdi, [src_len]
+    ja .is_single           ; not enough room for " not"
+    mov rdi, [src_ptr]
+    mov rsi, [src_idx]
+    add rsi, rdi
+    cmp byte [rsi], ' '
+    jne .is_single
+    cmp byte [rsi + 1], 'n'
+    jne .is_single
+    cmp byte [rsi + 2], 'o'
+    jne .is_single
+    cmp byte [rsi + 3], 't'
+    jne .is_single
+    ; 'is not' — consume the space and 'not'
+    add qword [src_idx], 4
+    mov dword [tok_type], TOK_IS_NOT
+    add qword [tok_str_len], 4
+    ret
+.is_single:
+    mov dword [tok_type], TOK_IS
+    ret
+.not_is_kw:
+    mov rdi, str_switch
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_switch_kw
+    mov dword [tok_type], TOK_SWITCH
+    ret
+.not_switch_kw:
+    mov rdi, str_raise
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_raise_kw
+    mov dword [tok_type], TOK_RAISE
+    ret
+.not_raise_kw:
+    mov rdi, str_swap
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_swap_kw
+    mov dword [tok_type], TOK_SWAP
+    ret
+.not_swap_kw:
+    mov rdi, str_len
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_len_kw
+    mov dword [tok_type], TOK_LEN
+    ret
+.not_len_kw:
+    mov rdi, str_scope
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_scope_kw
+    mov dword [tok_type], TOK_SCOPE
+    ret
+.not_scope_kw:
+    mov rdi, str_assert
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_assert_kw
+    mov dword [tok_type], TOK_ASSERT
+    ret
+.not_assert_kw:
     mov dword [tok_type], TOK_IDENT
     ret
 
@@ -1124,20 +1364,77 @@ section .text
     mov qword [tok_str_len], 1
     ret
 .assign:
+    ; '=' could be '==' (eq)
+    call peek_char
+    cmp rax, '='
+    je .eq
     mov dword [tok_type], TOK_ASSIGN
     mov qword [tok_str_len], 1
     ret
+.eq:
+    call read_char ; consume second '='
+    mov dword [tok_type], TOK_EQ
+    mov qword [tok_str_len], 2
+    ret
 .plus:
+    ; '+' could be '++' (plusplus) or '+=' (plus_eq)
+    call peek_char
+    cmp rax, '+'
+    je .plusplus
+    cmp rax, '='
+    je .plus_eq
     mov dword [tok_type], TOK_PLUS
     mov qword [tok_str_len], 1
     ret
+.plusplus:
+    call read_char ; consume second '+'
+    mov dword [tok_type], TOK_PLUSPLUS
+    mov qword [tok_str_len], 2
+    ret
+.plus_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_PLUS_EQ
+    mov qword [tok_str_len], 2
+    ret
 .minus:
+    ; '-' could be '--' (minusminus) or '->' (arrow) or '-=' (minus_eq)
+    call peek_char
+    cmp rax, '-'
+    je .minusminus
+    cmp rax, '>'
+    je .arrow
+    cmp rax, '='
+    je .minus_eq
     mov dword [tok_type], TOK_MINUS
     mov qword [tok_str_len], 1
     ret
+.minusminus:
+    call read_char ; consume second '-'
+    mov dword [tok_type], TOK_MINUSMINUS
+    mov qword [tok_str_len], 2
+    ret
+.arrow:
+    call read_char ; consume '>'
+    mov dword [tok_type], TOK_ARROW
+    mov qword [tok_str_len], 2
+    ret
+.minus_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_MINUS_EQ
+    mov qword [tok_str_len], 2
+    ret
 .star:
+    ; '*' could be '*=' (star_eq)
+    call peek_char
+    cmp rax, '='
+    je .star_eq
     mov dword [tok_type], TOK_STAR
     mov qword [tok_str_len], 1
+    ret
+.star_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_STAR_EQ
+    mov qword [tok_str_len], 2
     ret
 .lparen:
     mov dword [tok_type], TOK_LPAREN
@@ -1168,8 +1465,17 @@ section .text
     mov qword [tok_str_len], 1
     ret
 .dot:
+    ; '.' could be '..' (range)
+    call peek_char
+    cmp rax, '.'
+    je .dotdot
     mov dword [tok_type], TOK_DOT
     mov qword [tok_str_len], 1
+    ret
+.dotdot:
+    call read_char ; consume second '.'
+    mov dword [tok_type], TOK_DOTDOT
+    mov qword [tok_str_len], 2
     ret
 
 ; BUG FIX (Bug 1): The '?' character was already consumed by the generic
@@ -1191,18 +1497,133 @@ section .text
     ret
 
 .mod:
+    ; '%' could be '%=' (mod_eq)
+    call peek_char
+    cmp rax, '='
+    je .mod_eq
     mov dword [tok_type], TOK_MOD
     mov qword [tok_str_len], 1
     ret
+.mod_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_MOD_EQ
+    mov qword [tok_str_len], 2
+    ret
 .and:
+    ; '&' could be '&=' (and_eq)
+    call peek_char
+    cmp rax, '='
+    je .and_eq
     mov dword [tok_type], TOK_AND
     mov qword [tok_str_len], 1
     ret
+.and_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_AND_EQ
+    mov qword [tok_str_len], 2
+    ret
 .or:
+    ; '|' could be '|=' (or_eq)
+    call peek_char
+    cmp rax, '='
+    je .or_eq
     mov dword [tok_type], TOK_OR
     mov qword [tok_str_len], 1
     ret
+.or_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_OR_EQ
+    mov qword [tok_str_len], 2
+    ret
 .xor:
+    ; '^' could be '^=' (xor_eq)
+    call peek_char
+    cmp rax, '='
+    je .xor_eq
     mov dword [tok_type], TOK_XOR
+    mov qword [tok_str_len], 1
+    ret
+.xor_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_XOR_EQ
+    mov qword [tok_str_len], 2
+    ret
+
+.lt:
+    ; '<' could be '<=' (le) or '<<' (lshift)
+    call peek_char
+    cmp rax, '='
+    je .le
+    cmp rax, '<'
+    je .lshift
+    mov dword [tok_type], TOK_LT
+    mov qword [tok_str_len], 1
+    ret
+.le:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_LE
+    mov qword [tok_str_len], 2
+    ret
+.lshift:
+    call read_char ; consume second '<'
+    ; '<<' could be '<<=' (lshift_eq)
+    call peek_char
+    cmp rax, '='
+    je .lshift_eq
+    mov dword [tok_type], TOK_LSHIFT
+    mov qword [tok_str_len], 2
+    ret
+.lshift_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_LSHIFT_EQ
+    mov qword [tok_str_len], 3
+    ret
+
+.gt:
+    ; '>' could be '>=' (ge) or '>>' (rshift)
+    call peek_char
+    cmp rax, '='
+    je .ge
+    cmp rax, '>'
+    je .rshift
+    mov dword [tok_type], TOK_GT
+    mov qword [tok_str_len], 1
+    ret
+.ge:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_GE
+    mov qword [tok_str_len], 2
+    ret
+.rshift:
+    call read_char ; consume second '>'
+    ; '>>' could be '>>=' (rshift_eq)
+    call peek_char
+    cmp rax, '='
+    je .rshift_eq
+    mov dword [tok_type], TOK_RSHIFT
+    mov qword [tok_str_len], 2
+    ret
+.rshift_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_RSHIFT_EQ
+    mov qword [tok_str_len], 3
+    ret
+
+.bang:
+    ; '!' could be '!=' (ne)
+    call peek_char
+    cmp rax, '='
+    je .ne
+    mov dword [tok_type], TOK_ERROR ; bare '!' not valid
+    mov qword [tok_str_len], 1
+    ret
+.ne:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_NE
+    mov qword [tok_str_len], 2
+    ret
+
+.tilde:
+    mov dword [tok_type], TOK_TILDE
     mov qword [tok_str_len], 1
     ret

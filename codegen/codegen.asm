@@ -12,7 +12,7 @@ section .data
         dw 2                        ; e_type (ET_EXEC)
         dw 62                       ; e_machine (AMD64)
         dd 1                        ; e_version
-        dq LOAD_BASE + CODE_START   ; e_entry (start of user code)
+        dq LOAD_BASE          ; e_entry (placeholder — patched at runtime)
         dq 64                       ; e_phoff (program header offset)
         dq 0                        ; e_shoff (no section headers)
         dd 0                        ; e_flags
@@ -43,14 +43,25 @@ section .data
     ; 1.0 as IEEE 754 double (for float.recip())
     float_one_bits: dq 0x3FF0000000000000
 
-    ; Embed the runtime binaries directly
+    ; Runtime binaries — embedded in .rodata, copied selectively to output
     rt_pri_bin:  incbin "runtime/rt_pri.bin"
+    rt_pri_bin_size equ 192
     rt_prs_bin:  incbin "runtime/rt_prs.bin"
+    rt_prs_bin_size equ 80
     rt_prb_bin:  incbin "runtime/rt_prb.bin"
+    rt_prb_bin_size equ 88
     rt_prf_bin:  incbin "runtime/rt_prf.bin"
+    rt_prf_bin_size equ 524
     rt_prc_bin:  incbin "runtime/rt_prc.bin"
-    rt_prc_bin_end:
-    rt_prq_bin:  incbin "runtime/rt_prq.bin"
+    rt_prc_bin_size equ 23
+    rt_alloc_bin: incbin "runtime/rt_alloc.bin"
+    rt_alloc_bin_size equ 105
+    rt_seq_bin:   incbin "runtime/rt_seq.bin"
+    rt_seq_bin_size equ 1325
+    rt_str_bin:   incbin "runtime/rt_str.bin"
+    rt_str_bin_size equ 195
+    rt_dict_bin:  incbin "runtime/rt_dict.bin"
+    rt_dict_bin_size equ 765
 
 section .bss
     global out_buffer
@@ -58,6 +69,33 @@ section .bss
     out_buffer  resb OUT_BUF_MAX
     out_idx     resd 1
     dst_spilled_vreg resd 1
+
+    ; Label resolution table: label_id → output_offset
+    label_table     resd 256    ; 256 labels max
+    ; Jump patch table: (patch_offset, target_label_id)
+    jump_patches    resq 128    ; 128 patches max (8 bytes each: 4 offset + 4 label)
+    jump_patch_count resd 1
+
+    ; Modular runtime tracking
+    need_rt_pri resb 1    ; 1 if program uses output(int)
+    need_rt_prs resb 1    ; 1 if program uses output(str)
+    need_rt_prb resb 1    ; 1 if program uses output(bool)
+    need_rt_prf resb 1    ; 1 if program uses output(float)
+    need_rt_prc resb 1    ; 1 if program uses output(char)
+    need_rt_alloc resb 1  ; 1 if program uses heap allocation
+    need_rt_seq resb 1    ; 1 if program uses seq operations
+    need_rt_str resb 1    ; 1 if program uses string operations
+    need_rt_dict resb 1   ; 1 if program uses dict operations
+    rt_pri_off  resd 1    ; file offset of rt_pri in output
+    rt_prs_off  resd 1    ; file offset of rt_prs in output
+    rt_prb_off  resd 1    ; file offset of rt_prb in output
+    rt_prf_off  resd 1    ; file offset of rt_prf in output
+    rt_prc_off  resd 1    ; file offset of rt_prc in output
+    rt_alloc_off resd 1   ; file offset of rt_alloc in output
+    rt_seq_off  resd 1    ; file offset of rt_seq in output
+    rt_str_off  resd 1    ; file offset of rt_str in output
+    rt_dict_off resd 1    ; file offset of rt_dict in output
+    rt_total_size resd 1  ; total runtime size embedded in output
 
 
 section .text
@@ -137,102 +175,388 @@ emit_block:
     mov rdi, 2
     syscall
 
-; Write ELF Headers and Runtime Blobs
+scan_needed_runtime:
+    push r12
+    push r13
+    push r14
+    ; Clear all need flags
+    mov byte [need_rt_pri], 0
+    mov byte [need_rt_prs], 0
+    mov byte [need_rt_prb], 0
+    mov byte [need_rt_prf], 0
+    mov byte [need_rt_prc], 0
+    mov byte [need_rt_alloc], 0
+    mov byte [need_rt_seq], 0
+    mov byte [need_rt_str], 0
+    mov byte [need_rt_dict], 0
+
+    mov r12d, [ir_count]
+    test r12d, r12d
+    jz .scan_done
+
+    xor r13d, r13d        ; ir_idx = 0
+.scan_loop:
+    cmp r13d, r12d
+    je .scan_done
+
+    imul eax, r13d, IR_RECORD_SIZE
+    lea r14, [ir_buffer + rax]
+
+    movzx eax, byte [r14]  ; opcode
+    cmp al, IR_OUT_INT
+    je .check_int_const
+    cmp al, IR_OUT_FLOAT
+    je .set_prf
+    cmp al, IR_OUT_BOOL
+    je .set_prb
+    cmp al, IR_OUT_STR
+    je .set_prs
+    cmp al, IR_OUT_CHAR
+    je .set_prc
+    cmp al, IR_SEQ_NEW
+    je .set_seq_alloc
+    cmp al, IR_SEQ_PUSH
+    je .set_seq_alloc
+    cmp al, IR_ARR_NEW
+    je .set_alloc
+    cmp al, IR_SEQ_LOAD
+    je .set_seq
+    cmp al, IR_SEQ_STORE
+    je .set_seq
+    cmp al, IR_SEQ_LEN
+    je .set_seq
+    cmp al, IR_SEQ_POP
+    je .set_seq_alloc
+    cmp al, IR_SEQ_INSERT
+    je .set_seq_alloc
+    cmp al, IR_SEQ_REMOVE
+    je .set_seq
+    cmp al, IR_SEQ_COUNT_OF
+    je .set_seq
+    cmp al, IR_DICT_NEW
+    je .set_dict_alloc
+    cmp al, IR_DICT_LOAD
+    je .set_dict
+    cmp al, IR_DICT_STORE
+    je .set_dict_alloc
+    cmp al, IR_DICT_LEN
+    je .set_dict
+    cmp al, IR_STR_CONCAT
+    je .set_str
+    cmp al, IR_STR_LEN
+    je .set_str
+    cmp al, IR_STR_CMP
+    je .set_str
+    cmp al, IR_LOAD_DEREF_BYTE
+    je .set_str
+    ; Extended seq operations
+    cmp al, IR_SEQ_FIRST
+    je .set_seq
+    cmp al, IR_SEQ_LAST
+    je .set_seq
+    cmp al, IR_SEQ_CONTAINS
+    je .set_seq
+    cmp al, IR_SEQ_INDEX_OF
+    je .set_seq
+    cmp al, IR_SEQ_COPY
+    je .set_seq_alloc
+    cmp al, IR_SEQ_REVERSE
+    je .set_seq
+    cmp al, IR_SEQ_SUM
+    je .set_seq
+    cmp al, IR_SEQ_MIN
+    je .set_seq
+    cmp al, IR_SEQ_MAX
+    je .set_seq
+    cmp al, IR_SEQ_CLEAR
+    je .set_seq
+    cmp al, IR_SEQ_RESERVE
+    je .set_seq_alloc
+    cmp al, IR_SEQ_CAP
+    je .set_seq
+    jmp .scan_next
+
+.check_int_const:
+    ; Check if IR_OUT_INT's source is a constant LOAD_IMM.
+    ; If so, the inline path will be used and rt_pri is not needed.
+    push rbx
+    push rcx
+    push rdx
+    movzx ebx, word [r14 + 4] ; src1 vreg of OUT_INT
+    mov ecx, r13d              ; start from current record index
+    dec ecx                    ; check the record before OUT_INT
+.cic_scan:
+    cmp ecx, 0
+    jl .cic_not_const
+    imul edx, ecx, IR_RECORD_SIZE
+    lea rdx, [ir_buffer + rdx]
+    movzx eax, word [rdx + 2]  ; dst vreg of this record
+    cmp eax, ebx
+    jne .cic_next
+    cmp byte [rdx], IR_LOAD_IMM
+    jne .cic_not_const
+    test dword [rdx + 24], IR_FLAG_CONST
+    jz .cic_not_const
+    ; Constant found — inline path will handle it, skip rt_pri
+    pop rdx
+    pop rcx
+    pop rbx
+    jmp .scan_next
+.cic_next:
+    dec ecx
+    jmp .cic_scan
+.cic_not_const:
+    pop rdx
+    pop rcx
+    pop rbx
+    jmp .set_pri
+
+.set_pri:
+    mov byte [need_rt_pri], 1
+    jmp .scan_next
+.set_prs:
+    mov byte [need_rt_prs], 1
+    jmp .scan_next
+.set_prb:
+    mov byte [need_rt_prb], 1
+    jmp .scan_next
+.set_prf:
+    mov byte [need_rt_prf], 1
+    jmp .scan_next
+.set_prc:
+    mov byte [need_rt_prc], 1
+    jmp .scan_next
+.set_alloc:
+    mov byte [need_rt_alloc], 1
+    jmp .scan_next
+.set_seq:
+    mov byte [need_rt_seq], 1
+    jmp .scan_next
+.set_seq_alloc:
+    mov byte [need_rt_seq], 1
+    mov byte [need_rt_alloc], 1
+    jmp .scan_next
+.set_dict:
+    mov byte [need_rt_dict], 1
+    jmp .scan_next
+.set_dict_alloc:
+    mov byte [need_rt_dict], 1
+    mov byte [need_rt_alloc], 1
+    jmp .scan_next
+.set_str:
+    mov byte [need_rt_str], 1
+.scan_next:
+    inc r13d
+    jmp .scan_loop
+
+.scan_done:
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+; Write ELF Headers and Runtime Blobs (modular — only needed functions)
 codegen_init:
     mov dword [out_idx], 0
+    mov dword [jump_patch_count], 0
 
-    ; 1. Write ELF Header
+    ; Initialize label table to 0xFFFFFFFF (unresolved)
+    mov ecx, 256
+    lea rdi, [label_table]
+    mov eax, 0xFFFFFFFF
+    rep stosd
+
+    ; Scan IR first to determine which runtime functions are needed
+    call scan_needed_runtime
+
+    ; 1. Write ELF Header (placeholder — entry point patched later)
     lea rsi, [elf_header]
     mov rcx, elf_header_len
     call emit_block
 
-    ; 2. Write Program Header
+    ; 2. Write Program Header (placeholder — filesz/memsz patched later)
     lea rsi, [program_header]
     mov rcx, program_header_len
     call emit_block
 
-    ; 3. Write JMP over runtime: E9 <RT_TOTAL_SIZE:imm32>
-    ; Opcode E9
+    ; 3. Track current offset as start of runtime (may be same as code start)
+    mov eax, [out_idx]
+    mov [rt_total_size], eax
+
+    ; 4. Check if any runtime is needed
+    cmp byte [need_rt_pri], 0
+    jne .need_jmp
+    cmp byte [need_rt_prs], 0
+    jne .need_jmp
+    cmp byte [need_rt_prb], 0
+    jne .need_jmp
+    cmp byte [need_rt_prf], 0
+    jne .need_jmp
+    cmp byte [need_rt_prc], 0
+    jne .need_jmp
+    cmp byte [need_rt_alloc], 0
+    jne .need_jmp
+    cmp byte [need_rt_seq], 0
+    jne .need_jmp
+    cmp byte [need_rt_str], 0
+    jne .need_jmp
+    cmp byte [need_rt_dict], 0
+    jne .need_jmp
+    ; No runtime needed — skip JMP, code starts here
+    mov eax, LOAD_BASE
+    add rax, [out_idx]
+    mov [out_buffer + 24], rax  ; patch entry point
+    jmp .skip_jmp
+
+.need_jmp:
+    ; Emit JMP over runtime (patched after runtime is written)
     mov dil, 0xE9
     call emit_b
-    ; Offset is 8448 bytes
-    mov edi, 8448
-    call emit_d
+    xor edi, edi
+    call emit_d    ; placeholder offset (will be patched)
 
-    ; 4. Write rt_pri_bin (512 bytes)
+.skip_jmp:
+
+    ; 5. Conditionally embed needed runtime functions (packed, no padding)
+    mov dword [rt_pri_off], 0
+    mov dword [rt_prs_off], 0
+    mov dword [rt_prb_off], 0
+    mov dword [rt_prf_off], 0
+    mov dword [rt_prc_off], 0
+
+    cmp byte [need_rt_pri], 0
+    je .skip_pri
+    mov eax, [out_idx]
+    mov [rt_pri_off], eax
     lea rsi, [rt_pri_bin]
-    mov rcx, 512
+    mov rcx, rt_pri_bin_size
     call emit_block
+.skip_pri:
 
-    ; 5. Write rt_prs_bin (512 bytes)
+    cmp byte [need_rt_prs], 0
+    je .skip_prs
+    mov eax, [out_idx]
+    mov [rt_prs_off], eax
     lea rsi, [rt_prs_bin]
-    mov rcx, 512
+    mov rcx, rt_prs_bin_size
     call emit_block
+.skip_prs:
 
-    ; 6. Write rt_prb_bin (256 bytes)
+    cmp byte [need_rt_prb], 0
+    je .skip_prb
+    mov eax, [out_idx]
+    mov [rt_prb_off], eax
     lea rsi, [rt_prb_bin]
-    mov rcx, 256
+    mov rcx, rt_prb_bin_size
     call emit_block
+.skip_prb:
 
-    ; 7. Write rt_prf_bin (512 bytes)
+    cmp byte [need_rt_prf], 0
+    je .skip_prf
+    mov eax, [out_idx]
+    mov [rt_prf_off], eax
     lea rsi, [rt_prf_bin]
-    mov rcx, 512
+    mov rcx, rt_prf_bin_size
     call emit_block
+.skip_prf:
 
-    ; 8. Write rt_prc.bin (print char) then pad to 512 bytes
+    cmp byte [need_rt_prc], 0
+    je .skip_prc
+    mov eax, [out_idx]
+    mov [rt_prc_off], eax
     lea rsi, [rt_prc_bin]
-    mov ecx, rt_prc_bin_end - rt_prc_bin
+    mov rcx, rt_prc_bin_size
     call emit_block
-    xor dil, dil
-    mov ecx, 512 - (rt_prc_bin_end - rt_prc_bin)
-.zero_prc:
-    push rcx
-    call emit_b
-    pop rcx
-    loop .zero_prc
+.skip_prc:
 
-    ; 9. Write rt_sip slot (1024 bytes of zeroes)
-    xor dil, dil
-    mov ecx, 1024
-.zero_sip:
-    push rcx
-    call emit_b
-    pop rcx
-    loop .zero_sip
-
-    ; 10. Write rt_alc slot (4096 bytes of zeroes)
-    xor dil, dil
-    mov ecx, 4096
-.zero_alc:
-    push rcx
-    call emit_b
-    pop rcx
-    loop .zero_alc
-
-    ; 11. Write rt_prq_bin (1024 bytes)
-    lea rsi, [rt_prq_bin]
-    mov rcx, 1024
+    cmp byte [need_rt_alloc], 0
+    je .skip_alloc
+    mov eax, [out_idx]
+    mov [rt_alloc_off], eax
+    lea rsi, [rt_alloc_bin]
+    mov rcx, rt_alloc_bin_size
     call emit_block
+.skip_alloc:
 
-    ; Verify we are exactly at CODE_START (8573)
-    ; 120 (headers) + 5 (jmp) + 8448 (runtime) = 8573
+    cmp byte [need_rt_seq], 0
+    je .skip_seq
+    mov eax, [out_idx]
+    mov [rt_seq_off], eax
+    lea rsi, [rt_seq_bin]
+    mov rcx, rt_seq_bin_size
+    call emit_block
+.skip_seq:
+
+    cmp byte [need_rt_str], 0
+    je .skip_str
+    mov eax, [out_idx]
+    mov [rt_str_off], eax
+    lea rsi, [rt_str_bin]
+    mov rcx, rt_str_bin_size
+    call emit_block
+.skip_str:
+
+    cmp byte [need_rt_dict], 0
+    je .skip_dict
+    mov eax, [out_idx]
+    mov [rt_dict_off], eax
+    lea rsi, [rt_dict_bin]
+    mov rcx, rt_dict_bin_size
+    call emit_block
+.skip_dict:
+
+    ; 6. Patch the JMP offset (skip over embedded runtime)
+    ; Only patch if a JMP was actually emitted
+    cmp byte [need_rt_pri], 0
+    jne .patch_jmp
+    cmp byte [need_rt_prs], 0
+    jne .patch_jmp
+    cmp byte [need_rt_prb], 0
+    jne .patch_jmp
+    cmp byte [need_rt_prf], 0
+    jne .patch_jmp
+    cmp byte [need_rt_prc], 0
+    jne .patch_jmp
+    cmp byte [need_rt_alloc], 0
+    jne .patch_jmp
+    cmp byte [need_rt_seq], 0
+    jne .patch_jmp
+    cmp byte [need_rt_str], 0
+    jne .patch_jmp
+    cmp byte [need_rt_dict], 0
+    jne .patch_jmp
+    ; No runtime — entry point already patched, skip JMP patching
+    jmp .skip_jmp_patch
+
+.patch_jmp:
+    ; JMP rel32: target = out_idx (after runtime), offset = target - current_pos - 5
+    mov eax, [out_idx]
+    mov edi, eax
+    sub edi, HEADERS_SIZE
+    ; Patch the JMP offset at offset 121 (right after E9 opcode)
+    mov dword [out_buffer + 121], edi
+
+    ; Patch entry point: code starts after runtime
+    mov eax, [out_idx]
+    add eax, LOAD_BASE
+    mov [out_buffer + 24], rax
+
+.skip_jmp_patch:
+    ; 7. Compute total runtime size
+    mov eax, [out_idx]
+    sub eax, HEADERS_SIZE
+    mov [rt_total_size], eax
+
+    ; 8. Patch program header filesz/memsz
+    mov eax, [out_idx]
+    mov [out_buffer + 96], rax
+    mov [out_buffer + 104], rax
+
     ret
 
-; Emit function prologue
+; Emit function prologue (no frame pointer — uses absolute variable addresses)
 emit_prologue:
-    ; push rbp -> 55
-    mov dil, 0x55
-    call emit_b
-    
-    ; mov rbp, rsp -> 48 89 E5
-    mov dil, 0x48
-    call emit_b
-    mov dil, 0x89
-    call emit_b
-    mov dil, 0xE5
-    call emit_b
-    
-    ; sub rsp, aligned_stack_frame
+    ; sub rsp, aligned_stack_frame (if needed)
     mov eax, [stack_frame_size]
     add eax, 15
     and eax, -16
@@ -253,35 +577,27 @@ emit_prologue:
 
 ; Emit function epilogue and exit
 emit_epilogue_and_exit:
-    ; mov rsp, rbp -> 48 89 EC
-    mov dil, 0x48
-    call emit_b
-    mov dil, 0x89
-    call emit_b
-    mov dil, 0xEC
-    call emit_b
-    
-    ; pop rbp -> 5D
-    mov dil, 0x5D
-    call emit_b
-    
     ; sys_exit(0):
-    ; mov rax, 60 -> 48 C7 C0 3C 00 00 00
-    ; xor rdi, rdi -> 48 31 FF
-    ; syscall -> 0F 05
-    mov dil, 0x48
+    ; push 60; pop rax (3 bytes instead of 7)
+    mov dil, 0x6A
     call emit_b
-    mov dil, 0xC7
+    mov dil, 60
     call emit_b
-    mov dil, 0xC0
+    mov dil, 0x58
     call emit_b
-    mov edi, 60
-    call emit_d
     
-    mov dil, 0x48
-    call emit_b
+    ; xor edi, edi (2 bytes instead of 3)
     mov dil, 0x31
     call emit_b
+    mov dil, 0xFF
+    call emit_b
+    
+    ; syscall (2 bytes)
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x05
+    call emit_b
+    ret
     mov dil, 0xFF
     call emit_b
     
@@ -347,7 +663,10 @@ codegen_emit_all:
 
     cmp al, IR_LOAD_STR
     je .load_str
-    
+
+    cmp al, IR_LOAD_DEREF_BYTE
+    je cge_load_deref_byte
+
     cmp al, IR_STORE_VAR
     je .store_var
     
@@ -374,6 +693,9 @@ codegen_emit_all:
     
     cmp al, IR_XOR
     je .arith_op
+
+    cmp al, IR_NEG
+    je cge_neg_op
 
     cmp al, IR_BOOL_AND
     je .bool_and_op
@@ -483,11 +805,105 @@ codegen_emit_all:
     cmp al, IR_IS_NEG_F
     je  cge_float_pred_op
 
+    ; Collection operations
+    cmp al, IR_SEQ_NEW
+    je  cge_seq_new
+    cmp al, IR_SEQ_PUSH
+    je  cge_seq_push
+    cmp al, IR_SEQ_LOAD
+    je  cge_seq_load
+    cmp al, IR_SEQ_STORE
+    je  cge_seq_store
+    cmp al, IR_SEQ_LEN
+    je  cge_seq_len
+    cmp al, IR_SEQ_POP
+    je  cge_seq_pop
+    cmp al, IR_SEQ_INSERT
+    je  cge_seq_insert
+    cmp al, IR_SEQ_REMOVE
+    je  cge_seq_remove
+    cmp al, IR_ARR_NEW
+    je  cge_arr_new
+    cmp al, IR_ARR_LOAD
+    je  cge_arr_load
+    cmp al, IR_ARR_STORE
+    je  cge_arr_store
+    cmp al, IR_DICT_NEW
+    je  cge_dict_new
+    cmp al, IR_DICT_LOAD
+    je  cge_dict_load
+    cmp al, IR_DICT_STORE
+    je  cge_dict_store
+    cmp al, IR_DICT_LEN
+    je  cge_dict_len
+    cmp al, IR_STR_CONCAT
+    je  cge_str_concat
+    cmp al, IR_STR_LEN
+    je  cge_str_len
+    cmp al, IR_STR_CMP
+    je  cge_str_cmp
+
+    ; Extended seq operations
+    cmp al, IR_SEQ_FIRST
+    je  cge_seq_first
+    cmp al, IR_SEQ_LAST
+    je  cge_seq_last
+    cmp al, IR_SEQ_CONTAINS
+    je  cge_seq_contains
+    cmp al, IR_SEQ_INDEX_OF
+    je  cge_seq_index_of
+    cmp al, IR_SEQ_COPY
+    je  cge_seq_copy
+    cmp al, IR_SEQ_REVERSE
+    je  cge_seq_reverse
+    cmp al, IR_SEQ_SUM
+    je  cge_seq_sum
+    cmp al, IR_SEQ_MIN
+    je  cge_seq_min
+    cmp al, IR_SEQ_MAX
+    je  cge_seq_max
+    cmp al, IR_SEQ_CLEAR
+    je  cge_seq_clear
+    cmp al, IR_SEQ_CAP
+    je  cge_seq_cap
+    cmp al, IR_SEQ_COUNT_OF
+    je  cge_seq_count_of
+
+    ; Control flow
+    cmp al, IR_LABEL
+    je  cge_label
+    cmp al, IR_JMP
+    je  cge_jmp
+    cmp al, IR_JCC
+    je  cge_jcc
+    cmp al, IR_RET
+    je  cge_ret
+
+    ; Type casts
+    cmp al, IR_CAST_ITF
+    je  cge_cast_itf
+    cmp al, IR_CAST_FTI
+    je  cge_cast_fti
+    cmp al, IR_CAST_BTI
+    je  cge_cast_bti
+    cmp al, IR_CAST_CTI
+    je  cge_cast_nop     ; char→int: same register, no-op
+    cmp al, IR_CAST_CTB
+    je  cge_cast_nop     ; char→byte: same register, no-op
+    cmp al, IR_CAST_BCI
+    je  cge_cast_nop     ; byte→int: same register, no-op
+    cmp al, IR_CAST_BTC
+    je  cge_cast_nop     ; byte→char: same register, no-op
+    cmp al, IR_NULL_COALESCE
+    je  cge_null_coalesce
+
 .next_ir:
     inc r13d
     jmp .loop
 
 .done:
+    ; Resolve all forward jump references
+    call resolve_jumps
     pop rbx
     pop r15
     pop r14
@@ -542,6 +958,28 @@ codegen_emit_all:
     jmp .next_ir
 
 .fit_32:
+    ; Check if imm fits in signed byte (-128 to 127)
+    mov rax, [r14 + 8]
+    cmp rax, 127
+    jg .fit_32_only
+    cmp rax, -128
+    jl .fit_32_only
+    ; Fits in byte: push imm8; pop reg -> 6A xx 41 58+reg
+    mov dil, 0x6A
+    call emit_b
+    mov dil, [r14 + 8]      ; low byte of immediate
+    call emit_b
+    ; pop reg: 41 58+reg for r8-r15
+    mov dil, 0x41
+    call emit_b
+    mov al, 0x58
+    add al, r15b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp .next_ir
+
+.fit_32_only:
     ; Fits in 32-bit: mov reg, imm32 -> 49 C7 C0+reg imm32
     mov dil, 0x49
     call emit_b
@@ -852,7 +1290,7 @@ codegen_emit_all:
 
 .emit_and:
     movzx eax, byte [r14 + 1] ; type
-    cmp al, 3 ; TYPE_BOOL
+    cmp al, TYPE_BOOL
     je .emit_bool_and
     ; and dst, src2 -> 4D 21 ModRM(C0 | (src2<<3) | dst)
     mov dil, 0x4D
@@ -899,7 +1337,7 @@ codegen_emit_all:
 
 .emit_or:
     movzx eax, byte [r14 + 1] ; type
-    cmp al, 3 ; TYPE_BOOL
+    cmp al, TYPE_BOOL
     je .emit_bool_or
     ; or dst, src2 -> 4D 09 ModRM(C0 | (src2<<3) | dst)
     mov dil, 0x4D
@@ -1121,9 +1559,159 @@ codegen_emit_all:
     jmp .next_ir
 
 .output_val:
-    ; IR_OUT_*: prints value in src1.  No dst vreg — clear dst_spilled_vreg
-    ; so a stale value from a previous instruction isn't written (Bug 3 fix).
-    mov dword [dst_spilled_vreg], 0   ; <-- Bug 3 fix
+    ; IR_OUT_*: prints value in src1.
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, byte [r14 + 1] ; type
+    cmp al, TYPE_INT
+    jne .output_val_runtime
+    ; Check if src1 is defined by IR_LOAD_IMM with constant flag
+    movzx eax, word [r14 + 4] ; src1 vreg
+    ; Scan backwards through IR to find definition
+    push rbx
+    push rcx
+    push rdx
+    mov ebx, eax
+    mov ecx, [ir_count]
+    test ecx, ecx
+    jz .output_inline_miss
+    dec ecx
+.fc_scan:
+    cmp ecx, 0
+    jl .output_inline_miss
+    imul edx, ecx, IR_RECORD_SIZE
+    lea rdx, [ir_buffer + rdx]
+    movzx eax, word [rdx + 2]
+    cmp eax, ebx
+    jne .fc_next
+    cmp byte [rdx], IR_LOAD_IMM
+    jne .output_inline_miss
+    test dword [rdx + 24], IR_FLAG_CONST
+    jz .output_inline_miss
+    mov rax, [rdx + 8]      ; constant value
+    pop rdx
+    pop rcx
+    pop rbx
+    ; rax = constant integer. Emit inline sys_write.
+    push rax                ; save constant value
+    ; Convert int to string on stack
+    sub rsp, 24             ; space for string (21 bytes)
+    lea rdi, [rsp]
+    ; int_to_str: rax=value, rdi=buffer -> rax=len, rdi=start
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    mov rsi, rdi
+    add rsi, 20
+    mov byte [rsi], 10      ; newline
+    mov rcx, 1
+    test rax, rax
+    jnz .its_go
+    dec rsi
+    mov byte [rsi], '0'
+    inc rcx
+    jmp .its_end
+.its_go:
+    mov rbx, rax
+    test rax, rax
+    jns .its_pos
+    neg rax
+.its_pos:
+.its_dig:
+    xor rdx, rdx
+    mov r10, 10
+    div r10
+    add dl, '0'
+    dec rsi
+    mov [rsi], dl
+    inc rcx
+    test rax, rax
+    jnz .its_dig
+    test rbx, rbx
+    jns .its_end
+    dec rsi
+    mov byte [rsi], '-'
+    inc rcx
+.its_end:
+    mov rax, rcx            ; length
+    mov rdi, rsi            ; string start
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ; rax = string length, rdi = string start
+    mov r8, rax             ; r8 = length
+    mov r9, rdi             ; r9 = string start (on stack)
+    
+    ; Build the syscall sequence + string in a fixed 64-byte stack buffer
+    sub rsp, 64
+    mov r10, rsp            ; r10 = buffer
+    
+    ; Start with JMP rel32 over string (5 bytes)
+    mov byte [r10], 0xE9
+    mov eax, r8d            ; displacement = string length
+    mov [r10 + 1], eax
+    lea rdi, [r10 + 5]     ; destination after JMP
+    
+    ; Copy string bytes to buffer after JMP
+    mov rsi, r9
+    mov rcx, r8
+    rep movsb
+    
+    ; Append LEA RSI, [RIP - (len+7)]
+    mov byte [rdi], 0x48
+    mov byte [rdi+1], 0x8D
+    mov byte [rdi+2], 0x35
+    mov eax, r8d
+    add eax, 7
+    neg eax
+    mov [rdi+3], eax
+    add rdi, 7
+    
+    ; Append MOV RDX, len (optimized: push imm8; pop rdx for small values)
+    mov byte [rdi], 0x6A
+    mov al, r8b             ; low byte of length
+    mov [rdi+1], al
+    mov byte [rdi+2], 0x5A
+    add rdi, 3
+    
+    ; Append MOV RAX, 1 (optimized: push 1; pop rax)
+    mov byte [rdi], 0x6A
+    mov byte [rdi+1], 0x01
+    mov byte [rdi+2], 0x58
+    add rdi, 3
+    
+    ; Append MOV RDI, 1 (optimized: push 1; pop rdi)
+    mov byte [rdi], 0x6A
+    mov byte [rdi+1], 0x01
+    mov byte [rdi+2], 0x5F
+    add rdi, 3
+    
+    ; Append SYSCALL
+    mov byte [rdi], 0x0F
+    mov byte [rdi+1], 0x05
+    
+    ; Emit the entire block
+    mov rsi, r10
+    lea rcx, [r8 + 23]     ; 5 JMP + string_len + 18 bytes of instructions
+    call emit_block
+    
+    ; Cleanup: restore buffer + saved rax
+    add rsp, 64
+    add rsp, 24             ; cleanup string buffer
+    pop rax
+    jmp .next_ir
+
+.fc_next:
+    dec ecx
+    jmp .fc_scan
+.output_inline_miss:
+    pop rdx
+    pop rcx
+    pop rbx
+    ; Fall through to runtime path
+
+.output_val_runtime:
     movzx eax, word [r14 + 4] ; src1 vreg
     call load_src1_phys
     mov r15b, al ; phys
@@ -1158,19 +1746,19 @@ codegen_emit_all:
     jmp .next_ir
 
 .call_pri:
-    mov edi, 125
+    mov edi, [rt_pri_off]
     call emit_runtime_call
     jmp .next_ir     ; dst_spilled_vreg already cleared in .output_val
 .call_prs:
-    mov edi, 637
+    mov edi, [rt_prs_off]
     call emit_runtime_call
     jmp .next_ir
 .call_prb:
-    mov edi, 1149
+    mov edi, [rt_prb_off]
     call emit_runtime_call
     jmp .next_ir
 .call_prc:
-    mov edi, 1917
+    mov edi, [rt_prc_off]
     call emit_runtime_call
     jmp .next_ir
 
@@ -1203,7 +1791,7 @@ codegen_emit_all:
     mov edi, eax
     call emit_d
     
-    mov edi, 1405
+    mov edi, [rt_prf_off]
     call emit_runtime_call
     jmp .next_ir     ; dst_spilled_vreg already cleared in .output_val
 
@@ -1211,8 +1799,176 @@ codegen_emit_all:
     ; IR_HALT: no dst vreg — clear dst_spilled_vreg (Bug 3 fix)
     mov dword [dst_spilled_vreg], 0   ; <-- Bug 3 fix
     call emit_epilogue_and_exit
-    jmp .next_ir
+    jmp codegen_emit_all.next_ir
 
+; ============ New handler functions (outside codegen_emit_all for label scoping) ============
+
+cge_load_deref_byte:
+    ; IR_LOAD_DEREF_BYTE: dst = byte at [src1 + imm]
+    ; src1 = pointer vreg, imm = offset
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (pointer)
+    call load_src1_phys
+    mov r15b, al                ; pointer phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move offset to rsi
+    movzx eax, word [r14 + 8]  ; imm = offset
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_deref_byte
+    mov edi, [rt_str_off]
+    add edi, 0xBE  ; rt_deref_byte offset
+    call emit_runtime_call
+
+    ; Store result (rax) to dst
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_str_cmp:
+    ; IR_STR_CMP: dst = strcmp(str1, str2)
+    ; src1 = str1 pointer, src2 = str2 pointer
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (str1)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (str2)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move str1 to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move str2 to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Call rt_str_compare
+    mov edi, [rt_str_off]
+    add edi, 0x9D  ; rt_str_compare offset
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_count_of:
+    ; IR_SEQ_COUNT_OF: dst = count of value in seq
+    ; src1 = seq pointer, src2 = value, imm = element size
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (value to count)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move value to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Move element size to rdx (imm field)
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_count_of
+    mov edi, [rt_seq_off]
+    add edi, 0x4D3  ; rt_seq_count_of offset
+    call emit_runtime_call
+
+    ; Store result (rax) to dst
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
 
 ; Helper to load src1 into a physical register (or r14 if spilled)
 ; Bug 9 fix: rbx is callee-saved (SysV ABI); save/restore it.
@@ -1307,6 +2063,38 @@ get_phys_reg:
 ; Helper macro: load src1 into r15b, dst into r8b
 ; (used by many unary handlers below)
 ; These are inline helpers, not actual macro calls.
+
+; ── IR_NEG ──────────────────────────────────────────────
+cge_neg_op:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    ; mov r(dst), r(src1): 4D 89 (0xC0|(src1<<3)|dst)
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    ; neg r(dst): 49 F7 D8+dst
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0xF7
+    call emit_b
+    mov al, 0xD8
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
 
 ; ── IR_ABS_INT ─────────────────────────────────────────
 cge_abs_int_op:
@@ -2549,7 +3337,6 @@ cge_cpred_alnum:
     ; is_alnum: is_alpha || is_digit
     call  cge_cpred_emit_load_rax
     ; Check digit: sub rax,'0'
-    cmp rax,9; setbe dl
     mov dil, 0x48
     call emit_b
     mov dil, 0x83
@@ -3385,11 +4172,1985 @@ codegen_finish:
     mov ecx, [out_idx]
 
     ; Patch ELF program header filesz at offset 64 + 32 = 96
-    mov [out_buffer + 96], ecx
+    mov rcx, [out_idx]
+    mov [out_buffer + 96], rcx
 
     ; Patch memsz at offset 64 + 40 = 104
     ; memsz covers code size + variables storage (VAR_MEM_OFFSET)
-    add ecx, VAR_MEM_OFFSET
-    mov [out_buffer + 104], ecx
+    add rcx, VAR_MEM_OFFSET
+    mov [out_buffer + 104], rcx
+    ret
+
+; ============ Type Cast Codegen ============
+
+; IR_CAST_ITF: int → float (cvtsi2sd)
+cge_cast_itf:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    ; cvtsi2sd xmm0, r(src1)
+    mov dil, 0xF2
+    call emit_b
+    mov dil, 0x49              ; REX.WB (src1 may be r8-r15)
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x2A
+    call emit_b
+    mov al, 0xC0
+    or al, r15b
+    mov dil, al
+    call emit_b
+    ; movq r(dst), xmm0
+    mov dil, 0x66
+    call emit_b
+    mov dil, 0x49              ; REX.WB (dst may be r8-r15)
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x7E
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_CAST_FTI: float → int (cvttsd2si, truncate toward zero)
+cge_cast_fti:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    ; movq xmm0, r(src1) — needs REX.WB since src1 may be r8-r15
+    mov dil, 0x66
+    call emit_b
+    mov dil, 0x49              ; REX.WB (src1 may be r8-r15)
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x6E
+    call emit_b
+    mov al, 0xC0
+    or al, r15b
+    mov dil, al
+    call emit_b
+    ; cvttsd2si rax, xmm0 — REX.W only (xmm0 doesn't need REX.B)
+    mov dil, 0xF2
+    call emit_b
+    mov dil, 0x48              ; REX.W only
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x2C
+    call emit_b
+    mov dil, 0xC0              ; rax, xmm0
+    call emit_b
+    ; mov r(dst), rax: 49 89 C0 + dst
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_CAST_BTI: bool → int (sign-extend: positive→1, zero→0, negative→-1)
+cge_cast_bti:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    ; mov r(dst), r(src1): 4D 89 (0xC0|(src1<<3)|dst)
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    ; test r(dst), r(dst): 4D 85 (0xC0|(dst<<3)|dst)
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x85
+    call emit_b
+    mov al, r8b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    ; setg al: 0F 9F C0
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x9F
+    call emit_b
+    mov dil, 0xC0
+    call emit_b
+    ; setl cl: 0F 9C C1
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x9C
+    call emit_b
+    mov dil, 0xC1
+    call emit_b
+    ; movzx rax, al: 48 0F B6 C0
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0xB6
+    call emit_b
+    mov dil, 0xC0
+    call emit_b
+    ; movzx rcx, cl: 48 0F B6 C9
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0xB6
+    call emit_b
+    mov dil, 0xC9
+    call emit_b
+    ; sub rax, rcx: 48 29 C8
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x29
+    call emit_b
+    mov dil, 0xC8
+    call emit_b
+    ; mov r(dst), rax: 49 89 (0xC0|dst)
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; Cast no-op: same register, just copy to dst if needed
+cge_cast_nop:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    cmp r8b, r15b
+    je .nop_done
+    ; mov r(dst), r(src1): 4D 89 (0xC0|(src1<<3)|dst)
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+.nop_done:
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; ============ Collection Operations ============
+
+; IR_SEQ_NEW: allocate seq, dst = pointer to seq header
+; imm = capacity (number of elements), aux = element size
+cge_seq_new:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Emit: mov rdi, element_size
+    movzx eax, word [r14 + 16] ; aux = element size
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Emit: mov rsi, capacity
+    mov rax, [r14 + 8]          ; imm = capacity
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_new
+    mov edi, [rt_seq_off]
+    call emit_runtime_call
+
+    ; mov r(dst), rax (result)
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_SEQ_PUSH: seq_push(seq, value) — void operation
+; src1 = seq pointer, src2 = value, imm = element size
+cge_seq_push:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (value)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move value to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Move element size to rdx
+    movzx rax, word [r14 + 8]  ; imm = element size
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_push
+    mov edi, [rt_seq_off]
+    add edi, 0x4C   ; offset to rt_seq_push
+    call emit_runtime_call
+    jmp codegen_emit_all.next_ir
+
+; IR_SEQ_LOAD: dst = seq[index]
+; src1 = seq pointer, src2 = index, aux = element size
+cge_seq_load:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (index)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move index to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Move element size to rdx
+    movzx rax, word [r14 + 8]  ; imm = element size
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_get
+    mov edi, [rt_seq_off]
+    add edi, 0xD7  ; offset to rt_seq_get
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_SEQ_STORE: seq[index] = value
+; src1 = seq pointer, src2 = index, aux = value vreg, imm = element size
+cge_seq_store:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (index)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move index to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Load aux vreg (value) — inline vreg_phys lookup
+    movzx rax, word [r14 + 16]  ; aux = value vreg number
+    movzx rax, byte [vreg_phys + rax]
+    cmp al, 255
+    jne .cge_seq_store_val_ok
+    ; Spilled — reload into r14 (safe: seq already moved to rdi)
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x8B
+    call emit_b
+    mov dil, 0xB5
+    call emit_b
+    push r9
+    movzx rbx, word [r14 + 16]
+    mov edi, dword [vreg_offset + rbx * 4]
+    call emit_d
+    pop r9
+    mov al, 6  ; r14
+.cge_seq_store_val_ok:
+    mov r10b, al                ; value phys
+
+    ; Move value to rdx
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r10b
+    shl al, 3
+    or al, 0xC2
+    mov dil, al
+    call emit_b
+
+    ; Move element size to rcx
+    movzx rax, word [r14 + 8]  ; imm = element size
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC1
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_set
+    mov edi, [rt_seq_off]
+    add edi, 0xEE ; offset to rt_seq_set
+    call emit_runtime_call
+    jmp codegen_emit_all.next_ir
+
+; IR_SEQ_LEN: dst = len(seq)
+; src1 = seq pointer
+cge_seq_len:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Call rt_seq_len
+    mov edi, [rt_seq_off]
+    add edi, 0x105 ; offset to rt_seq_len
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_SEQ_POP: dst = pop(seq)
+; src1 = seq pointer, imm = element size
+cge_seq_pop:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move element size to rsi
+    movzx rax, word [r14 + 8]  ; imm = element size
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_pop
+    mov edi, [rt_seq_off]
+    add edi, 0x10B ; offset to rt_seq_pop
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_SEQ_INSERT: seq.insert(index, value) — void
+; src1 = seq pointer, src2 = index, aux = value vreg, imm = element size
+cge_seq_insert:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (index)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move index to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Load aux vreg (value) — inline vreg_phys lookup
+    movzx rax, word [r14 + 16]  ; aux = value vreg number
+    movzx rax, byte [vreg_phys + rax]
+    cmp al, 255
+    jne .cge_seq_insert_val_ok
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x8B
+    call emit_b
+    mov dil, 0xB5
+    call emit_b
+    push r9
+    movzx rbx, word [r14 + 16]
+    mov edi, dword [vreg_offset + rbx * 4]
+    call emit_d
+    pop r9
+    mov al, 6
+.cge_seq_insert_val_ok:
+    mov r10b, al                ; value phys
+
+    ; Move value to rdx
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r10b
+    shl al, 3
+    or al, 0xC2
+    mov dil, al
+    call emit_b
+
+    ; Move element size to rcx
+    movzx rax, word [r14 + 8]  ; imm = element size
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC1
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_insert
+    mov edi, [rt_seq_off]
+    add edi, 0x134  ; offset to rt_seq_insert
+    call emit_runtime_call
+    jmp codegen_emit_all.next_ir
+
+; IR_SEQ_REMOVE: dst = seq.remove(index)
+; src1 = seq pointer, src2 = index, imm = element size
+cge_seq_remove:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (index)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move seq pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move index to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Move element size to rdx
+    movzx rax, word [r14 + 8]  ; imm = element size
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_seq_remove
+    mov edi, [rt_seq_off]
+    add edi, 0x202  ; offset to rt_seq_remove
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; ============ Array Operations ============
+
+; IR_ARR_NEW: dst = stack-allocated array of N elements
+; imm = total size in bytes (N * elem_size), aux = element size
+cge_arr_new:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    ; Allocate space: SUB RSP, imm
+    movzx eax, word [r14 + 8]  ; imm = total size
+    ; emit: sub rsp, size (48 83 EC xx for small, 48 81 EC xx xx xx xx for large)
+    cmp eax, 127
+    ja .arr_new_large
+    ; Small: sub rsp, imm8
+    mov dil, 0x48; call emit_b
+    mov dil, 0x83; call emit_b
+    mov dil, 0xEC; call emit_b
+    mov dil, al; call emit_b
+    jmp .arr_new_set_ptr
+.arr_new_large:
+    ; Large: sub rsp, imm32
+    mov dil, 0x48; call emit_b
+    mov dil, 0x81; call emit_b
+    mov dil, 0xEC; call emit_b
+    mov edi, eax; call emit_d
+.arr_new_set_ptr:
+    ; dst = RSP (lea r(dst), [rsp])
+    mov dil, 0x4C; call emit_b
+    mov dil, 0x8D; call emit_b
+    mov al, r8b
+    shl al, 3
+    or al, 0x04  ; SIB byte follows
+    mov dil, al; call emit_b
+    mov dil, 0x24; call emit_b  ; SIB: base=RSP
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_ARR_LOAD: dst = arr[index]
+; src1 = array base vreg, src2 = index vreg, aux = element size
+cge_arr_load:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (array base)
+    call load_src1_phys
+    mov r15b, al                ; array base phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (index)
+    call load_src2_phys
+    mov r9b, al                 ; index phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    ; emit: mov r(dst), [r(base) + r(index) * elem_size]
+    ; REX.W + 8B + ModRM(mod=00, reg=dst, rm=100) + SIB(scale, index, base)
+    mov dil, 0x4C; call emit_b
+    mov dil, 0x8B; call emit_b
+    ; ModRM: mod=00, reg=dst, rm=100 (SIB follows)
+    mov al, r8b
+    shl al, 3
+    or al, 0x04
+    mov dil, al; call emit_b
+    ; SIB: scale = log2(elem_size), index, base
+    movzx eax, word [r14 + 16] ; aux = element size
+    ; Compute scale: 1->0, 2->1, 4->2, 8->3
+    xor ecx, ecx
+    cmp eax, 2
+    jl .arr_load_scale_0
+    je .arr_load_scale_1
+    cmp eax, 4
+    je .arr_load_scale_2
+    mov cl, 3  ; scale 8
+    jmp .arr_load_scale_done
+.arr_load_scale_2:
+    mov cl, 2
+    jmp .arr_load_scale_done
+.arr_load_scale_1:
+    mov cl, 1
+.arr_load_scale_0:
+.arr_load_scale_done:
+    shl cl, 6  ; scale in bits 7-6
+    mov al, r9b ; index reg
+    shl al, 3
+    or cl, al
+    or cl, r15b ; base reg
+    mov dil, cl; call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_ARR_STORE: arr[index] = value
+; src1 = array base vreg, src2 = index vreg, aux = (elem_size | (value_vreg << 16))
+; For store, we use the aux field differently: lower 16 = elem_size, upper 16 = value vreg
+cge_arr_store:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (array base)
+    call load_src1_phys
+    mov r15b, al                ; base phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (index)
+    call load_src2_phys
+    mov r9b, al                 ; index phys
+    ; Load value vreg from aux high word
+    movzx rax, word [r14 + 18] ; aux high 16 bits = value vreg
+    movzx rax, byte [vreg_phys + rax]
+    cmp al, 255
+    jne .arr_store_val_ok
+    ; Value is spilled — load from stack into r10
+    movzx r10, word [r14 + 18]
+    mov dil, 0x4C; call emit_b
+    mov dil, 0x8B; call emit_b
+    mov dil, 0x95; call emit_b  ; ModRM: mod=10, reg=r10, rm=rbp
+    movzx rbx, word [r14 + 18]
+    mov edi, dword [vreg_offset + rbx * 4]
+    call emit_d
+    mov r10b, 2  ; r10 is phys reg 2
+    jmp .arr_store_emit
+.arr_store_val_ok:
+    mov r10b, al                ; value phys
+.arr_store_emit:
+    ; emit: mov [r(base) + r(index) * elem_size], r(value)
+    mov dil, 0x4C; call emit_b
+    mov dil, 0x89; call emit_b
+    mov al, r10b
+    shl al, 3
+    or al, 0x04
+    mov dil, al; call emit_b
+    ; SIB
+    movzx eax, word [r14 + 16] ; elem_size
+    xor ecx, ecx
+    cmp eax, 2
+    jl .arr_store_scale_0
+    je .arr_store_scale_1
+    cmp eax, 4
+    je .arr_store_scale_2
+    mov cl, 3
+    jmp .arr_store_scale_done
+.arr_store_scale_2:
+    mov cl, 2
+    jmp .arr_store_scale_done
+.arr_store_scale_1:
+    mov cl, 1
+.arr_store_scale_0:
+.arr_store_scale_done:
+    shl cl, 6
+    mov al, r9b
+    shl al, 3
+    or cl, al
+    or cl, r15b
+    mov dil, cl; call emit_b
+    jmp codegen_emit_all.next_ir
+
+; ============ Dict Operations ============
+
+; IR_DICT_NEW: allocate dict, dst = pointer to dict header
+; imm = initial capacity, aux = element type (unused for now)
+cge_dict_new:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Emit: mov rdi, capacity
+    mov rax, [r14 + 8]          ; imm = capacity
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    ; Call rt_dict_new
+    mov edi, [rt_dict_off]
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_DICT_LOAD: dst = dict[key]
+; src1 = dict pointer, src2 = key vreg
+cge_dict_load:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (dict pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (key)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Push caller-saved regs that the register allocator may have assigned
+    mov dil, 0x51               ; push rcx
+    call emit_b
+    mov dil, 0x52               ; push rdx
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x50               ; push r8
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x51               ; push r9
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x52               ; push r10
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x53               ; push r11
+    call emit_b
+
+    ; Move dict pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move key to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Call rt_dict_get
+    mov edi, [rt_dict_off]
+    add edi, 0x8C  ; offset to rt_dict_get
+    call emit_runtime_call
+
+    ; Pop caller-saved regs (reverse order)
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x5B               ; pop r11
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x5A               ; pop r10
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x59               ; pop r9
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x58               ; pop r8
+    call emit_b
+    mov dil, 0x5A               ; pop rdx
+    call emit_b
+    mov dil, 0x59               ; pop rcx
+    call emit_b
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_DICT_STORE: dict[key] = value — void
+; src1 = dict pointer, src2 = key vreg, aux = value vreg
+cge_dict_store:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (dict pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (key)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+
+    ; Push caller-saved regs
+    mov dil, 0x51               ; push rcx
+    call emit_b
+    mov dil, 0x52               ; push rdx
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x50               ; push r8
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x51               ; push r9
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x52               ; push r10
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x53               ; push r11
+    call emit_b
+
+    ; Move dict pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move key to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Load aux vreg (value) — inline vreg_phys lookup
+    movzx rax, word [r14 + 16]  ; aux = value vreg number
+    movzx rax, byte [vreg_phys + rax]
+    cmp al, 255
+    jne .cge_dict_store_val_ok
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x8B
+    call emit_b
+    mov dil, 0xB5
+    call emit_b
+    push r9
+    movzx rbx, word [r14 + 16]
+    mov edi, dword [vreg_offset + rbx * 4]
+    call emit_d
+    pop r9
+    mov al, 6
+.cge_dict_store_val_ok:
+    mov r10b, al                ; value phys
+
+    ; Move value to rdx
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r10b
+    shl al, 3
+    or al, 0xC2
+    mov dil, al
+    call emit_b
+
+    ; Call rt_dict_set
+    mov edi, [rt_dict_off]
+    add edi, 0x119  ; offset to rt_dict_set
+    call emit_runtime_call
+
+    ; Pop caller-saved regs (reverse order)
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x5B               ; pop r11
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x5A               ; pop r10
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x59               ; pop r9
+    call emit_b
+    mov dil, 0x41
+    call emit_b
+    mov dil, 0x58               ; pop r8
+    call emit_b
+    mov dil, 0x5A               ; pop rdx
+    call emit_b
+    mov dil, 0x59               ; pop rcx
+    call emit_b
+
+    jmp codegen_emit_all.next_ir
+
+; IR_DICT_LEN: dst = len(dict)
+; src1 = dict pointer
+cge_dict_len:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (dict pointer)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move dict pointer to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Call rt_dict_len
+    mov edi, [rt_dict_off]
+    add edi, 0x1F3  ; offset to rt_dict_len
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; ============ String Operations ============
+
+; IR_STR_CONCAT: dst = str1 + str2
+; src1 = str1 pointer, src2 = str2 pointer
+cge_str_concat:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (str1)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg (str2)
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move str1 to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Move str2 to rsi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; Call rt_str_concat
+    mov edi, [rt_str_off]
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_STR_LEN: dst = len(str)
+; src1 = str pointer
+cge_str_len:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (str)
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+
+    ; Move str to rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; Call rt_str_len
+    mov edi, [rt_str_off]
+    add edi, 64  ; offset to rt_str_len
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; IR_NULL_COALESCE: dst = src1 != 0 ? src1 : src2
+cge_null_coalesce:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg
+    call load_src1_phys
+    mov r15b, al                ; src1 phys
+    movzx eax, word [r14 + 6]  ; src2 vreg
+    call load_src2_phys
+    mov r9b, al                 ; src2 phys
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                 ; dst phys
+    ; mov r(dst), r(src2): default to src2
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    ; test r(src1), r(src1)
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x85
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC0
+    or al, r15b
+    mov dil, al
+    call emit_b
+    ; cmovnz r(dst), r(src1): 4D 0F 45 (0xC0|(dst<<3)|src1)
+    mov dil, 0x4D
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0x45
+    call emit_b
+    mov al, r8b
+    shl al, 3
+    or al, 0xC0
+    or al, r15b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; ============ Control Flow Codegen ============
+
+; IR_LABEL: record current out_idx in label_table[imm]
+cge_label:
+    movzx eax, word [r14 + 8]  ; label ID from imm field
+    cmp eax, 256
+    jae .label_skip
+    mov ecx, [out_idx]
+    mov [label_table + rax * 4], ecx
+.label_skip:
+    jmp codegen_emit_all.next_ir
+
+; IR_JMP: emit JMP, use short form if target already resolved
+cge_jmp:
+    movzx eax, word [r14 + 8]  ; target label ID
+    cmp eax, 256
+    jae .jmp_long
+    mov ecx, [label_table + rax * 4]
+    cmp ecx, 0xFFFFFFFF
+    je .jmp_long
+    ; Label already resolved — compute displacement
+    mov edx, [out_idx]
+    add edx, 2                  ; short JMP is 2 bytes
+    sub ecx, edx                ; displacement = target - (pos + 2)
+    cmp ecx, -128
+    jl .jmp_long
+    cmp ecx, 127
+    jg .jmp_long
+    ; Use short JMP: EB rel8
+    mov dil, 0xEB
+    call emit_b
+    mov dil, cl
+    call emit_b
+    jmp codegen_emit_all.next_ir
+.jmp_long:
+    ; Forward jump — use rel32 with patching
+    mov dil, 0xE9
+    call emit_b
+    mov ecx, [out_idx]
+    movzx eax, word [r14 + 8]
+    mov edx, [jump_patch_count]
+    cmp edx, 128
+    jae .jmp_no_patch
+    mov [jump_patches + rdx * 8], ecx
+    mov [jump_patches + rdx * 8 + 4], eax
+    inc dword [jump_patch_count]
+.jmp_no_patch:
+    xor edi, edi
+    call emit_d
+    jmp codegen_emit_all.next_ir
+
+; IR_JCC: emit CMP + Jcc, use short form if target already resolved
+cge_jcc:
+    movzx eax, word [r14 + 4]  ; src1 vreg (bool to test)
+    call load_src1_phys
+    mov r15b, al
+    ; cmp r(src1), 1
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x81
+    call emit_b
+    mov al, 0xF8
+    or al, r15b
+    mov dil, al
+    call emit_b
+    mov edi, 1
+    call emit_d
+    ; Check if target label is already resolved
+    movzx eax, word [r14 + 8]  ; target label ID
+    cmp eax, 256
+    jae .jcc_long
+    mov ecx, [label_table + rax * 4]
+    cmp ecx, 0xFFFFFFFF
+    je .jcc_long
+    ; Label resolved — try short Jcc
+    mov edx, [out_idx]
+    add edx, 2                  ; short Jcc is 2 bytes
+    sub ecx, edx
+    cmp ecx, -128
+    jl .jcc_long
+    cmp ecx, 127
+    jg .jcc_long
+    ; Use short Jcc: 7x rel8
+    movzx eax, word [r14 + 16] ; aux = condition code
+    lea rsi, [rel .jcc8_table]
+    movzx eax, byte [rsi + rax]
+    mov dil, al
+    call emit_b
+    mov dil, cl
+    call emit_b
+    jmp codegen_emit_all.next_ir
+.jcc_long:
+    ; Forward jump — use rel32
+    movzx eax, word [r14 + 16]
+    lea rsi, [rel .jcc_table]
+    movzx ecx, byte [rsi + rax] ; second byte of 0F 8x opcode
+    push rcx ; save second byte (emit_b clobbers ecx)
+    mov dil, 0x0F
+    call emit_b
+    pop rcx
+    mov dil, cl
+    call emit_b
+    ; Record patch
+    mov ecx, [out_idx]
+    movzx eax, word [r14 + 8]  ; target label ID
+    mov edx, [jump_patch_count]
+    cmp edx, 128
+    jae .jcc_no_patch
+    mov [jump_patches + rdx * 8], ecx
+    mov [jump_patches + rdx * 8 + 4], eax
+    inc dword [jump_patch_count]
+.jcc_no_patch:
+    xor edi, edi
+    call emit_d
+    jmp codegen_emit_all.next_ir
+
+.jcc_table: db 0x84, 0x85, 0x8C, 0x8E, 0x8F, 0x8D  ; JE, JNE, JL, JLE, JG, JGE
+.jcc8_table: db 0x74, 0x75, 0x7C, 0x7E, 0x7F, 0x7D  ; short JE, JNE, JL, JLE, JG, JGE
+
+; IR_RET: emit return, optionally moving src1 to rax
+cge_ret:
+    mov dword [dst_spilled_vreg], 0
+    movzx ecx, word [r14 + 4] ; src1 vreg (return value)
+    test cx, cx
+    jz .ret_no_val
+    ; Move return value to rax
+    call load_src1_phys
+    ; emit: mov rax, phys_reg
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    shl al, 3
+    or al, 0xC0
+    mov dil, al
+    call emit_b
+.ret_no_val:
+    ; emit: ret (C3)
+    mov dil, 0xC3
+    call emit_b
+    jmp codegen_emit_all.next_ir
+
+; ─────────── EXTENDED SEQ OPERATIONS ──────────────────
+
+cge_seq_first:
+    ; IR_SEQ_FIRST: dst = seq[0] — emit seq_get(seq, 0, elem_size)
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (seq)
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al
+
+    ; rdi = seq
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; rsi = 0 (index)
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    xor edi, edi
+    call emit_d
+
+    ; rdx = element_size
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0xD7   ; rt_seq_get offset
+    call emit_runtime_call
+
+    ; mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_last:
+    ; IR_SEQ_LAST: dst = seq[len-1]
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    ; Call rt_seq_len first
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    mov edi, [rt_seq_off]
+    add edi, 0x105   ; rt_seq_len offset
+    call emit_runtime_call
+    ; rax = length
+
+    ; dec rax (index = len - 1)
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xFF
+    call emit_b
+    mov dil, 0xC8
+    call emit_b
+
+    ; mov rsi, rax
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+
+    ; Reload seq into rdi
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; rdx = element_size
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0xD7   ; rt_seq_get offset
+    call emit_runtime_call
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_contains:
+    ; IR_SEQ_CONTAINS: dst = bool(seq contains value)
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 6]
+    call load_src2_phys
+    mov r9b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    ; rdi = seq
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    ; rsi = value
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    ; rdx = element_size
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0x27E  ; rt_seq_contains offset
+    call emit_runtime_call
+
+    ; Convert 0/1 to Rex bool: movzx rax,al; add rax,rax; dec rax
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    mov dil, 0xB6
+    call emit_b
+    mov dil, 0xC0
+    call emit_b
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x01
+    call emit_b
+    mov dil, 0xC0
+    call emit_b
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xFF
+    call emit_b
+    mov dil, 0xC8
+    call emit_b
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_index_of:
+    ; IR_SEQ_INDEX_OF: dst = index of value (-1 if not found)
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 6]
+    call load_src2_phys
+    mov r9b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r9b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC2
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0x2CB  ; rt_seq_index_of offset
+    call emit_runtime_call
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_copy:
+    ; IR_SEQ_COPY: dst = copy of seq
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0x31A  ; rt_seq_copy offset
+    call emit_runtime_call
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_reverse:
+    ; IR_SEQ_REVERSE: reverse in place (void)
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0x38F  ; rt_seq_reverse offset
+    call emit_runtime_call
+    jmp codegen_emit_all.next_ir
+
+cge_seq_sum:
+    ; IR_SEQ_SUM: dst = sum of elements
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0x3EC  ; rt_seq_sum offset
+    call emit_runtime_call
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_min:
+    ; IR_SEQ_MIN: dst = min element
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0x420  ; rt_seq_min offset
+    call emit_runtime_call
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_max:
+    ; IR_SEQ_MAX: dst = max element
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    movzx eax, word [r14 + 8]
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0xC7
+    call emit_b
+    mov dil, 0xC6
+    call emit_b
+    mov edi, eax
+    call emit_d
+
+    mov edi, [rt_seq_off]
+    add edi, 0x473  ; rt_seq_max offset
+    call emit_runtime_call
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+cge_seq_clear:
+    ; IR_SEQ_CLEAR: set length to 0 (void)
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    mov edi, [rt_seq_off]
+    add edi, 0x4C6  ; rt_seq_clear offset
+    call emit_runtime_call
+    jmp codegen_emit_all.next_ir
+
+cge_seq_cap:
+    ; IR_SEQ_CAP: dst = capacity
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]
+    call load_src1_phys
+    mov r15b, al
+    movzx eax, word [r14 + 2]
+    call get_dst_phys
+    mov r8b, al
+
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+
+    mov edi, [rt_seq_off]
+    add edi, 0x4CF  ; rt_seq_cap offset
+    call emit_runtime_call
+
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; resolve_jumps: patch all recorded jump offsets using label_table
+resolve_jumps:
+    push rbx
+    push r12
+    push r13
+    mov r12d, [jump_patch_count]
+    test r12d, r12d
+    jz .done
+    xor r13d, r13d
+.loop:
+    cmp r13d, r12d
+    jae .done
+    mov eax, [jump_patches + r13 * 8]      ; patch_offset (position of rel32 field)
+    mov ecx, [jump_patches + r13 * 8 + 4]  ; target label ID
+    cmp ecx, 256
+    jae .skip
+    mov edx, [label_table + rcx * 4]       ; target output offset
+    cmp edx, 0xFFFFFFFF
+    je .skip
+    ; rel32 = target - (patch_offset + 4)
+    sub edx, eax
+    sub edx, 4
+    mov [out_buffer + rax], edx            ; write rel32 at patch_offset
+.skip:
+    inc r13d
+    jmp .loop
+.done:
+    pop r13
+    pop r12
+    pop rbx
     ret
 

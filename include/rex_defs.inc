@@ -32,6 +32,19 @@ TOK_LPAREN      equ 26 ; (
 TOK_RPAREN      equ 27 ; )
 TOK_MOD         equ 28 ; %
 TOK_AND         equ 29 ; &
+TOK_EQ          equ 50 ; ==
+TOK_NE          equ 51 ; !=
+TOK_LT          equ 52 ; <
+TOK_GT          equ 53 ; >
+TOK_LE          equ 54 ; <=
+TOK_GE          equ 55 ; >=
+TOK_DOTDOT      equ 56 ; ..
+TOK_LSHIFT      equ 57 ; <<
+TOK_RSHIFT      equ 58 ; >>
+TOK_TILDE       equ 59 ; ~
+TOK_PLUSPLUS     equ 60 ; ++
+TOK_MINUSMINUS   equ 61 ; --
+TOK_ARROW       equ 62 ; ->
 TOK_OR          equ 33 ; |
 TOK_XOR         equ 34 ; ^
 TOK_LBRACKET    equ 35 ; [
@@ -46,6 +59,58 @@ TOK_QQ          equ 43 ; ??
 TOK_BOOL_AND    equ 44 ; and (bool keyword)
 TOK_BOOL_OR     equ 45 ; or  (bool keyword)
 TOK_BOOL_NOT    equ 46 ; not (bool keyword)
+
+; Control Flow Keywords
+TOK_IF          equ 70 ; if
+TOK_ELIF        equ 71 ; elif
+TOK_ELSE        equ 72 ; else
+TOK_FOR         equ 73 ; for
+TOK_WHILE       equ 74 ; while
+TOK_EACH        equ 75 ; each
+TOK_REPEAT      equ 76 ; repeat
+TOK_IN          equ 77 ; in
+TOK_STEP        equ 78 ; step
+TOK_STOP        equ 79 ; stop
+TOK_SKIP        equ 80 ; skip
+TOK_PASS        equ 81 ; pass
+TOK_IS          equ 82 ; is
+TOK_IS_NOT      equ 83 ; is not
+TOK_SWITCH      equ 84 ; switch
+TOK_TRY         equ 85 ; try
+TOK_EXCEPT      equ 86 ; except
+TOK_FINALLY     equ 87 ; finally
+TOK_RAISE       equ 88 ; raise
+TOK_SWAP        equ 89 ; swap
+TOK_ABS         equ 90 ; abs
+TOK_FLIP        equ 91 ; flip
+TOK_LEN         equ 92 ; len
+TOK_SCOPE       equ 93 ; scope
+TOK_ASSERT      equ 94 ; assert
+TOK_UNREACHABLE equ 95 ; unreachable
+TOK_MODULE      equ 96 ; module
+TOK_USE         equ 97 ; use
+TOK_DECORATOR   equ 98 ; decorator
+TOK_FN          equ 99 ; fn (function literals)
+TOK_HASH        equ 100 ; hash
+TOK_CARRY       equ 101 ; carry
+TOK_OVERFLOW    equ 102 ; overflow
+TOK_RAND        equ 103 ; rand
+TOK_WHEN        equ 104 ; when
+TOK_WITH        equ 105 ; with
+TOK_OPEN        equ 106 ; open
+TOK_AS          equ 107 ; as
+
+; Compound Assignment Operators
+TOK_PLUS_EQ     equ 110 ; +=
+TOK_MINUS_EQ    equ 111 ; -=
+TOK_STAR_EQ     equ 112 ; *=
+TOK_SLASH_EQ    equ 113 ; /=
+TOK_MOD_EQ      equ 114 ; %=
+TOK_AND_EQ      equ 115 ; &=
+TOK_OR_EQ       equ 116 ; |=
+TOK_XOR_EQ      equ 117 ; ^=
+TOK_LSHIFT_EQ   equ 118 ; <<=
+TOK_RSHIFT_EQ   equ 119 ; >>=
 
 ; Control Tokens
 TOK_NEWLINE     equ 30
@@ -64,6 +129,8 @@ TYPE_DICT       equ 7
 TYPE_CHAR       equ 8
 TYPE_BYTE       equ 9
 TYPE_ALIAS      equ 10
+TYPE_TUP        equ 11
+TYPE_ARR        equ 12
 
 ; Scopes
 SCOPE_GLOBAL    equ 0
@@ -88,11 +155,14 @@ VAR_STORAGE_BASE equ 0x00440000
 VAR_ENTRY_SIZE   equ 64
 VAR_ENTRY_SIZE_LOG2 equ 6
 VAR_MAX          equ 256
-HEADERS_SIZE     equ 120
-RT_TOTAL_SIZE    equ 8448
-CODE_START       equ 8573
+HEADERS_SIZE     equ 125       ; 64 ELF header + 56 program header + 5 JMP
 
 VREG_MAX         equ 65536
 SRC_FILE_MAX     equ 65536
 OUT_BUF_MAX      equ 131072
 VAR_MEM_OFFSET   equ (VAR_STORAGE_BASE - LOAD_BASE) + (VAR_MAX * VAR_ENTRY_SIZE)
+
+; Collection defaults
+DICT_INITIAL_CAPACITY equ 16
+SEQ_ELEMENT_SIZE equ 8
+TYPE_NAME_BUF_SIZE equ 4096

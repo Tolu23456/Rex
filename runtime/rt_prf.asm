@@ -152,11 +152,13 @@ BITS 64
 .float_neg_one dq -1.0
 .float_10      dq 10.0
 .mask_exp      dq 0x7FF0000000000000
+.mask_frac     dq 0x000FFFFFFFFFFFFF
 
 .print_nan_or_inf:
     ; Check if NaN (fraction bits != 0) or Inf (fraction bits == 0)
     movq rax, xmm0
-    test rax, 0x000FFFFFFFFFFFFF
+    mov rdx, [rel .mask_frac]
+    test rax, rdx
     jnz .print_nan
     ; Inf — check sign
     test rax, rax
@@ -198,4 +200,3 @@ BITS 64
     ret
 
 ; Pad to exactly 512 bytes
-times 512 - ($ - $$) db 0

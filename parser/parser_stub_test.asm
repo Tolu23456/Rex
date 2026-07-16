@@ -6,7 +6,6 @@
 
 section .data
     current_token   dd 0
-    current_scope   dd SCOPE_GLOBAL
 
     ; Error messages
     err_syntax      db "Syntax Error: Unexpected token", 0

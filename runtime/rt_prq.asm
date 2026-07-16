@@ -36,5 +36,4 @@ BITS 64
     syscall
 
 ; Pad to exactly 1024 bytes
-times 1024 - ($ - $$) db 0
 

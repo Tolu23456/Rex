@@ -12,8 +12,8 @@ BITS 64
 
     ; Check for INT64_MIN (negation would overflow)
     mov rcx, rax
-    inc rcx
-    jnz .not_min
+    cmp rcx, -0x8000000000000000
+    jne .not_min
     ; INT64_MIN: print directly from constant
     lea rsi, [rel .str_min]
     mov rdx, 20
@@ -77,5 +77,4 @@ BITS 64
 .str_min db "-9223372036854775808"
 
 ; Pad to exactly 512 bytes
-times 512 - ($ - $$) db 0
 

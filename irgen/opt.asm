@@ -381,6 +381,11 @@ pass_dead_store_elimination:
 
 
 pass_load_store_coalescing:
+    ; Scan for branching IR opcodes. If any exist, skip this pass entirely
+    ; because forward-scan coalescing is unsound across branches/loops.
+    call has_branching_ir
+    test rax, rax
+    jnz .done
     ; Initialize
     mov rcx, VAR_MAX
     lea rdi, [var_cached_vreg]
@@ -483,6 +488,9 @@ pass_peephole:
     ; NOTE: vreg_is_const[] is still populated from pass_constant_folding,
     ; so peephole reads correct data.  New aliases written here are consumed
     ; by pass_apply_aliases which runs immediately after.
+    call has_branching_ir
+    test rax, rax
+    jnz .done
     mov r12d, [ir_count]
     test r12d, r12d
     jz .done
@@ -506,6 +514,12 @@ pass_peephole:
     je .arith
     cmp eax, IR_MOD
     je .arith
+    cmp eax, IR_XOR
+    je .arith
+    cmp eax, IR_AND
+    je .arith
+    cmp eax, IR_OR
+    je .arith
     jmp .next
 
 .arith:
@@ -523,6 +537,13 @@ pass_peephole:
     ; Check if src2 is constant 2 (strength reduction)
     cmp qword [vreg_const_val + rdx * 8], 2
     je .src2_two
+    ; Check if src1 == src2 (x op x patterns)
+    cmp cx, dx
+    jne .check_src1
+    cmp eax, IR_XOR      ; x ^ x = 0
+    je .zero_out
+    cmp eax, IR_SUB      ; x - x = 0
+    je .zero_out
     jmp .check_src1
 
 .src2_two:
@@ -542,6 +563,12 @@ pass_peephole:
     je .alias_src1
     cmp eax, IR_MUL
     je .zero_out
+    cmp eax, IR_XOR      ; x ^ 0 = x
+    je .alias_src1
+    cmp eax, IR_AND      ; x & 0 = 0
+    je .zero_out
+    cmp eax, IR_OR       ; x | 0 = x
+    je .alias_src1
     jmp .next
 
 .src2_one:
@@ -549,7 +576,11 @@ pass_peephole:
     je .alias_src1
     cmp eax, IR_DIV
     je .alias_src1
-    jmp .next
+    cmp eax, IR_MOD      ; x % 1 = 0 (for int only)
+    jne .next
+    cmp byte [r13 + 1], TYPE_FLOAT
+    je .next
+    jmp .zero_out
 
 .check_src1:
     cmp byte [vreg_is_const + rcx], 1
@@ -575,14 +606,31 @@ pass_peephole:
 .src1_zero:
     cmp eax, IR_ADD
     je .alias_src2
+    cmp eax, IR_SUB      ; 0 - x = -x
+    je .neg_src2
     cmp eax, IR_MUL
     je .zero_out
     cmp eax, IR_DIV
-    jne .next
+    jne .check_src1_mod
     ; For float: 0.0 / 0.0 = NaN, so don't fold
     cmp byte [r13 + 1], TYPE_FLOAT
     je .next
     jmp .zero_out
+.check_src1_mod:
+    cmp eax, IR_MOD      ; 0 % x = 0
+    jne .next
+    cmp byte [r13 + 1], TYPE_FLOAT
+    je .next
+    jmp .zero_out
+
+.neg_src2:
+    ; 0 - x = NEG x: transform SUB into NEG
+    mov byte [r13 + 0], IR_NEG
+    ; src1 becomes src2 (the value to negate)
+    movzx eax, word [r13 + 6]
+    mov [r13 + 4], ax
+    mov word [r13 + 6], 0
+    jmp .next
 
 .src1_one:
     cmp eax, IR_MUL
@@ -634,6 +682,9 @@ pass_peephole:
 ;  pass_load_store_coalescing and pass_peephole.
 ; ============================================================
 pass_apply_aliases:
+    call has_branching_ir
+    test rax, rax
+    jnz .done
     mov r12d, [ir_count]
     test r12d, r12d
     jz .done

@@ -36,4 +36,3 @@ BITS 64
 .str_false   db "false",   10
 
 ; Pad to exactly 256 bytes
-times 256 - ($ - $$) db 0

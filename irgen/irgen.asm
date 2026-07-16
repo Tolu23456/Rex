@@ -17,7 +17,6 @@ section .text
     global ir_init
     global emit_ir
     global alloc_vreg
-    global print_ir ; For debugging
 
 ir_init:
     mov dword [ir_count], 0
@@ -68,7 +67,18 @@ emit_ir:
     mov [rbx + 6], r8w  ; src2
     mov [rbx + 8], r9   ; imm
     mov [rbx + 16], r10 ; aux
-    mov dword [rbx + 24], 0 ; flags
+    ; Set IR_FLAG_CONST for load-immediate opcodes (value is known at compile time)
+    cmp dil, IR_LOAD_IMM
+    je .set_const_flag
+    cmp dil, IR_LOAD_FIMM
+    je .set_const_flag
+    cmp dil, IR_LOAD_BOOL
+    je .set_const_flag
+    mov dword [rbx + 24], 0 ; flags = 0
+    jmp .flags_done
+.set_const_flag:
+    mov dword [rbx + 24], IR_FLAG_CONST
+.flags_done:
     mov dword [rbx + 28], 0 ; _pad
     
     inc dword [ir_count]
@@ -79,16 +89,16 @@ emit_ir:
     ; Exit with error (write error to stderr and exit)
     mov rax, 1          ; sys_write
     mov rdi, 2          ; stderr
-    mov rsi, .err_msg
-    mov rdx, .err_len
+    lea rsi, [rel emit_ir_overflow_msg]
+    mov rdx, emit_ir_overflow_len
     syscall
-    
+
     mov rax, 60         ; sys_exit
     mov rdi, 1          ; exit code 1
     syscall
 
 section .rodata
-    .err_msg db "Error: IR buffer overflow", 10
-    .err_len equ $ - .err_msg
+    emit_ir_overflow_msg db "Error: IR buffer overflow", 10
+    emit_ir_overflow_len equ $ - emit_ir_overflow_msg
     err_vreg_msg db "Error: Virtual register overflow", 10
     err_vreg_len equ $ - err_vreg_msg

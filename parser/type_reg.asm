@@ -37,8 +37,8 @@ section .text
     global type_get_kind
     global type_get_size
     global type_set_size
-    global type_lookup
     global type_struct_add_field
+    global type_struct_find_field
 
 type_reg_init:
     mov dword [type_count], 0
@@ -122,6 +122,14 @@ type_reg_init:
     mov rsi, 1
     lea rdx, [name_byte]
     mov rcx, 4
+    xor r8, r8
+    call type_reg_add
+
+    ; Register TYPE_TUP (11)
+    mov rdi, TYPE_TUP
+    mov rsi, 8
+    xor rdx, rdx
+    xor rcx, rcx
     xor r8, r8
     call type_reg_add
 
@@ -330,4 +338,62 @@ type_struct_add_field:
 
     inc dword [struct_field_count]
 .done:
+    ret
+
+; type_struct_find_field: Look up a field by struct type and name
+; rdi = struct_type_id, rsi = field_name_ptr, rdx = field_name_len
+; Returns: rax = field_offset (-1 if not found), rcx = field_type_id
+type_struct_find_field:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r12, rdi            ; struct_type_id
+    mov r13, rsi            ; field_name_ptr
+    mov r14, rdx            ; field_name_len
+    xor ebx, ebx            ; index
+.find_loop:
+    cmp ebx, [struct_field_count]
+    jae .not_found
+    imul eax, ebx, 32
+    lea rax, [struct_fields_table + rax]
+    ; Check struct_type_id
+    cmp [rax], r12d
+    jne .find_next
+    ; Check field_name_len
+    cmp [rax + 16], r14
+    jne .find_next
+    ; Compare field_name
+    mov rsi, [rax + 8]      ; stored name ptr
+    mov rdi, r13            ; search name ptr
+    mov rcx, r14            ; length
+    test rcx, rcx
+    jz .find_match
+.find_cmp:
+    movzx r8, byte [rdi]
+    movzx r9, byte [rsi]
+    cmp r8b, r9b
+    jne .find_next
+    inc rdi
+    inc rsi
+    dec rcx
+    jnz .find_cmp
+.find_match:
+    ; Found! Return offset and type
+    imul eax, ebx, 32
+    lea rax, [struct_fields_table + rax]
+    mov ecx, [rax + 24]     ; field_type_id
+    mov eax, [rax + 28]     ; field_offset
+    jmp .find_done
+.find_next:
+    inc ebx
+    jmp .find_loop
+.not_found:
+    mov rax, -1
+    xor ecx, ecx
+.find_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret

@@ -21,7 +21,10 @@ RT_BINS=$(RUNTIME_DIR)/rt_pri.bin \
 	$(RUNTIME_DIR)/rt_prb.bin \
 	$(RUNTIME_DIR)/rt_prf.bin \
 	$(RUNTIME_DIR)/rt_prc.bin \
-	$(RUNTIME_DIR)/rt_prq.bin
+	$(RUNTIME_DIR)/rt_alloc.bin \
+	$(RUNTIME_DIR)/rt_seq.bin \
+	$(RUNTIME_DIR)/rt_str.bin \
+	$(RUNTIME_DIR)/rt_dict.bin
 
 # Compiler Object Files
 OBJS=$(MAIN_DIR)/main.o \
@@ -34,7 +37,7 @@ OBJS=$(MAIN_DIR)/main.o \
 	$(IRGEN_DIR)/opt.o \
 	$(CODEGEN_DIR)/codegen.o
 
-.PHONY: all clean runtimes
+.PHONY: all clean runtimes test
 
 all: $(TARGET)
 
@@ -76,6 +79,9 @@ $(MAIN_DIR)/main.o: $(MAIN_DIR)/main.asm
 # Link the Rex compiler
 $(TARGET): runtimes $(OBJS)
 	$(LD) -o $(TARGET) $(OBJS)
+
+test: all
+	./run_tests.sh
 
 clean:
 	rm -f $(RUNTIME_DIR)/*.bin
