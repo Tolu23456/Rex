@@ -45,6 +45,36 @@ description: Catalogue of all bugs found and fixed in the Rex NASM compiler, plu
 **Symptom:** All three helper functions used `rbx` (callee-saved, SysV ABI) as a scratch register without push/pop. Currently harmless because `codegen_emit_all` never relies on rbx across these calls, but a latent ABI violation that would corrupt callers if that ever changed.
 **Fix:** Added `push rbx` at entry and `pop rbx` before every `ret` in all three functions.
 
+### Bug 10 — Lexer: string escape sequences not translated (🔴 critical)
+**File:** `lexer/lexer.asm`
+**Symptom:** `.str_escape` incremented the length counter but wrote nothing into any buffer — `tok_str_ptr` pointed into the raw source buffer, so `\n` in source appeared as the two-byte sequence `\` + `n` in the output binary instead of LF (10).
+**Fix:** Added `tok_str_pool resb SRC_FILE_MAX` + `tok_str_pool_idx` to `.bss`. Rewrote `.string` handler to write each character (with escape translation: `\n`→10, `\t`→9, `\r`→13, `\0`→0, `\a`→7, `\b`→8, `\f`→12, `\v`→11, `\\`/`\"`/unknown→literal) into the pool and set `tok_str_ptr` to the pool slice. Pool index advances after each string so multi-string programs keep all pointers valid through codegen.
+
+### Bug 11 — Lexer: char literal escape sequences not translated (🔴)
+**File:** `lexer/lexer.asm`
+**Symptom:** `.char_escape` stored the raw byte after `\` into `tok_ival`. So `'\n'` → 110 ('n') instead of 10 (LF).
+**Fix:** Added the same translation table as Bug 10 inside `.char_escape` before `mov [tok_ival], rax`.
+
+### Bug 12 — Lexer: `is not` matches `is nothing`, `is notify`, `is not_x` etc. (🔴)
+**File:** `lexer/lexer.asm`
+**Symptom:** The `is not` lookahead checked only the four bytes `' '+'n'+'o'+'t'` with no word-boundary check. `is nothing` would match `is not` and leave `hing` as a stale suffix in the token stream, corrupting all subsequent tokens on that line.
+**Fix:** After matching `'t'`, peek at the next character (if within bounds). If it is a letter, digit, or `_` (identifier continuation), fall through to `.is_single` instead of consuming " not".
+
+### Bug 13 — Parser: `int→bool` cast uses wrong opcode name (🟡 semantic)
+**File:** `parser/parser.asm`
+**Symptom:** `.cast_use_itb` (int→bool) emitted `IR_CAST_BTI` (labelled "bool→int, no-op"). The codegen for `IR_CAST_BTI` happened to implement signum anyway, so runtime output was correct, but the opcode name was misleading and relied on an undocumented coincidence.
+**Fix:** Changed to `IR_SIGNUM` which explicitly documents the intent: map negative→-1, zero→0, positive→1.
+
+### Bug 14 — Main: wrong error messages for file-too-large and read-fail (🟡)
+**File:** `main/main.asm`
+**Symptom:** `.err_file_too_large` and `.err_read_source` both printed "Error: Cannot open source file". A user hitting either would see a misleading message.
+**Fix:** Added `err_file_large` ("Source file too large (max 64KB)"), `err_read_src` ("Cannot read source file"), and `err_write_out` ("Cannot write output file") strings; wired each error handler to its correct string.
+
+### Bug 15 — Main: single sys_read may return short (🟡)
+**File:** `main/main.asm`
+**Symptom:** One `sys_read` syscall was expected to read the entire source file. POSIX allows short reads; a short read would silently truncate the source, causing the lexer to see a partial file.
+**Fix:** Replaced the single read with a retry loop (`r14` = bytes read so far; loop until `r14 == src_file_size` or error/EOF). After the loop, `[src_file_size]` is updated to the actual bytes read and passed to `lex_init`.
+
 ---
 
 ## Architectural improvements

@@ -9,9 +9,18 @@ section .data
     
     err_open_in     db "Error: Cannot open source file", 10
     err_open_in_len equ $ - err_open_in
-    
+
+    err_file_large  db "Error: Source file too large (max 64KB)", 10
+    err_file_large_len equ $ - err_file_large
+
+    err_read_src    db "Error: Cannot read source file", 10
+    err_read_src_len equ $ - err_read_src
+
     err_open_out    db "Error: Cannot open output file", 10
     err_open_out_len equ $ - err_open_out
+
+    err_write_out   db "Error: Cannot write output file", 10
+    err_write_out_len equ $ - err_write_out
 
     default_out     db "a.out", 0
     success_msg     db "Compilation successful!", 10
@@ -113,15 +122,26 @@ _start:
     xor rdx, rdx        ; SEEK_SET = 0
     syscall
     
-    ; Read source file into buffer
-    mov rax, 0          ; sys_read
+    ; Read source file into buffer.
+    ; A single sys_read call may return fewer bytes than requested (short read).
+    ; Loop until all bytes are read or an error occurs.
+    xor r14, r14                ; r14 = bytes read so far
+.read_loop:
+    mov rax, 0                  ; sys_read
     mov rdi, r13
-    mov rsi, src_file_buf
+    lea rsi, [src_file_buf + r14]
     mov rdx, [src_file_size]
+    sub rdx, r14                ; remaining bytes to read
+    jz .read_done               ; already have everything
     syscall
-
     cmp rax, 0
-    jl .err_read_source
+    jl .err_read_source         ; syscall error
+    jz .read_done               ; EOF (0 bytes returned)
+    add r14, rax
+    cmp r14, [src_file_size]
+    jl .read_loop               ; still more to read
+.read_done:
+    mov [src_file_size], r14    ; update to actual bytes read
 
     ; Close source fd
     mov rax, 3          ; sys_close
@@ -233,10 +253,9 @@ _start:
 .err_file_too_large:
     mov rax, 1
     mov rdi, 2
-    mov rsi, err_open_in
-    mov rdx, err_open_in_len
+    mov rsi, err_file_large
+    mov rdx, err_file_large_len
     syscall
-
     mov rax, 60
     mov rdi, 1
     syscall
@@ -244,10 +263,9 @@ _start:
 .err_write_output:
     mov rax, 1
     mov rdi, 2
-    mov rsi, err_open_out
-    mov rdx, err_open_out_len
+    mov rsi, err_write_out
+    mov rdx, err_write_out_len
     syscall
-
     mov rax, 60
     mov rdi, 1
     syscall
@@ -255,21 +273,21 @@ _start:
 .err_read_source:
     mov rax, 1
     mov rdi, 2
-    mov rsi, err_open_in
-    mov rdx, err_open_in_len
+    mov rsi, err_read_src
+    mov rdx, err_read_src_len
     syscall
-
     mov rax, 60
     mov rdi, 1
     syscall
 
 .err_close_output:
+    ; Close failure after a successful write is non-fatal on Linux (data is
+    ; already flushed by sys_write), but we still report it and exit cleanly.
     mov rax, 1
     mov rdi, 2
-    mov rsi, err_open_out
-    mov rdx, err_open_out_len
+    mov rsi, err_write_out
+    mov rdx, err_write_out_len
     syscall
-
     mov rax, 60
     mov rdi, 1
     syscall

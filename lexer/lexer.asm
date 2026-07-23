@@ -88,6 +88,13 @@ section .bss
     pending_dedents resd 1
     at_line_start   resb 1
 
+    ; String translation pool: each lexed string literal is appended here
+    ; with escape sequences resolved.  tok_str_ptr is set to the pool slice.
+    ; Using a pool (rather than a single buffer) ensures that multiple string
+    ; literals in one source file all retain valid pointers through codegen.
+    tok_str_pool     resb SRC_FILE_MAX  ; translation arena (≤ source size)
+    tok_str_pool_idx resq 1             ; next free byte offset in pool
+
 section .text
     global lex_init
     global next_token
@@ -107,6 +114,8 @@ lex_init:
     ; Reset indentation stack to just containing 0
     mov dword [indent_stack], 0
     mov dword [indent_stack_len], 1
+    ; Reset string translation pool
+    mov qword [tok_str_pool_idx], 0
     ret
 
 ; Helper to peek next character without advancing
@@ -540,51 +549,99 @@ next_token:
     jmp next_token
 
 .string:
-    call read_char ; consume opening quote
-    mov rsi, [src_ptr]
-    mov rdi, [src_idx]
-    lea r11, [rsi + rdi]
-    mov [tok_str_ptr], r11 ; store string content start pointer
-    
-    xor r8, r8 ; string length count (using r8 instead of r12)
+    ; Allocate a slice from the string translation pool.
+    ; r11 = write base (pool_base + pool_idx); preserved across read_char calls
+    ; because read_char only clobbers rax, rsi, rdi.
+    call read_char ; consume opening '"'
+    lea r11, [tok_str_pool]
+    add r11, [tok_str_pool_idx]  ; r11 = &pool[pool_idx]
+    mov [tok_str_ptr], r11       ; tok_str_ptr → this pool slice
+    xor r8, r8                   ; length / write index
 .str_loop:
     call read_char
     test rax, rax
-    js .str_error          ; EOF
-    jz .str_error          ; null byte not allowed in strings
+    js .str_error          ; EOF inside string literal
+    jz .str_error          ; embedded null byte not allowed
     cmp rax, '"'
     je .str_done
     cmp rax, '\'
     je .str_escape
-    cmp rax, 10
+    cmp rax, 10            ; bare LF inside string — store as LF byte
     je .str_newline
+    mov [r11 + r8], al     ; store raw byte into pool
     inc r8
     jmp .str_loop
+
+    ; -- Escape sequence handler --
+    ; Reads the char after '\', translates it, writes one byte to pool.
+    ; Exception: '\' + LF = line continuation (no output byte).
 .str_escape:
-    ; Consume the character after backslash (escape sequence)
     call read_char
     test rax, rax
     js .str_error
-    cmp rax, 10
+    cmp rax, 10            ; \<LF> = line continuation — no byte emitted
     je .str_escape_newline
-    inc r8           ; count escape sequence as one character
+    ; Translate common C-style escapes
+    cmp rax, 'n'
+    je .se_n
+    cmp rax, 't'
+    je .se_t
+    cmp rax, 'r'
+    je .se_r
+    cmp rax, '0'
+    je .se_0
+    cmp rax, 'a'
+    je .se_a
+    cmp rax, 'b'
+    je .se_b
+    cmp rax, 'f'
+    je .se_f
+    cmp rax, 'v'
+    je .se_v
+    ; '\\', '\"', '\'' and unrecognised escapes: keep the literal char
+    jmp .se_store
+.se_n:  mov rax, 10  ; LF
+    jmp .se_store
+.se_t:  mov rax, 9   ; TAB
+    jmp .se_store
+.se_r:  mov rax, 13  ; CR
+    jmp .se_store
+.se_0:  xor rax, rax ; NUL
+    jmp .se_store
+.se_a:  mov rax, 7   ; BEL
+    jmp .se_store
+.se_b:  mov rax, 8   ; BS
+    jmp .se_store
+.se_f:  mov rax, 12  ; FF
+    jmp .se_store
+.se_v:  mov rax, 11  ; VT
+.se_store:
+    mov [r11 + r8], al
+    inc r8
     jmp .str_loop
-.str_escape_newline:
+
+.str_escape_newline:            ; '\' + LF: line continuation
     mov rax, [src_idx]
     mov [line_start_idx], rax
     inc qword [line_num]
-    inc r8
+    ; No byte written — continue loop
     jmp .str_loop
-.str_newline:
+
+.str_newline:                   ; bare LF inside string: store as LF
     mov rax, [src_idx]
     mov [line_start_idx], rax
     inc qword [line_num]
+    mov byte [r11 + r8], 10
     inc r8
     jmp .str_loop
+
 .str_done:
     mov [tok_str_len], r8
+    ; Advance pool index so the next string gets a fresh slice
+    add [tok_str_pool_idx], r8
     mov dword [tok_type], TOK_STR_LIT
     ret
+
 .str_error:
     mov dword [tok_type], TOK_ERROR
     mov qword [tok_str_ptr], 0
@@ -610,7 +667,42 @@ next_token:
     call read_char
     test rax, rax
     js .str_error
-    mov [tok_ival], rax ; store escaped char
+    ; Translate escape sequence — same table as string escapes
+    cmp rax, 'n'
+    je .ce_n
+    cmp rax, 't'
+    je .ce_t
+    cmp rax, 'r'
+    je .ce_r
+    cmp rax, '0'
+    je .ce_0
+    cmp rax, 'a'
+    je .ce_a
+    cmp rax, 'b'
+    je .ce_b
+    cmp rax, 'f'
+    je .ce_f
+    cmp rax, 'v'
+    je .ce_v
+    ; '\\', '\'', '\"' and unrecognised: keep literal char
+    jmp .ce_store
+.ce_n:  mov rax, 10  ; LF
+    jmp .ce_store
+.ce_t:  mov rax, 9   ; TAB
+    jmp .ce_store
+.ce_r:  mov rax, 13  ; CR
+    jmp .ce_store
+.ce_0:  xor rax, rax ; NUL
+    jmp .ce_store
+.ce_a:  mov rax, 7   ; BEL
+    jmp .ce_store
+.ce_b:  mov rax, 8   ; BS
+    jmp .ce_store
+.ce_f:  mov rax, 12  ; FF
+    jmp .ce_store
+.ce_v:  mov rax, 11  ; VT
+.ce_store:
+    mov [tok_ival], rax
 .char_after:
     call read_char
     cmp rax, 39 ; closing quote
@@ -1292,6 +1384,32 @@ section .text
     jne .is_single
     cmp byte [rsi + 3], 't'
     jne .is_single
+    ; Word-boundary check: the char at rsi+4 must NOT be an identifier char.
+    ; Without this, 'is nothing' / 'is notify' / 'is not_x' would all match
+    ; 'is not' and leave a stale suffix in the token stream.
+    mov rdi, [src_idx]
+    add rdi, 5                  ; index of char immediately after " not"
+    cmp rdi, [src_len]
+    jae .is_not_match           ; at/past EOF — word boundary is guaranteed
+    movzx ecx, byte [rsi + 4]  ; peek at char after 'not'
+    cmp cl, 'a'
+    jl .is_not_wbc1
+    cmp cl, 'z'
+    jle .is_single              ; lowercase letter — not a boundary
+.is_not_wbc1:
+    cmp cl, 'A'
+    jl .is_not_wbc2
+    cmp cl, 'Z'
+    jle .is_single              ; uppercase letter — not a boundary
+.is_not_wbc2:
+    cmp cl, '0'
+    jl .is_not_wbc3
+    cmp cl, '9'
+    jle .is_single              ; digit — not a boundary
+.is_not_wbc3:
+    cmp cl, '_'
+    je .is_single               ; underscore — not a boundary
+.is_not_match:
     ; 'is not' — consume the space and 'not'
     add qword [src_idx], 4
     mov dword [tok_type], TOK_IS_NOT

@@ -3775,9 +3775,10 @@ parse_term:
     jmp .cast_noop
 .cast_use_itb:
     ; int->bool: positive->true(1), zero->neutral(0), negative->false(-1)
-    ; Use IR_CMP_BOOL with special handling, or custom IR
-    ; For now, use a simple approach: signum-like conversion
-    mov r14, IR_CAST_BTI ; bool->int is same reg repr, reuse
+    ; IR_SIGNUM produces exactly {-1, 0, 1} from {<0, =0, >0} — correct for
+    ; Łukasiewicz ternary booleans.  IR_CAST_BTI was previously used here by
+    ; mistake (it is the bool→int direction, documented as a no-op).
+    mov r14, IR_SIGNUM
     jmp .cast_done_emit
 
 .cast_to_char:
