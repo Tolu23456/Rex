@@ -57,6 +57,22 @@ section .data
     str_len     db "len", 0
     str_scope   db "scope", 0
     str_assert  db "assert", 0
+    str_when    db "when", 0
+    str_unreachable db "unreachable", 0
+    str_hash    db "hash", 0
+    str_carry   db "carry", 0
+    str_overflow db "overflow", 0
+    str_rand    db "rand", 0
+    str_fn      db "fn", 0
+    str_try     db "try", 0
+    str_except  db "except", 0
+    str_finally db "finally", 0
+    str_module  db "module", 0
+    str_use     db "use", 0
+    str_decorator db "decorator", 0
+    str_open    db "open", 0
+    str_with    db "with", 0
+    str_as      db "as", 0
 
 section .bss
     global src_ptr
@@ -495,6 +511,8 @@ next_token:
     je .tilde
     cmp rax, '@'
     je .at
+    cmp rax, '$'
+    je .syscall
 
     ; Unknown token character — return TOK_ERROR
     mov dword [tok_type], TOK_ERROR
@@ -1481,6 +1499,150 @@ section .text
     mov dword [tok_type], TOK_ASSERT
     ret
 .not_assert_kw:
+    mov rdi, str_when
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_when_kw
+    mov dword [tok_type], TOK_WHEN
+    ret
+.not_when_kw:
+    mov rdi, str_unreachable
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_unreachable_kw
+    mov dword [tok_type], TOK_UNREACHABLE
+    ret
+.not_unreachable_kw:
+    mov rdi, str_hash
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_hash_kw
+    mov dword [tok_type], TOK_HASH
+    ret
+.not_hash_kw:
+    mov rdi, str_carry
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_carry_kw
+    mov dword [tok_type], TOK_CARRY
+    ret
+.not_carry_kw:
+    mov rdi, str_overflow
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_overflow_kw
+    mov dword [tok_type], TOK_OVERFLOW
+    ret
+.not_overflow_kw:
+    mov rdi, str_rand
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_rand_kw
+    mov dword [tok_type], TOK_RAND
+    ret
+.not_rand_kw:
+    mov rdi, str_fn
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_fn_kw
+    mov dword [tok_type], TOK_FN
+    ret
+.not_fn_kw:
+    mov rdi, str_try
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_try_kw
+    mov dword [tok_type], TOK_TRY
+    ret
+.not_try_kw:
+    mov rdi, str_except
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_except_kw
+    mov dword [tok_type], TOK_EXCEPT
+    ret
+.not_except_kw:
+    mov rdi, str_finally
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_finally_kw
+    mov dword [tok_type], TOK_FINALLY
+    ret
+.not_finally_kw:
+    mov rdi, str_module
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_module_kw
+    mov dword [tok_type], TOK_MODULE
+    ret
+.not_module_kw:
+    mov rdi, str_use
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_use_kw
+    mov dword [tok_type], TOK_USE
+    ret
+.not_use_kw:
+    mov rdi, str_decorator
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_decorator_kw
+    mov dword [tok_type], TOK_DECORATOR
+    ret
+.not_decorator_kw:
+    mov rdi, str_open
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_open_kw
+    mov dword [tok_type], TOK_OPEN
+    ret
+.not_open_kw:
+    mov rdi, str_with
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_with_kw
+    mov dword [tok_type], TOK_WITH
+    ret
+.not_with_kw:
+    mov rdi, str_as
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call strcmp_len
+    test rax, rax
+    jz .not_as_kw
+    mov dword [tok_type], TOK_AS
+    ret
+.not_as_kw:
     mov dword [tok_type], TOK_IDENT
     ret
 
@@ -1621,12 +1783,19 @@ section .text
     call peek_char
     cmp rax, '?'
     je .qq
+    cmp rax, '.'
+    je .qq_dot
     mov dword [tok_type], TOK_QUESTION
     mov qword [tok_str_len], 1
     ret
 .qq:
     call read_char ; consume the second '?'
     mov dword [tok_type], TOK_QQ
+    mov qword [tok_str_len], 2
+    ret
+.qq_dot:
+    call read_char ; consume the '.'
+    mov dword [tok_type], TOK_QQ_DOT
     mov qword [tok_str_len], 2
     ret
 
@@ -1764,5 +1933,10 @@ section .text
 
 .at:
     mov dword [tok_type], TOK_AT
+    mov qword [tok_str_len], 1
+    ret
+
+.syscall:
+    mov dword [tok_type], TOK_SYSCALL
     mov qword [tok_str_len], 1
     ret

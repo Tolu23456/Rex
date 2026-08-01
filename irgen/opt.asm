@@ -2806,6 +2806,10 @@ has_branching_ir:
     je .found
     cmp eax, IR_RESTORE_LOCAL_VAR
     je .found
+    cmp eax, IR_WHEN
+    je .found
+    cmp eax, IR_ABORT
+    je .found
     inc edx
     cmp edx, ecx
     jb .scan

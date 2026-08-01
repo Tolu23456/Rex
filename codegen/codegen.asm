@@ -72,6 +72,8 @@ section .data
     rt_math_bin_size equ $ - rt_math_bin
     rt_conv_bin:  incbin "runtime/rt_conv.bin"
     rt_conv_bin_size equ $ - rt_conv_bin
+    rt_err_bin:   incbin "runtime/rt_err.bin"
+    rt_err_bin_size equ $ - rt_err_bin
 
     ; Protocol call argument registers (SysV ABI) for arg indices 0-5
     ; Values are x86 register numbers (rdi=7, rsi=6, rdx=2, rcx=1, r8=8, r9=9)
@@ -109,6 +111,7 @@ section .bss
     need_rt_dict resb 1   ; 1 if program uses dict operations
     need_rt_math resb 1   ; 1 if program uses math ops (sin/cos/tan/pow/cbrt/gcd/lcm)
     need_rt_conv resb 1   ; 1 if program uses int→str conversions (to_bin/hex/oct)
+    need_rt_err resb 1    ; 1 if program uses assert/unreachable (abort)
     rt_pri_off  resd 1    ; file offset of rt_pri in output
     rt_prs_off  resd 1    ; file offset of rt_prs in output
     rt_prb_off  resd 1    ; file offset of rt_prb in output
@@ -119,6 +122,7 @@ section .bss
     rt_dict_off resd 1    ; file offset of rt_dict in output
     rt_math_off resd 1    ; file offset of rt_math in output
     rt_conv_off resd 1    ; file offset of rt_conv in output
+    rt_err_off  resd 1    ; file offset of rt_err in output
     rt_total_size resd 1  ; total runtime size embedded in output
 
 
@@ -214,6 +218,7 @@ scan_needed_runtime:
     mov byte [need_rt_dict], 0
     mov byte [need_rt_math], 0
     mov byte [need_rt_conv], 0
+    mov byte [need_rt_err], 0
 
     mov r12d, [ir_count]
     test r12d, r12d
@@ -319,6 +324,8 @@ scan_needed_runtime:
     je .set_conv
     cmp al, IR_TO_OCT_STR
     je .set_conv
+    cmp al, IR_ABORT
+    je .set_err
     jmp .scan_next
 
 .check_int_const:
@@ -393,6 +400,9 @@ scan_needed_runtime:
     jmp .scan_next
 .set_conv:
     mov byte [need_rt_conv], 1
+    jmp .scan_next
+.set_err:
+    mov byte [need_rt_err], 1
 .scan_next:
     inc r13d
     jmp .scan_loop
@@ -570,6 +580,15 @@ codegen_init:
     call emit_block
 .skip_conv:
 
+    cmp byte [need_rt_err], 0
+    je .skip_err
+    mov eax, [out_idx]
+    mov [rt_err_off], eax
+    lea rsi, [rt_err_bin]
+    mov rcx, rt_err_bin_size
+    call emit_block
+.skip_err:
+
     ; 6. Patch the JMP offset (skip over embedded runtime)
     ; Only patch if a JMP was actually emitted
     cmp byte [need_rt_pri], 0
@@ -591,6 +610,8 @@ codegen_init:
     cmp byte [need_rt_math], 0
     jne .patch_jmp
     cmp byte [need_rt_conv], 0
+    jne .patch_jmp
+    cmp byte [need_rt_err], 0
     jne .patch_jmp
     ; No runtime — entry point already patched, skip JMP patching
     jmp .skip_jmp_patch
@@ -1048,6 +1069,12 @@ codegen_emit_all:
     je  cge_save_local_var
     cmp al, IR_RESTORE_LOCAL_VAR
     je  cge_restore_local_var
+
+    ; Control-flow extensions
+    cmp al, IR_WHEN
+    je  cge_when
+    cmp al, IR_ABORT
+    je  cge_abort
 
 .next_ir:
     inc r13d
@@ -5930,6 +5957,142 @@ cge_jcc:
 
 .jcc_table: db 0x84, 0x85, 0x8C, 0x8E, 0x8F, 0x8D  ; JE, JNE, JL, JLE, JG, JGE
 .jcc8_table: db 0x74, 0x75, 0x7C, 0x7E, 0x7F, 0x7D  ; short JE, JNE, JL, JLE, JG, JGE
+
+; ── IR_WHEN ────────────────────────────────────────────────
+; dst:bool = state monitor of cond. Stores last-seen truth in an
+; inline per-call-site 1-byte cell embedded in the code stream.
+; Cell states: 0=neutral, 1=true, -1=false.
+; Returns tri-state bool: became-true→1, currently-false→-1, no change→0.
+; Scratch regs used (all non-colour: vregs live only in r8-r13):
+;   rsi = cond value, rdi = cell ptr, cl = old, dl = cur, rax = result.
+cge_when:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (cond)
+    call load_src1_phys
+    mov r15b, al               ; cond phys (ID)
+    movzx eax, word [r14 + 2]  ; dst vreg
+    call get_dst_phys
+    mov r8b, al                ; dst phys
+
+    ; mov rsi, r(src1)          (4C 89 C6|src1<<3) — capture cond value
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC6
+    mov dil, al
+    call emit_b
+    ; lea rdi, [rip + 0x1D]    (cell lives 29 bytes after lea end)
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x8D
+    call emit_b
+    mov dil, 0x3D
+    call emit_b
+    mov edi, 0x1D
+    call emit_d
+    ; mov cl, [rdi]            ; old = cell
+    mov dil, 0x8A
+    call emit_b
+    mov dil, 0x0F
+    call emit_b
+    ; mov dl, -1               ; cur = false
+    mov dil, 0xB2
+    call emit_b
+    mov dil, 0xFF
+    call emit_b
+    ; cmp rsi, 1
+    mov dil, 0x48
+    call emit_b
+    mov dil, 0x83
+    call emit_b
+    mov dil, 0xFE
+    call emit_b
+    mov dil, 1
+    call emit_b
+    ; jne Lf                   (rel8 = 0x02)
+    mov dil, 0x75
+    call emit_b
+    mov dil, 0x02
+    call emit_b
+    ; mov dl, 1                ; cur = true
+    mov dil, 0xB2
+    call emit_b
+    mov dil, 1
+    call emit_b
+    ; Lf: mov [rdi], dl        ; cell = cur
+    mov dil, 0x88
+    call emit_b
+    mov dil, 0x17
+    call emit_b
+    ; cmp cl, dl               ; old == cur?
+    mov dil, 0x38
+    call emit_b
+    mov dil, 0xD1
+    call emit_b
+    ; je Lstable               (rel8 = 0x04 → return 0)
+    mov dil, 0x74
+    call emit_b
+    mov dil, 0x04
+    call emit_b
+    ; mov al, dl               ; return cur (88 D0)
+    mov dil, 0x88
+    call emit_b
+    mov dil, 0xD0
+    call emit_b
+    ; jmp Ldone                (rel8 = 0x02)
+    mov dil, 0xEB
+    call emit_b
+    mov dil, 0x02
+    call emit_b
+    ; Lstable: xor eax, eax    ; unchanged → neutral
+    mov dil, 0x31
+    call emit_b
+    mov dil, 0xC0
+    call emit_b
+    ; Ldone: mov r(dst), rax
+    mov dil, 0x49
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, 0xC0
+    or al, r8b
+    mov dil, al
+    call emit_b
+    ; jmp over the inline cell  (EB 01)
+    mov dil, 0xEB
+    call emit_b
+    mov dil, 0x01
+    call emit_b
+    ; cell (initial 0 = neutral) — skipped by the jmp above
+    xor dil, dil
+    call emit_b
+    call store_dst_spill
+    jmp codegen_emit_all.next_ir
+
+; ── IR_ABORT ───────────────────────────────────────────────
+; abort with message: src1 = null-terminated str ptr (IR_LOAD_STR result)
+cge_abort:
+    mov dword [dst_spilled_vreg], 0
+    movzx eax, word [r14 + 4]  ; src1 vreg (msg ptr)
+    call load_src1_phys
+    mov r15b, al
+    ; mov rdi, r(src1): 4C 89 (0xC7 | src1<<3)
+    mov dil, 0x4C
+    call emit_b
+    mov dil, 0x89
+    call emit_b
+    mov al, r15b
+    shl al, 3
+    or al, 0xC7
+    mov dil, al
+    call emit_b
+    ; call rt_abort
+    mov edi, [rt_err_off]
+    call emit_runtime_call
+    jmp codegen_emit_all.next_ir
 
 ; IR_RET: emit return, optionally moving src1 to rax
 cge_ret:

@@ -181,6 +181,10 @@ IR_SAVE_ARG           equ 0xB3 ; imm=arg index, aux=param var ABSOLUTE offset (w
 IR_SAVE_LOCAL_VAR     equ 0xB4 ; imm=var absolute offset (push [var])
 IR_RESTORE_LOCAL_VAR  equ 0xB5 ; imm=var absolute offset (pop [var])
 
+; Category 12: Control-flow extensions (0xC0-0xC1)
+IR_WHEN       equ 0xC0 ; dst:bool = monitor(cond) — tri-state state monitor
+IR_ABORT      equ 0xC1 ; abort with message (src1 = null-terminated str ptr)
+
 ; IR Record Structure (32 bytes per record)
 ; Offset  Size  Field
 ; 0       1     opcode

@@ -12,8 +12,8 @@ section .data
     err_dup_decl    db "Compile Error: Duplicate variable declaration in same scope", 0
     err_undef       db "Compile Error: Undefined variable", 0
     err_uninit      db "Compile Error: Variable read before initialization", 0
-    err_type_mismatch db "Compile Error: Type mismatch", 0
-    err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable name", 0
+err_type_mismatch db "Compile Error: Type mismatch", 0
+err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable name", 0
     err_immutable   db "Compile Error: Cannot mutate an immutable variable", 0
     err_newline_req db "Syntax Error: Expected newline or EOF at end of statement", 0
     ; Bug 5 fix: distinct message for symbol-table-full (was reusing err_dup_decl)
@@ -23,6 +23,11 @@ section .data
     err_proto_arg_count db "Compile Error: Wrong number of arguments to protocol", 0
     err_proto_multi db "Compile Error: Multi-return protocols must be assigned with ':a, :b ='", 0
     err_arity db "Compile Error: This protocol requires a different return arity", 0
+    str_assert_default db "AssertionError: assertion failed", 0
+    str_assert_default_len equ $ - str_assert_default
+    str_unreachable_default db "UnreachableError: reached unreachable code", 0
+
+    str_unreachable_default_len equ $ - str_unreachable_default
 
     ; Method name strings (used by parse_postfix dispatch)
     str_abs           db "abs", 0
@@ -350,8 +355,132 @@ parse_stmt:
     cmp eax, TOK_PROT
     je .prot_stmt
     
+    cmp eax, TOK_SWITCH
+    je .switch_stmt
+    
+    cmp eax, TOK_ASSERT
+    je .assert_stmt
+    
+    cmp eax, TOK_UNREACHABLE
+    je .unreachable_stmt
+    
     ; Unknown statement — try as expression statement
     call parse_expr
+    ret
+
+; ============ Assert Statement ============
+; assert(<expr>)                 → abort "AssertionError: assertion failed"
+; assert(<expr>, "<msg>")        → abort "AssertionError: <msg>"
+.assert_stmt:
+    push r12
+    push r13
+    call advance ; consume 'assert'
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr ; rax = cond vreg, rdx = type
+    mov r12, rax ; cond vreg
+    ; Optional message: ',' <str literal>
+    mov r13, 0 ; r13 = msg vreg (0 = none)
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .assert_no_msg
+    call advance
+    mov eax, [current_token]
+    cmp eax, TOK_STR_LIT
+    jne .assert_syntax_err
+    ; Emit IR_LOAD_STR for the message
+    push qword [tok_str_len]
+    push qword [tok_str_ptr]
+    call advance
+    call alloc_vreg
+    mov r13, rax ; msg vreg
+    mov rdi, IR_LOAD_STR
+    mov rsi, TYPE_STR
+    mov rdx, r13
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, [rsp]
+    mov r10, [rsp + 8]
+    call emit_ir
+    add rsp, 16
+.assert_no_msg:
+    mov edi, TOK_RPAREN
+    call expect
+    ; If no message, emit default string
+    test r13, r13
+    jnz .assert_msg_ready
+    lea rdi, [str_assert_default]
+    mov rsi, str_assert_default_len
+    call .emit_load_str_len ; rax = msg vreg (str ptr)
+    mov r13, rax
+.assert_msg_ready:
+    ; If cond != true, abort with message
+    call gen_label
+    push rax ; ok_label
+    mov rdi, rax
+    mov rsi, COND_EQ ; jump if cond == true
+    mov rcx, r12
+    call emit_jcc
+    ; abort(msg)
+    mov rdi, IR_ABORT
+    xor rsi, rsi
+    xor rdx, rdx
+    mov rcx, r13
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    ; ok_label:
+    pop rdi
+    call emit_label
+    pop r13
+    pop r12
+    ret
+.assert_syntax_err:
+    mov rdi, err_syntax
+    jmp compile_error
+
+; ============ Unreachable Statement ============
+; unreachable() → abort "UnreachableError: reached unreachable code"
+.unreachable_stmt:
+    push r12
+    call advance ; consume 'unreachable'
+    mov edi, TOK_LPAREN
+    call expect
+    mov edi, TOK_RPAREN
+    call expect
+    ; Emit default message
+    lea rdi, [str_unreachable_default]
+    mov rsi, str_unreachable_default_len
+    call .emit_load_str_len ; rax = msg vreg
+    mov r12, rax
+    ; abort(msg)
+    mov rdi, IR_ABORT
+    xor rsi, rsi
+    xor rdx, rdx
+    mov rcx, r12
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    pop r12
+    ret
+
+; Helper: emit IR_LOAD_STR for a constant string.
+; rdi = string ptr, rsi = length. Returns rax = vreg (str ptr).
+.emit_load_str_len:
+    push rdi
+    push rsi
+    call alloc_vreg
+    mov rdx, rax ; dst vreg
+    mov rdi, IR_LOAD_STR
+    mov rsi, TYPE_STR
+    ; rdx = dst
+    xor rcx, rcx
+    xor r8, r8
+    pop r10 ; length
+    pop r9  ; string ptr
+    call emit_ir
     ret
 
 ; ============ Protocol Definition ============
@@ -866,11 +995,12 @@ parse_stmt:
 
     ; Generate else label
     call gen_label
-    mov r14, rax ; r14 = else_label
+    push rax ; save else_label on stack (above end_label; parse_block
+             ; clobbers r14, so both labels live on the stack)
 
     ; Emit JCC to else_label if condition != true (COND_NE)
     ; The JCC codegen already does CMP reg, 1 before the jump
-    mov rdi, r14       ; target label
+    mov rdi, [rsp]     ; target label (else_label)
     mov rsi, COND_NE   ; condition code
     mov rcx, r12       ; condition vreg to test
     call emit_jcc
@@ -879,7 +1009,7 @@ parse_stmt:
     call parse_block
 
     ; Emit JMP to end_label (skip else branches)
-    mov rdi, [rsp] ; end_label from stack
+    mov rdi, [rsp + 8] ; end_label from stack
     call emit_jmp
 
     ; Check for elif/else
@@ -890,7 +1020,7 @@ parse_stmt:
     cmp eax, TOK_ELSE
     je .else_branch
     ; No else — emit else_label and end_label
-    mov rdi, r14
+    pop rdi ; else_label
     call emit_label
     pop rdi ; end_label
     call emit_label
@@ -898,11 +1028,11 @@ parse_stmt:
 
 .elif_branch:
     ; Emit JMP to end_label (skip remaining branches)
-    mov rdi, [rsp] ; end_label from stack
+    mov rdi, [rsp + 8] ; end_label from stack
     call emit_jmp
 
     ; Emit else_label (this elif's entry point)
-    mov rdi, r14
+    pop rdi ; else_label
     call emit_label
 
     call advance ; consume 'elif'
@@ -914,11 +1044,11 @@ parse_stmt:
 
     ; Generate next else label
     call gen_label
-    mov r14, rax
+    push rax ; save next else_label on stack
 
     ; JCC to next else if condition false
     ; The JCC codegen already does CMP reg, 1 before the jump
-    mov rdi, r14
+    mov rdi, [rsp]
     mov rsi, COND_NE
     mov rcx, r12
     call emit_jcc
@@ -929,11 +1059,11 @@ parse_stmt:
 
 .else_branch:
     ; Emit JMP to end_label
-    mov rdi, [rsp]
+    mov rdi, [rsp + 8]
     call emit_jmp
 
     ; Emit else_label
-    mov rdi, r14
+    pop rdi ; else_label
     call emit_label
 
     call advance ; consume 'else'
@@ -946,6 +1076,449 @@ parse_stmt:
     ; Emit end_label
     pop rdi ; end_label
     call emit_label
+    ret
+
+; ============ Switch Statement ============
+; switch <expr>:
+;     -> <pattern>[, <pattern>]*:
+;         <case block>
+;     _:
+;         <default block>
+; Patterns: value literals, variables/enum variants (Enum.variant or plain),
+; and half-open ranges a..b (a <= subject < b).
+.switch_stmt:
+    call advance ; consume 'switch'
+
+    ; Parse subject expression
+    call parse_expr ; rax = subject vreg, rdx = subject type
+    mov r12, rax ; subject vreg
+    mov r13, rdx ; subject type
+
+    mov edi, TOK_COLON
+    call expect
+
+    ; Consume NEWLINE + INDENT (switch body)
+    mov eax, [current_token]
+    cmp eax, TOK_NEWLINE
+    jne .switch_syntax_err
+    call advance
+    mov eax, [current_token]
+    cmp eax, TOK_INDENT
+    jne .switch_syntax_err
+    call advance
+
+    ; end_label for jumping past all cases
+    call gen_label
+    push rax ; [rsp+24] = end_label
+
+    ; r15 = next_label: entry for next case / default
+    call gen_label
+    mov r15, rax
+
+    ; Keep switch state on the stack so case bodies (parse_block and the
+    ; statements inside) cannot clobber it. Layout:
+    ;   [rsp]    = default-seen flag (0 = none yet)
+    ;   [rsp+8]  = subject vreg
+    ;   [rsp+16] = subject type
+    ;   [rsp+24] = end_label
+    push r13 ; subject type
+    push r12 ; subject vreg
+    push 0   ; default-seen flag
+
+.switch_case_loop:
+    mov r14, [rsp] ; default flag (may have been clobbered by a case body)
+    mov eax, [current_token]
+    cmp eax, TOK_DEDENT
+    je .switch_done
+    cmp eax, TOK_ARROW
+    je .switch_case
+    cmp eax, TOK_IDENT
+    jne .switch_syntax_err
+    ; Could be '_' (default case)
+    cmp qword [tok_str_len], 1
+    jne .switch_syntax_err
+    mov rcx, [tok_str_ptr]
+    cmp byte [rcx], '_'
+    jne .switch_syntax_err
+    ; Default case (must be last)
+    cmp r14, 1
+    je .switch_syntax_err
+    jmp .switch_default
+
+.switch_case:
+    ; No case lines may follow the default
+    cmp r14, 1
+    je .switch_syntax_err
+    call advance ; consume '->'
+
+    ; Emit next_label = this case's entry point. Placed BEFORE the
+    ; conditions so the previous case's fall-through JCC lands on the
+    ; condition evaluation (a non-match falls through to test this case).
+    mov rdi, r15
+    call emit_label
+
+    ; Reload subject vreg/type (a previous case body may have clobbered them)
+    mov r12, [rsp+8]  ; subject vreg
+    mov r13, [rsp+16] ; subject type
+
+    ; Build combined condition: OR of each pattern's match
+    xor rbx, rbx ; rbx = combined cond vreg (0 = none yet)
+
+.switch_pat_loop:
+    ; Parse one pattern value
+    call .parse_switch_pattern_value ; rax = vreg, rdx = type
+    mov r8, rax ; pattern vreg
+    mov r9, rdx ; pattern type
+
+    ; Check for range: '..'
+    mov eax, [current_token]
+    cmp eax, TOK_DOTDOT
+    je .switch_range
+
+    ; Single-value match
+    push rbx ; save combined
+    mov rdi, r12 ; subject
+    mov rsi, r8  ; pattern
+    mov rdx, r9  ; pattern type
+    mov rcx, r13 ; subject type
+    call .emit_pattern_match ; rax = cond vreg
+    pop rbx
+    mov rcx, rax
+    jmp .switch_or
+
+.switch_range:
+    push r8 ; save low vreg across advance + high-value parse
+    push r9 ; save low pattern type across advance + high-value parse
+    call advance ; consume '..'
+    call .parse_switch_pattern_value ; rax = vreg (high), rdx = type
+    mov r10, rax ; high vreg
+    pop rcx ; pattern type (low type)
+    pop r8  ; low vreg
+    push rbx ; save combined
+    mov rdi, r12 ; subject
+    mov rsi, r8  ; low
+    mov rdx, r10 ; high
+    mov r8, r13  ; subject type
+    call .emit_range_match ; rax = cond vreg
+    pop rbx
+    mov rcx, rax
+
+.switch_or:
+    test rbx, rbx
+    jz .switch_or_first
+    ; rbx = rbx OR rcx
+    push rbx
+    push rcx
+    call alloc_vreg
+    mov rdx, rax ; dst
+    pop r8       ; second operand
+    pop rcx      ; first operand
+    push rdx
+    mov rdi, IR_BOOL_OR
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    pop rbx ; new combined cond
+    jmp .switch_pat_next
+.switch_or_first:
+    mov rbx, rcx
+.switch_pat_next:
+    ; comma → another pattern
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .switch_pat_done
+    call advance
+    jmp .switch_pat_loop
+.switch_pat_done:
+
+    ; Expect ':'
+    mov edi, TOK_COLON
+    call expect
+
+    ; Generate fall-through label for "not matched"
+    push rbx
+    call gen_label
+    mov r10, rax
+    pop rbx
+
+    ; If not matched, jump to fall-through
+    push rbx
+    push r10
+    mov rdi, r10
+    mov rsi, COND_NE
+    mov rcx, rbx
+    call emit_jcc
+    pop r10
+    pop rbx
+
+    ; Parse case block (may clobber r10/r12/r13/r14/r15)
+    push r10 ; save fall-through label across parse_block
+    call parse_block
+    pop r10
+
+    ; Jump past end
+    mov r15, r10 ; next case entry = fall-through label
+    mov rdi, [rsp+24] ; end_label
+    call emit_jmp
+    jmp .switch_case_loop
+
+.switch_default:
+    mov r14, 1
+    mov [rsp], r14 ; persist default flag
+    call advance ; consume '_'
+    mov edi, TOK_COLON
+    call expect
+    ; Emit next_label = default entry
+    mov rdi, r15
+    call emit_label
+    ; Parse default block
+    call parse_block
+    ; Jump past end
+    mov rdi, [rsp+24] ; end_label
+    call emit_jmp
+    jmp .switch_done
+
+.switch_done:
+    call advance ; consume DEDENT
+    mov r14, [rsp] ; default flag
+    cmp r14, 1
+    jne .switch_no_default
+    jmp .switch_end_emit
+.switch_no_default:
+    ; No default — unmatched values fall through to end label
+    mov rdi, r15
+    call emit_label
+.switch_end_emit:
+    add rsp, 24 ; discard default flag, subject vreg, subject type
+    pop rdi ; end_label
+    call emit_label
+    ret
+
+.switch_syntax_err:
+    mov rdi, err_syntax
+    jmp compile_error
+
+; Parse a single switch pattern value: literal, variable/enum variant,
+; or negated numeric literal. Returns rax = vreg, rdx = type.
+.parse_switch_pattern_value:
+    mov eax, [current_token]
+    cmp eax, TOK_MINUS
+    je .neg_lit
+    cmp eax, TOK_IDENT
+    je .ident
+    call parse_term
+    ret
+.neg_lit:
+    call advance ; consume '-'
+    mov eax, [current_token]
+    cmp eax, TOK_INT_LIT
+    jne .neg_not_int
+    neg qword [tok_ival]
+    jmp .lit_dispatch
+.neg_not_int:
+    cmp eax, TOK_FLOAT_LIT
+    jne .pattern_err
+    mov rax, [tok_fval]
+    mov rdx, 0x8000000000000000
+    xor rax, rdx
+    mov [tok_fval], rax
+.lit_dispatch:
+    call parse_term
+    ret
+.ident:
+    ; Save the identifier text; peek for '.' (Enum.variant)
+    push qword [tok_str_ptr]
+    push qword [tok_str_len]
+    call advance
+    mov eax, [current_token]
+    cmp eax, TOK_DOT
+    jne .ident_single
+    ; Enum.variant — variant name follows the dot
+    call advance ; consume '.'
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne .pattern_err
+    add rsp, 16 ; discard enum type name
+    push qword [tok_str_len]
+    push qword [tok_str_ptr]
+.ident_single:
+    ; stack: [rsp] = ptr, [rsp+8] = len ; current token is past the ident
+    mov rax, [rsp]
+    mov rbx, [rsp+8]
+    mov [tok_str_ptr], rax
+    mov [tok_str_len], rbx
+    mov rdi, rax
+    mov rsi, rbx
+    call sym_lookup
+    cmp rax, -1
+    je .pattern_err
+    mov r14, rax ; sym_idx
+    push r14
+    mov rdi, r14
+    call sym_is_init
+    test rax, rax
+    jz .pattern_err
+    mov rdi, r14
+    call sym_get_type
+    mov r15, rax ; type
+    push r15
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax ; offset
+    call alloc_vreg
+    mov rbx, rax ; dst vreg
+    mov rdi, IR_LOAD_VAR
+    mov rsi, r15
+    mov rdx, rbx
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+    pop r15
+    pop r14
+    add rsp, 16 ; discard ptr + len
+    mov rax, rbx
+    mov rdx, r15
+    ret
+.pattern_err:
+    mov rdi, err_syntax
+    jmp compile_error
+
+; Emit a match comparison: subject == pattern.
+; rdi = subject vreg, rsi = pattern vreg, rdx = pattern type, rcx = subject type
+; Returns rax = cond vreg (bool)
+.emit_pattern_match:
+    cmp rdx, rcx
+    jne type_error
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi ; subject
+    mov r13, rsi ; pattern
+    mov r14, rdx ; type
+    cmp rdx, TYPE_STR
+    je .str_match
+    cmp rdx, TYPE_FLOAT
+    je .num_match
+    jmp .int_match
+.str_match:
+    ; t = strcmp(subject, pattern); cond = (t == 0)
+    call alloc_vreg
+    mov r15, rax ; t vreg
+    mov rdi, IR_STR_CMP
+    mov rsi, TYPE_INT
+    mov rdx, r15
+    mov rcx, r12
+    mov r8, r13
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    call alloc_vreg
+    mov rbx, rax ; cond vreg
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    mov rcx, r15
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10 ; COND_EQ
+    call emit_ir
+    mov rax, rbx
+    jmp .done
+.num_match:
+    call alloc_vreg
+    mov rbx, rax ; cond vreg
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_FLOAT
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r13
+    xor r9, r9
+    xor r10, r10 ; COND_EQ
+    call emit_ir
+    mov rax, rbx
+    jmp .done
+.int_match:
+    call alloc_vreg
+    mov rbx, rax ; cond vreg
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r13
+    xor r9, r9
+    xor r10, r10 ; COND_EQ
+    call emit_ir
+    mov rax, rbx
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+; Emit a range match: (subject >= low) and (subject < high)
+; rdi = subject vreg, rsi = low vreg, rdx = high vreg,
+; rcx = pattern type, r8 = subject type
+; Returns rax = cond vreg (bool)
+.emit_range_match:
+    cmp rcx, r8
+    jne type_error
+    cmp rcx, TYPE_STR
+    je type_error
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi ; subject
+    mov r13, rsi ; low
+    mov r14, rdx ; high
+    mov r15, rcx ; type
+    ; c1 = subject >= low (COND_GE = 5)
+    call alloc_vreg
+    mov rbx, rax ; c1
+    mov rdi, IR_CMP_BOOL
+    mov rsi, r15
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r13
+    xor r9, r9
+    mov r10, 5 ; COND_GE
+    call emit_ir
+    ; c2 = subject < high (COND_LT = 2)
+    push rbx ; save c1
+    call alloc_vreg
+    mov rbx, rax ; c2
+    mov rdi, IR_CMP_BOOL
+    mov rsi, r15
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9, r9
+    mov r10, 2 ; COND_LT
+    call emit_ir
+    pop rcx ; c1
+    push rbx ; c2
+    ; cond = c1 and c2
+    call alloc_vreg
+    mov rdx, rax ; dst
+    pop r8       ; c2
+    mov rbx, rax ; dst
+    mov rdi, IR_BOOL_AND
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    ; rcx = c1, r8 = c2
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    mov rax, rbx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
     ret
 
 ; ============ For Loop ============
@@ -4214,8 +4787,113 @@ parse_term:
     cmp eax, TOK_AT
     je .proto_call
     
+    cmp eax, TOK_IF
+    je .inline_if
+    
+    cmp eax, TOK_WHEN
+    je .when_expr
+    
     mov rdi, err_syntax
     jmp compile_error
+
+.inline_if:
+    ; if <cond>: <expr> else: <expr>
+    push rbx
+    push r12
+    push r13
+    push r14
+    call advance ; consume 'if'
+    call parse_expr ; rax = cond vreg, rdx = cond type
+    mov r12, rax ; cond vreg
+    mov edi, TOK_COLON
+    call expect
+    ; else_label
+    call gen_label
+    mov r14, rax
+    ; JCC cond != true → else_label
+    mov rdi, r14
+    mov rsi, COND_NE
+    mov rcx, r12
+    call emit_jcc
+    ; then-expr
+    call parse_expr ; rax = then vreg, rdx = then type
+    push rax ; then vreg
+    push rdx ; then type
+    call alloc_vreg
+    mov r13, rax ; result vreg
+    ; IR_MOV result, then_vreg
+    mov rdi, IR_MOV
+    mov rsi, [rsp] ; type
+    mov rdx, r13
+    mov rcx, [rsp + 8] ; then vreg
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    ; JMP done_label
+    call gen_label
+    push rax ; done_label
+    mov rdi, rax
+    call emit_jmp
+    ; else_label:
+    mov rdi, r14
+    call emit_label
+    ; expect 'else'
+    mov edi, TOK_ELSE
+    call expect
+    ; expect ':'
+    mov edi, TOK_COLON
+    call expect
+    ; else-expr
+    call parse_expr ; rax = else vreg, rdx = else type
+    push rdx ; else type
+    ; Type check: then type == else type
+    mov rax, [rsp + 16] ; then type
+    cmp rax, [rsp]     ; else type
+    jne type_error
+    mov rdi, IR_MOV
+    mov rsi, [rsp] ; type
+    mov rdx, r13 ; result vreg
+    mov rcx, [rsp + 24] ; else vreg
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    ; done_label:
+    pop rdi ; (discard else type)
+    pop rdi ; done_label
+    call emit_label
+    pop rdx ; then type
+    pop rcx ; (discard then vreg)
+    mov rax, r13 ; result vreg
+    ; rdx = result type
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.when_expr:
+    ; when <expr> → tri-state bool monitor (-1/0/1)
+    push rbx
+    call advance ; consume 'when'
+    call parse_expr ; rax = cond vreg, rdx = type
+    push rax ; cond vreg
+    push rdx ; cond type
+    call alloc_vreg
+    mov rbx, rax ; dst vreg
+    pop r8  ; cond type (unused)
+    pop rcx ; cond vreg
+    mov rdi, IR_WHEN
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    mov rax, rbx
+    mov rdx, TYPE_BOOL
+    pop rbx
+    ret
 
 .proto_call:
     ; '@' proto_name '(' args ')'

@@ -30,7 +30,8 @@ RT_BINS=$(RUNTIME_DIR)/rt_pri.bin \
 	$(RUNTIME_DIR)/rt_str.bin \
 	$(RUNTIME_DIR)/rt_dict.bin \
 	$(RUNTIME_DIR)/rt_math.bin \
-	$(RUNTIME_DIR)/rt_conv.bin
+	$(RUNTIME_DIR)/rt_conv.bin \
+	$(RUNTIME_DIR)/rt_err.bin
 
 # Compiler Object Files
 OBJS=$(MAIN_DIR)/main.o \

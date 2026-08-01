@@ -113,6 +113,8 @@ TOK_XOR_EQ      equ 117 ; ^=
 TOK_LSHIFT_EQ   equ 118 ; <<=
 TOK_RSHIFT_EQ   equ 119 ; >>=
 TOK_DOTDOT_EQ   equ 120 ; ..=
+TOK_QQ_DOT      equ 121 ; ?. (null-safe method call)
+TOK_SYSCALL     equ 122 ; $ (syscall operator)
 
 ; Control Tokens
 TOK_NEWLINE     equ 30
