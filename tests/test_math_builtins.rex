@@ -1,0 +1,24 @@
+// test_math_builtins.rex
+// Tests standalone math functions: abs, floor, recip, neg
+//
+// Expected output:
+//   5
+//   3
+//   0.5
+//   -3
+
+// --- abs(int) ---
+int n = -5
+output(abs(n))
+
+// --- floor(float) ---
+float fv = 3.7
+output(floor(fv))
+
+// --- recip ---
+float v = 2.0
+output(recip(v))
+
+// --- neg standalone ---
+int negv = 3
+output(-negv)

@@ -39,6 +39,7 @@ section .text
     extern sym_clear
     extern ir_init
     extern parse_program
+    extern prescan_protocols
     extern run_optimizations
     extern allocate_registers
     extern codegen_init
@@ -153,7 +154,11 @@ _start:
     mov rdi, src_file_buf
     mov rsi, [src_file_size]
     call lex_init
-    
+
+    ; 1.5 Prescan source for protocol (prot) definitions and validate
+    ;     call sites / return statements. Reinitializes the lexer.
+    call prescan_protocols
+
     ; 2. Initialize Type Registry, Symbol Table & IR Emitter
     call type_reg_init
     call sym_clear
@@ -269,6 +274,7 @@ _start:
     mov rax, 60
     mov rdi, 1
     syscall
+
 
 .err_read_source:
     mov rax, 1

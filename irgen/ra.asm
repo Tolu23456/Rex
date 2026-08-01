@@ -35,8 +35,13 @@
 ;   5. Map         — populate vreg_phys[] and vreg_offset[]; align spill frame.
 ;
 ; Physical register map (NUM_PHYS_REGS = 6)
-;   colour 0 → r10    colour 1 → r11    colour 2 → r12
-;   colour 3 → r13    colour 4 → r14    colour 5 → r15
+; The codegen emits phys n as r8+n (REX.W|R|B prefix with n in the register
+; field), so the effective mapping is:
+;   colour 0 → r8     colour 1 → r9     colour 2 → r10
+;   colour 3 → r11    colour 4 → r12    colour 5 → r13
+;   (spill temps: phys 6 → r14, phys 7 → r15)
+; Colours 0-3 (r8-r11) are preserved by codegen around runtime calls; colours
+; 4-5 (r12-r13) are ABI callee-saved.
 ;
 ; Spill heuristic
 ;   Classic Chaitin: minimise use_count / (degree + 1).
@@ -80,6 +85,16 @@ section .bss
 
     ; ---- copy-coalescing hints (Phase 1, used in Phase 4 biased colouring) ----
     gc_copy_hint        resw GRAPHCOL_VMAX           ; dst vreg → src1 vreg (0 = none)
+
+    ; ---- force-spill flags (vregs live across an IR_CALL) ----
+    gc_force_spill      resb GRAPHCOL_VMAX           ; 1 = must be spilled (callee clobbers regs)
+
+    ; ---- force-callee flags (loop-promoted vregs) ----
+    ; 1 = only assign callee-saved colours (2-5 = r12-r15) so the cached
+    ; loop values survive runtime helper calls (codegen only preserves
+    ; r8-r11 around calls; the runtime helpers preserve r12-r15).
+    global gc_force_callee
+    gc_force_callee     resb GRAPHCOL_VMAX
 
     ; ---- interference graph (symmetric bitmap) ----
     gc_interf           resb GRAPHCOL_VMAX * GRAPHCOL_BPR   ; 32 KiB
@@ -163,6 +178,12 @@ allocate_registers:
     lea rdi, [gc_copy_hint]
     xor eax, eax
     rep stosw
+
+    ; gc_force_spill ← 0
+    mov ecx, GRAPHCOL_VMAX
+    lea rdi, [gc_force_spill]
+    xor eax, eax
+    rep stosb
 
     ; gc_interf ← 0  (32 KiB; use qwords for speed)
     mov ecx, GRAPHCOL_VMAX * GRAPHCOL_BPR / 8
@@ -256,6 +277,12 @@ allocate_registers:
     inc dword [gc_use_count + rax * 4]
 
 .p1_src2:
+    ; IR_CALL uses src2 as its SECOND DEFINITION (hi return vreg),
+    ; not as a source operand — record the def instead of a use.
+    movzx eax, byte [r13]          ; opcode
+    cmp al, IR_CALL
+    je .p1_call_src2_def
+
     movzx eax, word [r13 + 6]      ; src2
     test ax, ax
     jz .p1_aux
@@ -263,6 +290,17 @@ allocate_registers:
     jae .p1_aux
     mov [gc_last_use + rax * 4], ebx
     inc dword [gc_use_count + rax * 4]
+
+.p1_call_src2_def:
+    movzx eax, word [r13 + 6]      ; src2 (hi return vreg)
+    test ax, ax
+    jz .p1_aux
+    cmp eax, GRAPHCOL_VMAX
+    jae .p1_aux
+    cmp dword [gc_def + rax * 4], UNSET_IDX
+    jne .p1_aux
+    mov [gc_def + rax * 4], ebx    ; record first definition
+    inc dword [gc_remaining]        ; one more active vreg
 
 .p1_aux:
     ; Track aux vreg for instructions that use aux as a vreg operand
@@ -339,6 +377,9 @@ allocate_registers:
     cmp al, IR_SWAP_NIB
     je .p1_do_hint
     cmp al, IR_CLZ8
+    je .p1_do_hint
+    ; Register copy
+    cmp al, IR_MOV
     je .p1_do_hint
     ; Float ops
     cmp al, IR_ABS_FLOAT
@@ -432,6 +473,53 @@ allocate_registers:
     jmp .phase1_loop
 
 .phase1_done:
+
+    ; ----------------------------------------------------------
+    ; Force-spill pass: any vreg whose live range [def, last_use]
+    ; spans an IR_CALL must be spilled — the callee clobbers all six
+    ; physical registers (r10-r15).  Force-spilled vregs are still
+    ; placed in the interference graph (they affect neighbours' degrees
+    ; during simplification) but are assigned COLOR_SPILL in Phase 4.
+    ; ----------------------------------------------------------
+    mov ebx, [ir_count]
+    test ebx, ebx
+    jz .build_start
+    xor ebx, ebx            ; i = IR record index
+.force_loop:
+    cmp ebx, [ir_count]
+    jae .force_done
+    imul eax, ebx, IR_RECORD_SIZE
+    lea r13, [ir_buffer + rax]
+    movzx eax, byte [r13]
+    cmp al, IR_CALL
+    jne .force_next
+    ; r13 = IR_CALL record.  Scan all vregs for live ranges spanning it.
+    mov edx, 1              ; vreg id
+.force_vreg_loop:
+    cmp edx, [gc_max_vreg]
+    ja .force_next
+    mov ecx, [gc_def + rdx * 4]
+    cmp ecx, UNSET_IDX
+    je .force_vreg_maybe    ; no recorded def → treat as live from index 0
+    cmp ecx, ebx
+    jae .force_vreg_next    ; defined at/after call → not live before it
+    mov ecx, [gc_last_use + rdx * 4]
+    cmp ecx, ebx
+    jbe .force_vreg_next    ; last used at/before call → not live after it
+    mov byte [gc_force_spill + rdx], 1
+.force_vreg_next:
+    inc edx
+    jmp .force_vreg_loop
+.force_vreg_maybe:
+    mov ecx, [gc_last_use + rdx * 4]
+    cmp ecx, ebx
+    jbe .force_vreg_next
+    mov byte [gc_force_spill + rdx], 1
+    jmp .force_vreg_next
+.force_next:
+    inc ebx
+    jmp .force_loop
+.force_done:
 
     ; ----------------------------------------------------------
     ; Phase 2: build interference graph
@@ -659,6 +747,19 @@ allocate_registers:
     mov eax, [gc_stack_top]
     movzx ebx, word [gc_stack + rax * 2]    ; vreg being coloured
 
+    ; Force-spilled vregs (live across an IR_CALL) never get a colour
+    movzx eax, byte [gc_force_spill + rbx]
+    test al, al
+    jnz .spill_vreg
+
+    ; Loop-promoted vregs may only use callee-saved colours (2-5 = r12-r15)
+    xor r13d, r13d            ; colour floor (0 = no restriction)
+    movzx eax, byte [gc_force_callee + rbx]
+    test al, al
+    jz .cc_nofloor
+    mov r13d, 2
+.cc_nofloor:
+
     ; --- Step A: Build used-colour bitmask via BSF row scan ---
     imul eax, ebx, GRAPHCOL_BPR
     lea rsi, [gc_interf + rax]              ; row start
@@ -711,6 +812,13 @@ allocate_registers:
     cmp cl, NUM_PHYS_REGS
     jae .pick                                   ; invalid — defensive
 
+    ; If force-callee, reject caller-saved hint colours (0-1)
+    cmp r13d, 2
+    jb .cc_hint_ok
+    cmp cl, 2
+    jb .pick
+.cc_hint_ok:
+
     ; Check that the hint colour is actually free for this vreg
     mov edx, 1
     shl edx, cl
@@ -723,7 +831,7 @@ allocate_registers:
 
     ; --- Step C: generic assignment — smallest free colour ---
 .pick:
-    xor ecx, ecx                            ; colour candidate = 0
+    mov ecx, r13d                           ; start at floor (0 or 2)
 .pick_loop:
     cmp ecx, NUM_PHYS_REGS
     je .spill_vreg

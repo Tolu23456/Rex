@@ -39,6 +39,7 @@ IR_MAX_INT      equ 0x2A  ; dst = max(src1, src2)
 IR_SHL          equ 0x2B  ; dst = src1 << imm  (src2=0→imm, else src2 reg)
 IR_SHR          equ 0x2C  ; dst = src1 >> imm  (arithmetic)
 IR_SIGNUM       equ 0x2D  ; dst = -1/0/1 for src1 <0/=0/>0
+IR_MOV          equ 0x2E  ; dst = src1  (register copy; coalesced by allocator)
 
 ; Category 3: Bool Ternary Logic (Łukasiewicz)
 IR_BOOL_AND     equ 0x20  ; min(a, b) over {-1, 0, 1}
@@ -157,6 +158,28 @@ IR_SEQ_COUNT_OF equ 0x90  ; dst = count of value in seq
 IR_STR_CONCAT   equ 0x80  ; dst = str1 + str2
 IR_STR_LEN      equ 0x81  ; dst = len(str)
 IR_STR_CMP      equ 0x82  ; dst = strcmp(str1, str2)
+
+; Category 10: Extended Math (0xA0–0xAF)
+IR_SIN          equ 0xA0  ; dst:float = sin(src1:float)
+IR_COS          equ 0xA1  ; dst:float = cos(src1:float)
+IR_TAN          equ 0xA2  ; dst:float = tan(src1:float)
+IR_POW_F        equ 0xA3  ; dst:float = pow(src1:float, src2:float)
+IR_CBRT         equ 0xA4  ; dst:float = cbrt(src1:float)
+IR_GCD          equ 0xA5  ; dst:int = gcd(src1:int, src2:int)
+IR_LCM          equ 0xA6  ; dst:int = lcm(src1:int, src2:int)
+IR_SIGNUM_F     equ 0xA7  ; dst:float = signum(src1:float) → -1.0/0.0/1.0
+IR_TO_BIN_STR   equ 0xA8  ; dst:str = int→binary string  (e.g. "1010")
+IR_TO_HEX_STR   equ 0xA9  ; dst:str = int→hex string     (e.g. "ff")
+IR_TO_OCT_STR   equ 0xAA  ; dst:str = int→octal string    (e.g. "77")
+IR_SWAP_VARS    equ 0xAB  ; swap values of two stack slots (src1=vreg_a, src2=vreg_b)
+
+; Category 11: Protocol Calls (0xB0-0xB5)
+IR_CALL_ARG           equ 0xB0 ; src1=vreg, imm=arg index (0-5=reg, 6+=stack)
+IR_CALL               equ 0xB1 ; imm=proto_id, aux=arg_count, dst=lo vreg (0=void), src2=hi vreg (0=none)
+IR_PROTO_BEGIN        equ 0xB2 ; imm=proto_id (records prologue offset; aux unused)
+IR_SAVE_ARG           equ 0xB3 ; imm=arg index, aux=param var ABSOLUTE offset (write arg into var slot)
+IR_SAVE_LOCAL_VAR     equ 0xB4 ; imm=var absolute offset (push [var])
+IR_RESTORE_LOCAL_VAR  equ 0xB5 ; imm=var absolute offset (pop [var])
 
 ; IR Record Structure (32 bytes per record)
 ; Offset  Size  Field

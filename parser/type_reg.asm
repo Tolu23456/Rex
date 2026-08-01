@@ -39,6 +39,7 @@ section .text
     global type_set_size
     global type_struct_add_field
     global type_struct_find_field
+    global type_lookup
 
 type_reg_init:
     mov dword [type_count], 0

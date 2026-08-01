@@ -1,0 +1,47 @@
+// test_sum_fold.rex
+// Closed-form accumulation fold:
+//   for i in 0..N: total += i  →  total += N*(N-1)/2 (compile-time)
+//
+// Expected output:
+//   4999999950000000     (0..100000000 sum)
+//   -4950                (0..100 sum, anti-sum total -= i)
+//   4950                 (0..100 sum, then output i == 100)
+//   100                  (post-loop i value)
+//   0                    (N == 1: adds 0, i becomes 1)
+//   1
+//   42                   (N == 0: no iterations, total unchanged, i stays 0)
+//   0
+//   9223372034707292160  (N == 2^32 boundary, exact closed form)
+
+int total = 0
+for i in 0..100000000:
+    :total = total + i
+output(total)
+
+int anti = 0
+for j in 0..100:
+    :anti = anti - j
+output(anti)
+
+int total2 = 0
+for k in 0..100:
+    :total2 = total2 + k
+output(total2)
+output(k)
+
+int t3 = 0
+for m in 0..1:
+    :t3 = t3 + m
+output(t3)
+output(m)
+
+int t4 = 42
+for n in 0..0:
+    :t4 = t4 + n
+output(t4)
+output(n)
+
+int t5 = 0
+for p in 0..4294967296:
+    :t5 = t5 + p
+output(t5)

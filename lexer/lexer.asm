@@ -363,7 +363,7 @@ next_token:
 .dedent_loop:
     mov eax, [indent_stack_len]
     dec eax
-    jz .dedent_error ; stack empty but we didn't match 0 (should never happen as bottom is 0)
+    jz .dedent_bottom ; at bottom of stack (indent 0) — compare directly
     mov ecx, [indent_stack + rax * 4]
     cmp r8d, ecx
     je .dedent_match
@@ -373,6 +373,12 @@ next_token:
     dec dword [indent_stack_len]
     inc r9
     jmp .dedent_loop
+
+.dedent_bottom:
+    ; Bottom of stack is always 0; only a 0-indent line can match it
+    cmp r8d, 0
+    je .dedent_match
+    jmp .dedent_error
 
 .dedent_match:
     ; We need to emit r9 TOK_DEDENT tokens.
@@ -487,6 +493,8 @@ next_token:
     je .bang
     cmp rax, '~'
     je .tilde
+    cmp rax, '@'
+    je .at
 
     ; Unknown token character — return TOK_ERROR
     mov dword [tok_type], TOK_ERROR
@@ -1592,8 +1600,16 @@ section .text
     ret
 .dotdot:
     call read_char ; consume second '.'
+    call peek_char ; '..' could be '..=' (inclusive range)
+    cmp rax, '='
+    je .dotdot_eq
     mov dword [tok_type], TOK_DOTDOT
     mov qword [tok_str_len], 2
+    ret
+.dotdot_eq:
+    call read_char ; consume '='
+    mov dword [tok_type], TOK_DOTDOT_EQ
+    mov qword [tok_str_len], 3
     ret
 
 ; BUG FIX (Bug 1): The '?' character was already consumed by the generic
@@ -1743,5 +1759,10 @@ section .text
 
 .tilde:
     mov dword [tok_type], TOK_TILDE
+    mov qword [tok_str_len], 1
+    ret
+
+.at:
+    mov dword [tok_type], TOK_AT
     mov qword [tok_str_len], 1
     ret

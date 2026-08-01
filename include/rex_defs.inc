@@ -99,6 +99,7 @@ TOK_WHEN        equ 104 ; when
 TOK_WITH        equ 105 ; with
 TOK_OPEN        equ 106 ; open
 TOK_AS          equ 107 ; as
+TOK_AT          equ 108 ; @ (protocol call prefix)
 
 ; Compound Assignment Operators
 TOK_PLUS_EQ     equ 110 ; +=
@@ -111,6 +112,7 @@ TOK_OR_EQ       equ 116 ; |=
 TOK_XOR_EQ      equ 117 ; ^=
 TOK_LSHIFT_EQ   equ 118 ; <<=
 TOK_RSHIFT_EQ   equ 119 ; >>=
+TOK_DOTDOT_EQ   equ 120 ; ..=
 
 ; Control Tokens
 TOK_NEWLINE     equ 30
@@ -161,6 +163,63 @@ VREG_MAX         equ 65536
 SRC_FILE_MAX     equ 65536
 OUT_BUF_MAX      equ 131072
 VAR_MEM_OFFSET   equ (VAR_STORAGE_BASE - LOAD_BASE) + (VAR_MAX * VAR_ENTRY_SIZE)
+
+; Protocol Table Layout (proto table entries, grammar.md Section 30)
+; Offset  Size  Field
+; 0       32    name (null-terminated string)
+; 32      8     body_offset (codegen offset of protocol body)
+; 40      1     param_count
+; 41      1     ret_type tag
+; 42      1     ret_count
+; 43      1     ret_is_result (0 = no, 1 = result[T])
+; 44      1     decorator_mask (bit0=memo,1=pure,2=total,3=inline,4=noinline,5=hot,6=cold,7=unsafe)
+; 45      3     reserved
+; 48      65    param_var_indices (1 byte per param, 0xFF = unused)
+; 113     4     var_low  (lowest var slot offset touched by body)
+; 117     4     var_high (one past highest var slot offset touched by body)
+; 121     1     ret0_type — concrete return type of return value 0
+; 122     1     ret1_type — concrete return type of return value 1 (tuple)
+; 123     5     reserved
+PROTO_MAX            equ 256
+PROTO_ENTRY_SIZE     equ 128
+PROTO_NAME_OFF       equ 0
+PROTO_BODY_OFF       equ 32
+PROTO_PARAM_COUNT_OFF equ 40
+PROTO_RET_TYPE_OFF   equ 41
+PROTO_RET_COUNT_OFF  equ 42
+PROTO_RET_IS_RESULT_OFF equ 43
+PROTO_DECORATOR_MASK_OFF equ 44
+PROTO_PARAM_VAR_IDX_OFF equ 48
+PROTO_RET0_TYPE_OFF  equ 121
+PROTO_RET1_TYPE_OFF  equ 122
+PROTO_VAR_LOW_OFF    equ 113
+PROTO_VAR_HIGH_OFF   equ 117
+PROTO_PARAM_UNUSED   equ 0xFF
+
+; Decorator bits
+DECOR_MEMOIZE   equ 1<<0
+DECOR_PURE      equ 1<<1
+DECOR_TOTAL     equ 1<<2
+DECOR_INLINE    equ 1<<3
+DECOR_NOINLINE  equ 1<<4
+DECOR_HOT       equ 1<<5
+DECOR_COLD      equ 1<<6
+DECOR_UNSAFE    equ 1<<7
+
+; Return type tags
+RET_TYPE_NONE    equ 0 ; void / no explicit return type
+RET_TYPE_SCALAR  equ 1 ; single scalar type
+RET_TYPE_TUPLE   equ 2 ; (T1, T2, ...) multi-return
+RET_TYPE_RESULT  equ 3 ; result[T]
+
+; Protocol call argument classification (matches IR_CALL_ARG imm)
+CALL_ARG_REG0     equ 0 ; rdi
+CALL_ARG_REG1     equ 1 ; rsi
+CALL_ARG_REG2     equ 2 ; rdx
+CALL_ARG_REG3     equ 3 ; rcx
+CALL_ARG_REG4     equ 4 ; r8
+CALL_ARG_REG5     equ 5 ; r9
+CALL_ARG_STACK    equ 6 ; pushed on stack
 
 ; Collection defaults
 DICT_INITIAL_CAPACITY equ 16

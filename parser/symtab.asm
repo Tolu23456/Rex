@@ -29,6 +29,7 @@ section .text
     global sym_find_by_offset
     global sym_set_private
     global sym_remove_block_scope
+    global sym_remove_after
 
 ; Clear the symbol table
 sym_clear:
@@ -135,6 +136,62 @@ sym_remove_block_scope:
     pop rbx
     ret
 
+; Remove ALL symbols with index >= rdi (keep_count) from the symbol table,
+; then recompute current_stack_offset from the surviving entries.
+; Used to roll back the symbol table after parsing a prototype definition.
+sym_remove_after:
+    push rbx
+    push r12
+    push r13
+
+    mov r12d, edi           ; r12 = keep_count
+    cmp r12d, [sym_count]
+    jae .ro_keep_all        ; nothing to remove
+
+    mov [sym_count], r12d
+    jmp .ro_recalc
+
+.ro_keep_all:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.ro_recalc:
+    ; Recompute current_stack_offset: find max (offset + size) among surviving entries
+    mov dword [current_stack_offset], VAR_STORAGE_BASE
+
+    xor ebx, ebx
+.ro_recalc_loop:
+    cmp ebx, r12d
+    jae .ro_recalc_done
+
+    imul eax, ebx, SYM_ENTRY_SIZE
+    lea rsi, [sym_table + rax]
+
+    push rbx
+    push rsi
+    mov edi, [rsi + 32]       ; type_id
+    extern type_get_size
+    call type_get_size         ; rax = size
+    pop rsi
+    pop rbx
+
+    mov edx, [rsi + 40]       ; offset
+    add edx, eax              ; offset + size
+    cmp edx, [current_stack_offset]
+    jbe .ro_recalc_next
+    mov [current_stack_offset], edx
+.ro_recalc_next:
+    inc ebx
+    jmp .ro_recalc_loop
+
+.ro_recalc_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 ; Compare entry name at rdi (null-terminated) with string at rsi of length rdx
 ; Returns rax = 1 if match, 0 if not
 match_name:
@@ -201,7 +258,7 @@ sym_add:
     movzx eax, byte [sym_table + rax + 36] ; entry scope
     cmp eax, r15d
     je .err_dup ; duplicate in same scope!
-    
+
 .next_dup:
     inc ebx
     jmp .dup_check
@@ -324,63 +381,80 @@ sym_lookup:
 ; Accessors
 ; rdi = symbol index
 
-sym_get_type:
+; Validate a symbol index in edi.
+; On success: edi = byte offset into sym_table, returns.
+; On failure: reports an internal error and aborts (never returns).
+sym_check_index:
+    test edi, edi
+    js .bad
+    cmp edi, [sym_count]
+    jae .bad
     imul edi, edi, SYM_ENTRY_SIZE
+    ret
+.bad:
+    lea rdi, [rel .err]
+    extern compile_error
+    call compile_error
+.err:
+    db "Internal Error: invalid symbol index", 0
+
+sym_get_type:
+    call sym_check_index
     mov eax, [sym_table + rdi + 32]
     ret
 
 sym_set_type:
     ; rdi = index, rsi = type
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     mov [sym_table + rdi + 32], esi
     ret
 
 sym_get_scope:
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     movzx rax, byte [sym_table + rdi + 36]
     ret
 
 sym_is_mutable:
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     movzx rax, byte [sym_table + rdi + 37]
     ret
 
 sym_set_mutable:
     ; rdi = index, rsi = mutable (0/1)
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     mov [sym_table + rdi + 37], sil
     ret
 
 sym_is_init:
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     movzx rax, byte [sym_table + rdi + 38]
     ret
 
 sym_set_init:
     ; rdi = index, rsi = init (0/1)
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     mov [sym_table + rdi + 38], sil
     ret
 
 sym_get_offset:
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     mov eax, [sym_table + rdi + 40]
     ret
 
 sym_set_offset:
     ; rdi = index, rsi = offset
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     mov [sym_table + rdi + 40], esi
     ret
 
 sym_is_private:
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     movzx rax, byte [sym_table + rdi + 39]
     ret
 
 sym_set_private:
     ; rdi = index, rsi = private (0/1)
-    imul edi, edi, SYM_ENTRY_SIZE
+    call sym_check_index
     mov [sym_table + rdi + 39], sil
     ret
 

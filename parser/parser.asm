@@ -19,6 +19,10 @@ section .data
     ; Bug 5 fix: distinct message for symbol-table-full (was reusing err_dup_decl)
     err_sym_full    db "Compile Error: Symbol table full (too many variables)", 0
     err_unknown_method db "Compile Error: Unknown method for this type", 0
+    err_unknown_proto db "Compile Error: Unknown protocol", 0
+    err_proto_arg_count db "Compile Error: Wrong number of arguments to protocol", 0
+    err_proto_multi db "Compile Error: Multi-return protocols must be assigned with ':a, :b ='", 0
+    err_arity db "Compile Error: This protocol requires a different return arity", 0
 
     ; Method name strings (used by parse_postfix dispatch)
     str_abs           db "abs", 0
@@ -93,6 +97,16 @@ section .data
     str_reserve_m     db "reserve", 0
     str_cap_m         db "cap", 0
     str_is_empty_m    db "is_empty", 0
+    str_sin           db "sin", 0
+    str_cos           db "cos", 0
+    str_tan           db "tan", 0
+    str_pow           db "pow", 0
+    str_cbrt          db "cbrt", 0
+    str_gcd           db "gcd", 0
+    str_lcm           db "lcm", 0
+    str_to_bin        db "to_bin", 0
+    str_to_hex        db "to_hex", 0
+    str_to_oct        db "to_oct", 0
     float_pp_one      dq 0x3FF0000000000000
 
     ; scope() built-in string constants
@@ -100,14 +114,25 @@ section .data
     str_scope_local   db "local", 0
     str_scope_block   db "block", 0
 
-    ; For loop hidden variable name
+    ; For loop hidden variable names
     str_for_end       db "_for_end", 0
+    str_for_step      db "_for_step", 0
 
     ; Block nesting depth for SCOPE_LOCAL tracking
     ; depth 0 = global scope, depth > 0 = inside a block (SCOPE_LOCAL)
     block_nesting     dd 0
     ; Saved sym_count at block entry for block-scope cleanup
     block_sym_save    times 32 dd 0  ; up to 32 nesting levels
+
+    ; Protocol body tracking
+    proto_body_nesting dd 0      ; >0 while parsing a protocol body
+    prot_sym_save     dd 0       ; sym_count before protocol params/body
+    ; Call-site argument scratch (65 params max)
+    call_arg_vregs    times 65 dw 0
+    call_arg_types    times 65 dd 0
+    call_result_hi    dd 0       ; hi return vreg of last protocol call (0 = none)
+    ; Multi-target mutation targets
+    mut_target_syms   times 65 dd 0
 
 section .bss
     ; For storing name string buffers during parsing
@@ -116,6 +141,13 @@ section .bss
     ; For storing method name during parse_postfix
     method_buf      resb 32
     method_len      resq 1
+    ; For building unique per-loop hidden variable names
+    for_hidden_buf  resb 32
+    ; 1 = for-loop used '..=' (inclusive range → COND_LE), 0 = '..' (COND_LT)
+    for_inclusive   resb 1
+    ; For saving the element variable name in each loops (parse_expr clobbers ident_buf)
+    each_var_buf    resb 32
+    each_var_len    resq 1
     ; Label counter for control flow
     label_counter   resd 1
     ; Vreg to struct type_id mapping (for field access)
@@ -123,6 +155,7 @@ section .bss
 
 section .text
     global parse_program
+    global compile_error
     
     extern next_token
     extern get_error_loc
@@ -144,6 +177,12 @@ section .text
     extern sym_set_private
     extern sym_count
     extern sym_remove_block_scope
+    extern sym_remove_after
+    extern proto_lookup
+    extern proto_get_param_count
+    extern proto_get_ret_count
+    extern proto_set_param_var_idx
+    extern proto_get_ret_conc_type
 
     extern alloc_vreg
     extern emit_ir
@@ -223,6 +262,12 @@ parse_program:
     je .loop
     cmp eax, TOK_SKIP
     je .loop
+    cmp eax, TOK_PROT
+    je .loop
+    cmp eax, TOK_AT
+    je .loop
+    cmp eax, TOK_COLON
+    je .loop
     
     ; If not newline or EOF, it's an error
     mov rdi, err_newline_req
@@ -299,9 +344,179 @@ parse_stmt:
     cmp eax, TOK_SKIP
     je .skip_stmt
     
+    cmp eax, TOK_SWAP
+    je .swap_stmt
+    
+    cmp eax, TOK_PROT
+    je .prot_stmt
+    
     ; Unknown statement — try as expression statement
     call parse_expr
     ret
+
+; ============ Protocol Definition ============
+; prot <IDENT> "(" params ")" ["->" return_type] ":" NEWLINE INDENT body DEDENT
+.prot_stmt:
+    call advance ; consume 'prot' → IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+
+    ; Protocol was pre-registered by prescan_protocols
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call proto_lookup
+    cmp rax, -1
+    je .prot_undef
+    mov r14, rax ; proto_id
+
+    ; Emit JMP over the body (so main code does not fall into it)
+    call gen_label
+    mov r15, rax ; end label
+    mov rdi, r15
+    call emit_jmp
+
+    ; IR_PROTO_BEGIN(imm = proto_id)
+    mov rdi, IR_PROTO_BEGIN
+    xor rsi, rsi
+    xor rdx, rdx
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, r14
+    xor r10, r10
+    call emit_ir
+
+    ; Enter protocol body context: params/vars become SCOPE_LOCAL.
+    ; (parse_block increments block_nesting itself when it enters the body.)
+    inc dword [proto_body_nesting]
+    mov eax, [sym_count]
+    mov [prot_sym_save], eax
+
+    ; Parse "(" params ")"
+    call advance ; consume name → '('
+    mov edi, TOK_LPAREN
+    call expect ; consume '('
+
+    xor r12d, r12d ; param index
+.param_loop:
+    mov eax, [current_token]
+    cmp eax, TOK_RPAREN
+    je .param_done
+    ; param ::= type_expr IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_TYPE
+    jne .prot_syntax_err
+    mov ebx, [tok_ival] ; type
+    call advance ; consume type
+    ; optional [T] / [T, N] suffix
+    mov eax, [current_token]
+    cmp eax, TOK_LBRACKET
+    jne .param_no_suffix
+.param_skip:
+    call advance
+    mov eax, [current_token]
+    cmp eax, TOK_RBRACKET
+    jne .param_skip
+    call advance ; consume ']'
+.param_no_suffix:
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    call save_ident
+    call advance ; consume IDENT
+    ; sym_add(name, len, type, SCOPE_LOCAL)
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    mov rdx, rbx
+    mov rcx, SCOPE_LOCAL
+    call sym_add
+    cmp rax, -2
+    je dup_error
+    cmp rax, -1
+    je full_error
+    mov r13, rax ; sym index
+    ; Params arrive initialised and mutable
+    mov rdi, r13
+    mov rsi, 1
+    call sym_set_init
+    mov rdi, r13
+    mov rsi, 1
+    call sym_set_mutable
+    ; Record param var slot
+    mov rdi, r13
+    call sym_get_offset
+    mov rbx, rax ; var abs offset
+    mov rdi, r14 ; proto_id
+    mov rsi, r12 ; arg index
+    mov rdx, rbx ; var offset
+    call proto_set_param_var_idx
+    ; IR_SAVE_ARG(imm = arg index, aux = var offset)
+    mov rdi, IR_SAVE_ARG
+    xor rsi, rsi
+    xor rdx, rdx
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, r12
+    mov r10, rbx
+    call emit_ir
+    inc r12d
+    ; ',' or ')'
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .param_loop
+    call advance
+    jmp .param_loop
+.param_done:
+    mov edi, TOK_RPAREN
+    call expect ; consume ')'
+
+    ; Optional return type: skip tokens until ':' (validated by prescan)
+    mov eax, [current_token]
+    cmp eax, TOK_ARROW
+    jne .prot_no_ret
+.prot_ret_skip:
+    call advance
+    mov eax, [current_token]
+    cmp eax, TOK_COLON
+    je .prot_no_ret
+    cmp eax, TOK_EOF
+    je .prot_syntax_err
+    jmp .prot_ret_skip
+.prot_no_ret:
+    mov edi, TOK_COLON
+    call expect ; consume ':'
+
+    ; Parse the body
+    call parse_block
+
+    ; Fall-through return (void). Explicit `return` statements already
+    ; emitted their own IR_RET inside the body.
+    mov rdi, IR_RET
+    xor rsi, rsi
+    xor rdx, rdx
+    xor rcx, rcx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+
+    ; End label (the JMP-over-body target)
+    mov rdi, r15
+    call emit_label
+
+    ; Leave protocol body context: drop all body-local symbols so the
+    ; next body reuses the same var slots (VAR_MAX is small).
+    mov edi, [prot_sym_save]
+    call sym_remove_after
+    dec dword [proto_body_nesting]
+    ret
+
+.prot_undef:
+    mov rdi, err_unknown_proto
+    jmp compile_error
+.prot_syntax_err:
+    mov rdi, err_syntax
+    jmp compile_error
 
 .const_decl:
     call advance ; consume const
@@ -751,11 +966,18 @@ parse_stmt:
     call parse_expr
     push rax ; start vreg
 
-    ; Expect '..'
+    ; Expect '..' or '..=' (inclusive range)
+    mov byte [for_inclusive], 0
     mov eax, [current_token]
+    cmp eax, TOK_DOTDOT_EQ
+    jne .check_excl
+    mov byte [for_inclusive], 1
+    jmp .range_consume
+.check_excl:
     cmp eax, TOK_DOTDOT
     jne .for_syntax_err
-    call advance ; consume '..'
+.range_consume:
+    call advance ; consume '..' or '..='
 
     ; Parse end expression
     call parse_expr
@@ -765,15 +987,17 @@ parse_stmt:
     ; so the register allocator sees fresh vregs each iteration
     ; (avoids end vreg spanning the entire loop body)
     push r13
-    lea rdi, [str_for_end]
-    mov rsi, 9 ; len("_for_end")
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
     mov rdx, TYPE_INT
     call determine_scope
     mov rcx, rax
     mov rdx, TYPE_INT
-    lea rdi, [str_for_end]
-    mov rsi, 9
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
     call sym_add
+    cmp rax, 0
+    jl .for_syntax_err ; hidden name must never collide
     mov r14, rax ; end symbol index
     mov rdi, r14
     mov rsi, 1
@@ -795,10 +1019,56 @@ parse_stmt:
     xor r10, r10
     call emit_ir
 
+    ; Optional 'step <expr>' — store the step into a hidden __for_step variable
+    ; so the increment reloads it each iteration (like __for_end). r13 holds the
+    ; step symbol index (or -1 if no step was given) until the increment is emitted.
+    mov r13, -1
+    mov eax, [current_token]
+    cmp eax, TOK_STEP
+    jne .no_step
+    call advance ; consume 'step'
+    call parse_expr ; rax = step vreg
+    push rax
+    call gen_label ; unique name suffix
+    call build_for_hidden_step_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    mov rdx, TYPE_INT
+    call determine_scope
+    mov rcx, rax
+    mov rdx, TYPE_INT
+    call build_for_hidden_step_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    call sym_add
+    cmp rax, 0
+    jl .for_syntax_err ; hidden name must never collide
+    mov r13, rax ; step symbol index
+    mov rdi, r13
+    mov rsi, 1
+    call sym_set_mutable
+    mov rdi, r13
+    mov rsi, 1
+    call sym_set_init
+    pop rax ; step vreg
+    push rax ; keep step vreg while resolving the symbol offset
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax ; step var offset
+    pop rcx ; step vreg (src1)
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_INT
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+.no_step:
+
     mov edi, TOK_COLON
     call expect
 
-    ; Declare loop variable as mutable int
+    ; Declare loop variable as mutable int.
+    ; If the name already exists in this scope (e.g. a previous loop used the
+    ; same variable, or an `int i = 0` declaration), reuse the existing symbol
+    ; instead of failing: the second loop simply re-initializes it.
     push r14 ; save end symbol index
     mov rdi, ident_buf
     mov rsi, [ident_len]
@@ -809,6 +1079,18 @@ parse_stmt:
     mov rdi, ident_buf
     mov rsi, [ident_len]
     call sym_add
+    cmp rax, -2
+    je .reuse_loop_var
+    cmp rax, 0
+    jl .for_syntax_err ; table full / other error
+    jmp .loop_var_sym_done
+.reuse_loop_var:
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    call sym_lookup
+    cmp rax, -1
+    je .for_syntax_err ; duplicate vanished; treat as error
+.loop_var_sym_done:
     mov r15, rax ; loop symbol index
 
     ; Check for _ prefix → mark as private
@@ -898,6 +1180,10 @@ parse_stmt:
     mov r8, r12  ; end value vreg
     xor r9, r9
     mov r10, COND_LT
+    cmp byte [for_inclusive], 0
+    je .cmp_cond_done
+    mov r10, COND_LE ; '..=' → loop while loop_var <= end
+.cmp_cond_done:
     call emit_ir
 
     ; JCC to loop_end if NOT (loop_var < end)
@@ -906,10 +1192,17 @@ parse_stmt:
     pop rcx ; cmp result vreg
     call emit_jcc
 
-    ; Parse loop body
+    ; Parse loop body (body statements may clobber r13/r14/r15 — preserve
+    ; the loop-var, _for_end and _for_step symbol indices across the call)
+    push r13
+    push r14
+    push r15
     call parse_block
+    pop r15
+    pop r14
+    pop r13
 
-    ; Increment: i = i + 1
+    ; Increment: i = i + 1 (or i + __for_step when step given)
     call alloc_vreg
     mov rbx, rax
     mov rdi, r15
@@ -925,6 +1218,21 @@ parse_stmt:
 
     call alloc_vreg
     push rax
+    cmp r13, 0
+    jl .inc_no_step
+    ; Explicit step: ve = LOAD_VAR __for_step (fresh vreg each iteration)
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+    jmp .inc_src_done
+.inc_no_step:
     mov rdi, IR_LOAD_IMM
     mov rsi, TYPE_INT
     mov rdx, [rsp]
@@ -933,6 +1241,7 @@ parse_stmt:
     mov r9, 1
     xor r10, r10
     call emit_ir
+.inc_src_done:
 
     call alloc_vreg
     push rax
@@ -1015,23 +1324,503 @@ parse_stmt:
 ; ============ Each Loop ============
 .each_stmt:
     call advance ; consume 'each'
-    mov edi, TOK_IDENT
-    call expect ; element variable
+    ; Element variable name
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    call save_ident
+    ; Save element name into its own buffer — parse_expr below clobbers ident_buf
+    mov rax, [ident_len]
+    mov [each_var_len], rax
+    xor rdi, rdi
+.each_name_copy:
+    cmp rdi, rax
+    jae .each_name_done
+    mov cl, [ident_buf + rdi]
+    mov [each_var_buf + rdi], cl
+    inc rdi
+    jmp .each_name_copy
+.each_name_done:
+    mov byte [each_var_buf + rdi], 0
+    call advance ; consume IDENT
+
     mov edi, TOK_IN
     call expect
-    call parse_expr ; collection expression
+
+    ; Parse collection expression
+    call parse_expr ; rax = seq vreg, rdx = type
+    cmp rdx, TYPE_SEQ
+    jne .for_syntax_err
+    push rax ; seq vreg on stack
+
     mov edi, TOK_COLON
     call expect
-    call .skip_block
+
+    ; Hidden seq variable (holds the seq pointer across the loop body)
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    mov rdx, TYPE_INT
+    call determine_scope
+    mov rcx, rax
+    mov rdx, TYPE_INT
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    call sym_add
+    cmp rax, 0
+    jl .for_syntax_err
+    mov r14, rax ; seq symbol index
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_mutable
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_init
+
+    ; Store collection value into hidden seq variable
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    pop rcx ; seq vreg (src1)
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_SEQ
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; Hidden index variable (must use a distinct name — bump the counter first)
+    call gen_label ; unique name suffix for the index variable
+    push r14 ; save seq symbol index
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    mov rdx, TYPE_INT
+    call determine_scope
+    mov rcx, rax
+    mov rdx, TYPE_INT
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    call sym_add
+    cmp rax, 0
+    jl .for_syntax_err
+    mov r13, rax ; index symbol index
+    mov rdi, r13
+    mov rsi, 1
+    call sym_set_mutable
+    mov rdi, r13
+    mov rsi, 1
+    call sym_set_init
+    pop r14 ; restore seq symbol index
+
+    ; Store 0 into hidden index variable
+    call alloc_vreg
+    push rax
+    mov rdi, IR_LOAD_IMM
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor rcx, rcx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax
+    pop rcx
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_INT
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; Declare element variable as mutable int.
+    ; Reuse an existing symbol with the same name in this scope (same rule
+    ; as `for` loop variables) instead of failing.
+    push r14 ; save seq symbol index
+    push r13 ; save index symbol index
+    mov rdi, each_var_buf
+    mov rsi, [each_var_len]
+    mov rdx, TYPE_INT
+    call determine_scope
+    mov rcx, rax
+    mov rdx, TYPE_INT
+    mov rdi, each_var_buf
+    mov rsi, [each_var_len]
+    call sym_add
+    cmp rax, -2
+    je .each_reuse_var
+    cmp rax, 0
+    jl .for_syntax_err ; table full / other error
+    jmp .each_var_sym_done
+.each_reuse_var:
+    mov rdi, each_var_buf
+    mov rsi, [each_var_len]
+    call sym_lookup
+    cmp rax, -1
+    je .for_syntax_err
+.each_var_sym_done:
+    mov r15, rax ; element symbol index
+
+    ; Check for _ prefix → mark as private
+    cmp qword [each_var_len], 1
+    jl .each_not_private
+    cmp byte [each_var_buf], '_'
+    jne .each_not_private
+    cmp qword [each_var_len], 2
+    jl .each_is_private
+    cmp byte [each_var_buf + 1], '_'
+    je .each_not_private
+.each_is_private:
+    mov rdi, r15
+    mov rsi, 1
+    call sym_set_private
+.each_not_private:
+
+    mov rdi, r15
+    mov rsi, 1
+    call sym_set_mutable
+    mov rdi, r15
+    mov rsi, 1
+    call sym_set_init
+    pop r13 ; restore index symbol index
+    pop r14 ; restore seq symbol index
+
+    ; Generate loop labels
+    call gen_label
+    push rax ; loop_start
+    call gen_label
+    push rax ; loop_end
+
+    ; Emit loop_start label
+    mov rdi, [rsp + 8] ; loop_start
+    call emit_label
+
+    ; Load index (fresh vreg each iteration)
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; Load seq pointer (fresh vreg each iteration)
+    call alloc_vreg
+    mov r12, rax
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_SEQ
+    mov rdx, r12
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; len = seq.len()
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SEQ_LEN
+    mov rsi, TYPE_INT
+    mov rdx, [rsp] ; dst
+    mov rcx, r12 ; seq vreg
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+
+    ; Compare: index < len
+    call alloc_vreg
+    push rax
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp] ; dst
+    mov rcx, rbx ; index vreg (src1)
+    mov r8, [rsp + 8] ; len vreg (src2)
+    xor r9, r9
+    mov r10, COND_LT
+    call emit_ir
+
+    ; JCC to loop_end if NOT (index < len)
+    mov rdi, [rsp + 16] ; loop_end
+    mov rsi, COND_NE
+    pop rcx ; cmp result vreg
+    pop r12 ; len vreg (discard)
+    call emit_jcc
+
+    ; element = seq[index]
+    call alloc_vreg
+    mov rbx, rax ; index vreg
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    call alloc_vreg
+    mov r12, rax ; seq vreg
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_SEQ
+    mov rdx, r12
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SEQ_LOAD
+    mov rsi, TYPE_INT
+    mov rdx, [rsp] ; dst
+    mov rcx, r12 ; seq vreg (src1)
+    mov r8, rbx ; index vreg (src2)
+    mov r9, SEQ_ELEMENT_SIZE
+    xor r10, r10
+    call emit_ir
+
+    ; Store element value into element variable
+    mov rdi, r15
+    call sym_get_offset
+    mov r9, rax
+    pop rcx ; element vreg
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_INT
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; Parse loop body (body statements may clobber r13/r14/r15 — preserve
+    ; the seq/index/element symbol indices across the call)
+    push r13
+    push r14
+    push r15
+    call parse_block
+    pop r15
+    pop r14
+    pop r13
+
+    ; Increment: index = index + 1
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    call alloc_vreg
+    push rax
+    mov rdi, IR_LOAD_IMM
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, 1
+    xor r10, r10
+    call emit_ir
+
+    call alloc_vreg
+    push rax
+    mov rdi, IR_ADD
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, rbx
+    mov r8, [rsp + 8]
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+
+    mov rdi, r13
+    call sym_get_offset
+    mov r9, rax
+    pop rcx
+    add rsp, 8
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_INT
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; JMP back to loop_start
+    mov rdi, [rsp + 8]
+    call emit_jmp
+
+    ; Emit loop_end label
+    pop rdi ; loop_end
+    pop rax ; loop_start (discard)
+    call emit_label
     ret
 
 ; ============ Repeat Loop ============
 .repeat_stmt:
     call advance ; consume 'repeat'
-    call parse_expr ; count expression
+    call parse_expr ; count expression vreg in rax
+    cmp rdx, TYPE_INT
+    jne .for_syntax_err
+    push rax ; count vreg on stack
     mov edi, TOK_COLON
     call expect
-    call .skip_block
+
+    ; Hidden counter variable (holds the remaining count across the loop body)
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    mov rdx, TYPE_INT
+    call determine_scope
+    mov rcx, rax
+    mov rdx, TYPE_INT
+    call build_for_hidden_name ; rdi = name ptr, rax = len
+    mov rsi, rax
+    call sym_add
+    cmp rax, 0
+    jl .for_syntax_err
+    mov r14, rax ; counter symbol index
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_mutable
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_init
+
+    ; Store count value into hidden counter variable
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    pop rcx ; count vreg (src1)
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_INT
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; Generate loop labels
+    call gen_label
+    push rax ; loop_start
+    call gen_label
+    push rax ; loop_end
+
+    ; Emit loop_start label
+    mov rdi, [rsp + 8] ; loop_start
+    call emit_label
+
+    ; Load counter (fresh vreg each iteration)
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; Compare: counter > 0
+    call alloc_vreg
+    push rax
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp] ; dst
+    mov rcx, rbx ; counter vreg (src1)
+    xor r8, r8 ; src2 = 0 (use imm)
+    xor r9, r9 ; imm = 0
+    mov r10, COND_GT
+    call emit_ir
+
+    ; JCC to loop_end if NOT (counter > 0)
+    mov rdi, [rsp + 8] ; loop_end
+    mov rsi, COND_NE
+    pop rcx ; cmp result vreg
+    call emit_jcc
+
+    ; Parse loop body (body statements may clobber r14/r15 — preserve
+    ; the counter symbol index across the call)
+    push r14
+    push r15
+    call parse_block
+    pop r15
+    pop r14
+
+    ; Decrement: counter = counter - 1
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    call alloc_vreg
+    push rax
+    mov rdi, IR_LOAD_IMM
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, 1
+    xor r10, r10
+    call emit_ir
+
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SUB
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, rbx
+    mov r8, [rsp + 8]
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    pop rcx
+    add rsp, 8
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_INT
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; JMP back to loop_start
+    mov rdi, [rsp + 8]
+    call emit_jmp
+
+    ; Emit loop_end label
+    pop rdi ; loop_end
+    pop rax ; loop_start (discard)
+    call emit_label
     ret
 
 ; ============ Return ============
@@ -1043,17 +1832,33 @@ parse_stmt:
     cmp eax, TOK_EOF
     je .return_void
     call parse_expr ; return value in rax
+    mov r12, rax
+    ; Multi-return: "return a, b"
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .return_single
+    call advance ; consume ','
+    call parse_expr ; second return value in rax
+    ; Emit IR_RET with src1 = first, src2 = second
+    mov rdi, IR_RET
+    xor rsi, rsi
+    xor rdx, rdx
+    mov rcx, r12
+    mov r8, rax
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    ret
+.return_single:
     ; Emit IR_RET with return value vreg
-    push rax
     mov rdi, IR_RET
     xor rsi, rsi        ; type = void (return type)
     xor rdx, rdx        ; dst = 0 (void)
-    mov rcx, rax        ; src1 = return value vreg
+    mov rcx, r12        ; src1 = return value vreg
     xor r8, r8
     xor r9, r9
     xor r10, r10
     call emit_ir
-    pop rax
     ret
 .return_void:
     ; Emit IR_RET with no return value
@@ -1082,8 +1887,60 @@ parse_stmt:
     call advance ; consume 'skip'
     ret
 
+; ============ Swap ============
+; Grammar: swap_stmt ::= "swap" <IDENT> <IDENT> <NEWLINE>
+.swap_stmt:
+    call advance ; consume 'swap'
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    ; Look up first variable
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call sym_lookup
+    cmp rax, -1
+    je .swap_undef
+    mov r12, rax ; sym_idx_a
+    call advance ; consume first ident
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call sym_lookup
+    cmp rax, -1
+    je .swap_undef
+    mov r13, rax ; sym_idx_b
+    call advance ; consume second ident
+    ; Get stack offsets for both variables
+    mov rdi, r12
+    call sym_get_offset
+    mov r14, rax ; offset_a
+    mov rdi, r13
+    call sym_get_offset
+    mov r15, rax ; offset_b
+    ; Emit IR_SWAP_VARS: imm=offset_a, aux=offset_b
+    mov rdi, IR_SWAP_VARS
+    xor esi, esi
+    xor edx, edx
+    xor ecx, ecx
+    xor r8, r8
+    mov r9, r14  ; imm = offset_a
+    mov r10, r15 ; aux = offset_b
+    call emit_ir
+    ret
+.swap_undef:
+    mov rdi, err_undef
+    jmp compile_error
+
 ; Helper: skip an indented block (consume until DEDENT)
 .skip_block:
+    ; Consume NEWLINE before INDENT (if present)
+    mov eax, [current_token]
+    cmp eax, TOK_NEWLINE
+    jne .skip_block_no_nl
+    call advance
+.skip_block_no_nl:
     mov eax, [current_token]
     cmp eax, TOK_INDENT
     jne .skip_single
@@ -1095,6 +1952,12 @@ parse_stmt:
     cmp eax, TOK_EOF
     je .skip_done
     call parse_stmt
+    ; Expect newline after each statement in block
+    mov eax, [current_token]
+    cmp eax, TOK_NEWLINE
+    jne .skip_skip_nl
+    call advance
+.skip_skip_nl:
     jmp .skip_loop
 .skip_done:
     call advance ; consume DEDENT
@@ -1514,6 +2377,11 @@ parse_stmt:
     call sym_set_mutable
     call advance ; consume IDENT
 
+    ; Multi-target assignment: :a, :b = @f(...)
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    je .multi_mutation
+
     ; Check if this is a method call: :name.method(...)
     mov eax, [current_token]
     cmp eax, TOK_DOT
@@ -1596,6 +2464,95 @@ parse_stmt:
     xor r10, r10
     call emit_ir
     ret
+
+.multi_mutation:
+    ; Multi-target mutation: :a, :b = @f(...)
+    ; r14 = target0 sym index (saved above), current_token = ','
+    mov [mut_target_syms + 0*4], r14d
+    mov r15d, 1 ; target count
+.multi_target_loop:
+    call advance ; consume ','
+    mov edi, TOK_COLON
+    call expect ; consume ':' → IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call sym_lookup
+    cmp rax, -1
+    je .undef_error
+    cmp r15d, 65
+    jae .multi_err
+    mov [mut_target_syms + r15*4], eax
+    inc r15d
+    call advance ; consume IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    je .multi_target_loop
+    ; Now expect '=' then a protocol call
+    mov edi, TOK_ASSIGN
+    call expect
+    mov eax, [current_token]
+    cmp eax, TOK_AT
+    jne .multi_err
+    call advance ; consume '@' → IDENT
+    call parse_proto_call ; rax = lo vreg
+    ; Require exactly 2 targets and a 2-return protocol
+    cmp r15d, 2
+    jne .multi_err
+    cmp dword [call_result_hi], 0
+    je .multi_err
+    mov r13, rax ; lo vreg
+    mov r12d, [call_result_hi] ; hi vreg
+    ; STORE target0 ← lo
+    mov edi, [mut_target_syms + 0*4]
+    mov rsi, 1
+    call sym_set_mutable
+    mov edi, [mut_target_syms + 0*4]
+    mov rsi, 1
+    call sym_set_init
+    mov edi, [mut_target_syms + 0*4]
+    call sym_get_type
+    push rax
+    mov edi, [mut_target_syms + 0*4]
+    call sym_get_offset
+    push rax
+    mov rdi, IR_STORE_VAR
+    xor rsi, rsi
+    xor rdx, rdx
+    mov rcx, r13
+    xor r8, r8
+    pop r9 ; imm = offset
+    pop rsi ; type
+    xor r10, r10
+    call emit_ir
+    ; STORE target1 ← hi
+    mov edi, [mut_target_syms + 1*4]
+    mov rsi, 1
+    call sym_set_mutable
+    mov edi, [mut_target_syms + 1*4]
+    mov rsi, 1
+    call sym_set_init
+    mov edi, [mut_target_syms + 1*4]
+    call sym_get_type
+    push rax
+    mov edi, [mut_target_syms + 1*4]
+    call sym_get_offset
+    push rax
+    mov rdi, IR_STORE_VAR
+    xor rsi, rsi
+    xor rdx, rdx
+    mov rcx, r12
+    xor r8, r8
+    pop r9
+    pop rsi
+    xor r10, r10
+    call emit_ir
+    ret
+.multi_err:
+    mov rdi, err_arity
+    jmp compile_error
 
 .compound_assign:
     ; Compound assignment: :name op= expr
@@ -1691,8 +2648,14 @@ parse_stmt:
 .compound_emit:
     ; rdi = IR opcode
     pop rdx ; result vreg
-    add rsp, 8 ; discard saved type (not needed for IR)
-    mov rsi, TYPE_INT ; arithmetic is int-typed
+    pop rsi ; variable type (float compounds must be float-typed)
+    ; String += must desugar to concat, not integer add on pointers
+    cmp rsi, TYPE_STR
+    jne .compound_not_str
+    cmp rdi, IR_ADD
+    jne type_error
+    mov rdi, IR_STR_CONCAT
+.compound_not_str:
     mov rcx, r13 ; src1 = old value vreg
     mov r8, r15 ; src2 = rhs vreg
     xor r9, r9
@@ -2289,8 +3252,14 @@ parse_stmt:
 
 .ident_compound_emit:
     pop rdx ; result vreg
-    add rsp, 8 ; discard saved type
-    mov rsi, TYPE_INT
+    pop rsi ; variable type (float compounds must be float-typed)
+    ; String += must desugar to concat, not integer add on pointers
+    cmp rsi, TYPE_STR
+    jne .ident_compound_not_str
+    cmp rdi, IR_ADD
+    jne type_error
+    mov rdi, IR_STR_CONCAT
+.ident_compound_not_str:
     mov rcx, r13 ; src1 = old value
     mov r8, r15 ; src2 = rhs
     xor r9, r9
@@ -2335,6 +3304,8 @@ parse_stmt:
     mov rdi, ident_buf
     mov rsi, [ident_len]
     call sym_add
+    cmp rax, -1
+    je full_error ; symbol table full
     mov r14, rax ; symbol index
 
     ; Check for _ prefix → mark as private
@@ -3240,9 +4211,17 @@ parse_term:
     je .len_builtin
     cmp eax, TOK_LBRACKET
     je .array_literal
+    cmp eax, TOK_AT
+    je .proto_call
     
     mov rdi, err_syntax
     jmp compile_error
+
+.proto_call:
+    ; '@' proto_name '(' args ')'
+    call advance ; consume '@' → IDENT
+    call parse_proto_call
+    ret
 
 .int_lit:
     push qword [tok_ival]
@@ -3409,11 +4388,837 @@ parse_term:
     ret
 
 .undef_error:
+    ; Check if this is a known builtin function name before erroring
+    ; The identifier string is still in tok_str_ptr/tok_str_len (advance not called)
+    ; Populate method_buf from tok_str_ptr/tok_str_len for ident_is comparisons
+    mov rsi, [tok_str_ptr]
+    mov rcx, [tok_str_len]
+    cmp rcx, 31
+    jle .builtin_mlen_ok
+    mov rcx, 31
+.builtin_mlen_ok:
+    mov [method_len], rcx
+    lea rdi, [method_buf]
+    push rcx
+    test rcx, rcx
+    jz .builtin_mcopy_done
+.builtin_mcopy:
+    movzx rax, byte [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .builtin_mcopy
+.builtin_mcopy_done:
+    pop rcx
+    lea rdi, [method_buf]
+    add rdi, rcx
+    mov byte [rdi], 0
+    lea rdi, [str_abs]
+    call ident_is
+    test rax,rax
+    jnz .builtin_abs
+    lea rdi, [str_sqrt]
+    call ident_is
+    test rax,rax
+    jnz .builtin_sqrt
+    lea rdi, [str_floor]
+    call ident_is
+    test rax,rax
+    jnz .builtin_floor
+    lea rdi, [str_round]
+    call ident_is
+    test rax,rax
+    jnz .builtin_round
+    lea rdi, [str_trunc]
+    call ident_is
+    test rax,rax
+    jnz .builtin_trunc
+    lea rdi, [str_fract]
+    call ident_is
+    test rax,rax
+    jnz .builtin_fract
+    lea rdi, [str_signum]
+    call ident_is
+    test rax,rax
+    jnz .builtin_signum
+    lea rdi, [str_min]
+    call ident_is
+    test rax,rax
+    jnz .builtin_min
+    lea rdi, [str_max]
+    call ident_is
+    test rax,rax
+    jnz .builtin_max
+    lea rdi, [str_clamp]
+    call ident_is
+    test rax,rax
+    jnz .builtin_clamp
+    lea rdi, [str_recip]
+    call ident_is
+    test rax,rax
+    jnz .builtin_recip
+    lea rdi, [str_sin]
+    call ident_is
+    test rax,rax
+    jnz .builtin_sin
+    lea rdi, [str_cos]
+    call ident_is
+    test rax,rax
+    jnz .builtin_cos
+    lea rdi, [str_tan]
+    call ident_is
+    test rax,rax
+    jnz .builtin_tan
+    lea rdi, [str_pow]
+    call ident_is
+    test rax,rax
+    jnz .builtin_pow
+    lea rdi, [str_cbrt]
+    call ident_is
+    test rax,rax
+    jnz .builtin_cbrt
+    lea rdi, [str_gcd]
+    call ident_is
+    test rax,rax
+    jnz .builtin_gcd
+    lea rdi, [str_lcm]
+    call ident_is
+    test rax,rax
+    jnz .builtin_lcm
+    lea rdi, [str_to_bin]
+    call ident_is
+    test rax,rax
+    jnz .builtin_to_bin
+    lea rdi, [str_to_hex]
+    call ident_is
+    test rax,rax
+    jnz .builtin_to_hex
+    lea rdi, [str_to_oct]
+    call ident_is
+    test rax,rax
+    jnz .builtin_to_oct
+    lea rdi, [str_sum_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_sum
     mov rdi, err_undef
     jmp compile_error
+
 .uninit_error:
     add rsp, 8 ; clean up sym_idx
     mov rdi, err_uninit
+    jmp compile_error
+
+; === Builtin function handlers ===
+; These are reached from .undef_error in parse_term
+; The identifier has NOT been consumed yet (advance not called)
+
+.builtin_abs:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop rcx
+    cmp rdx, TYPE_INT
+    je .builtin_abs_int
+    cmp rdx, TYPE_FLOAT
+    je .builtin_abs_float
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.builtin_abs_int:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_ABS_INT
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+.builtin_abs_float:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_ABS_FLOAT
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_sqrt:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SQRT
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_floor:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_FLOOR
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+
+.builtin_round:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_ROUND
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+
+.builtin_trunc:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TRUNC_F
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_fract:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop r12
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TRUNC_F
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SUB
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    mov rcx, r12
+    mov r8, [rsp+8]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    add rsp, 8
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_signum:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop rcx
+    cmp rdx, TYPE_INT
+    je .builtin_signum_int
+    cmp rdx, TYPE_FLOAT
+    je .builtin_signum_float
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.builtin_signum_int:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SIGNUM
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+.builtin_signum_float:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SIGNUM_F
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_min:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_COMMA
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop r8
+    pop rdx
+    pop rcx
+    cmp rdx, TYPE_INT
+    je .builtin_min_int
+    cmp rdx, TYPE_FLOAT
+    je .builtin_min_float
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.builtin_min_int:
+    push rcx
+    push r8
+    call alloc_vreg
+    pop r8
+    pop rcx
+    push rax
+    mov rdi, IR_MIN_INT
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+.builtin_min_float:
+    push rcx
+    push r8
+    call alloc_vreg
+    pop r8
+    pop rcx
+    push rax
+    mov rdi, IR_MIN_FLOAT
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_max:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_COMMA
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop r8
+    pop rdx
+    pop rcx
+    cmp rdx, TYPE_INT
+    je .builtin_max_int
+    cmp rdx, TYPE_FLOAT
+    je .builtin_max_float
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.builtin_max_int:
+    push rcx
+    push r8
+    call alloc_vreg
+    pop r8
+    pop rcx
+    push rax
+    mov rdi, IR_MAX_INT
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+.builtin_max_float:
+    push rcx
+    push r8
+    call alloc_vreg
+    pop r8
+    pop rcx
+    push rax
+    mov rdi, IR_MAX_FLOAT
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_clamp:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax        ; value
+    push rdx        ; type
+    mov edi, TOK_COMMA
+    call expect
+    call parse_expr
+    push rax        ; lo
+    mov edi, TOK_COMMA
+    call expect
+    call parse_expr
+    push rax        ; hi
+    mov edi, TOK_RPAREN
+    call expect
+    pop r15         ; hi
+    pop r14         ; lo
+    pop rdx         ; type
+    pop r12         ; value
+    cmp rdx, TYPE_INT
+    je .builtin_clamp_int
+    cmp rdx, TYPE_FLOAT
+    je .builtin_clamp_float
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.builtin_clamp_int:
+    ; temp = min(value, hi)
+    call alloc_vreg
+    push rax
+    mov rdi, IR_MIN_INT
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, r12
+    mov r8, r15
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    ; result = max(lo, temp)
+    call alloc_vreg
+    push rax
+    mov rdi, IR_MAX_INT
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, r14
+    mov r8, [rsp+8]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    add rsp, 8
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+.builtin_clamp_float:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_MIN_FLOAT
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    mov rcx, r12
+    mov r8, r15
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    call alloc_vreg
+    push rax
+    mov rdi, IR_MAX_FLOAT
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    mov rcx, r14
+    mov r8, [rsp+8]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    add rsp, 8
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_recip:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax                ; [arg]
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    push rax                ; [one, arg]
+    mov rdi, IR_LOAD_FIMM
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor rcx,rcx
+    xor r8,r8
+    mov r9, [float_pp_one]
+    xor r10,r10
+    call emit_ir
+    call alloc_vreg
+    push rax                ; [result, one, arg]
+    mov rdi, IR_DIV
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]          ; dst = result
+    mov rcx, [rsp+8]        ; src1 = one
+    mov r8, [rsp+16]        ; src2 = arg
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov rax, [rsp]          ; rax = result
+    add rsp, 24
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_sin:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SIN
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_cos:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_COS
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_tan:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TAN
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_pow:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_COMMA
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop r8
+    pop rcx
+    push rcx
+    push r8
+    call alloc_vreg
+    pop r8
+    pop rcx
+    push rax
+    mov rdi, IR_POW_F
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_cbrt:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_CBRT
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FLOAT
+    ret
+
+.builtin_gcd:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_COMMA
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop r8
+    pop rcx
+    push rcx
+    push r8
+    call alloc_vreg
+    pop r8
+    pop rcx
+    push rax
+    mov rdi, IR_GCD
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+
+.builtin_lcm:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_COMMA
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop r8
+    pop rcx
+    push rcx
+    push r8
+    call alloc_vreg
+    pop r8
+    pop rcx
+    push rax
+    mov rdi, IR_LCM
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+
+.builtin_to_bin:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_BIN_STR
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+
+.builtin_to_hex:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_HEX_STR
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+
+.builtin_to_oct:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    mov edi, TOK_RPAREN
+    call expect
+    pop rcx
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_OCT_STR
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+
+.builtin_sum:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop rcx
+    cmp rdx, TYPE_SEQ
+    jne .builtin_sum_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_SEQ_SUM
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    ; rcx = seq vreg (src1)
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+.builtin_sum_type_err:
+    mov rdi, err_type_mismatch
     jmp compile_error
 
 .paren:
@@ -3836,6 +5641,94 @@ gen_label:
     inc dword [label_counter]
     ret
 
+; Build unique hidden loop variable name "_for_end<label_counter>" into for_hidden_buf
+; Returns: rdi = name ptr, rax = length (excluding null terminator)
+build_for_hidden_name:
+    push rbx
+    push rcx
+    push rdx
+    lea rdi, [for_hidden_buf]
+    lea rsi, [str_for_end]
+    mov ecx, 8
+    rep movsb ; copy "_for_end"
+    ; Convert label_counter to decimal, digits built backward from buffer[16]
+    mov eax, [label_counter]
+    lea rdi, [for_hidden_buf + 16]
+    mov ebx, 10
+    xor ecx, ecx ; digit count
+.test_zero:
+    test eax, eax
+    jne .digit_loop
+    mov byte [rdi], '0'
+    inc ecx
+    jmp .digits_done
+.digit_loop:
+    xor edx, edx
+    div ebx
+    add edx, '0'
+    dec rdi
+    mov [rdi], dl
+    inc ecx
+    test eax, eax
+    jnz .digit_loop
+.digits_done:
+    ; Move digits so they immediately follow "_for_end"
+    mov rax, rcx ; digit count (rep movsb zeroes ecx)
+    mov rdx, rdi ; source = first digit
+    lea rdi, [for_hidden_buf + 8]
+    mov rsi, rdx
+    rep movsb
+    add rax, 8 ; total length
+    lea rdi, [for_hidden_buf]
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Build unique hidden step variable name "_for_step<label_counter>"
+; Returns: rdi = name ptr, rax = length (excluding null terminator)
+build_for_hidden_step_name:
+    push rbx
+    push rcx
+    push rdx
+    lea rdi, [for_hidden_buf]
+    lea rsi, [str_for_step]
+    mov ecx, 9
+    rep movsb ; copy "_for_step"
+    ; Convert label_counter to decimal, digits built backward from buffer[17]
+    mov eax, [label_counter]
+    lea rdi, [for_hidden_buf + 17]
+    mov ebx, 10
+    xor ecx, ecx ; digit count
+.test_zero:
+    test eax, eax
+    jne .digit_loop
+    mov byte [rdi], '0'
+    inc ecx
+    jmp .digits_done
+.digit_loop:
+    xor edx, edx
+    div ebx
+    add edx, '0'
+    dec rdi
+    mov [rdi], dl
+    inc ecx
+    test eax, eax
+    jnz .digit_loop
+.digits_done:
+    ; Move digits so they immediately follow "_for_step"
+    mov rax, rcx ; digit count (rep movsb zeroes ecx)
+    mov rdx, rdi ; source = first digit
+    lea rdi, [for_hidden_buf + 9]
+    mov rsi, rdx
+    rep movsb
+    add rax, 9 ; total length
+    lea rdi, [for_hidden_buf]
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 ; Helper: emit IR_LABEL with given label ID
 ; rdi = label ID
 emit_label:
@@ -3988,17 +5881,17 @@ save_ident:
 
 ; Report a compile error and exit
 ; rdi = message string
-compile_error:
-    push rdi
-    
-    ; Print error prefix to stderr
-    mov rax, 1
-    mov rdi, 2
-    mov rsi, .err_prefix
-    mov rdx, .err_prefix_len
-    syscall
-    
-    ; Print message
+ compile_error:
+     push rdi
+     
+     ; Print error prefix to stderr
+     mov rax, 1
+     mov rdi, 2
+     mov rsi, .err_prefix
+     mov rdx, .err_prefix_len
+     syscall
+     
+     ; Print message
     pop rsi ; original message
     push rsi
     xor rdx, rdx
@@ -4097,6 +5990,245 @@ ident_is:
     xor rax, rax
     pop rbx
     ret
+
+; ======================================================
+; parse_proto_call: parse a protocol call
+; Expects current_token = proto name IDENT (after '@' was consumed).
+; Emits IR_CALL_ARG records for each argument (register args immediately,
+; stack args right-to-left after saving caller locals), then IR_CALL.
+; Returns: rax = lo return vreg (0 = void), rdx = type,
+;          [call_result_hi] = hi return vreg (0 = none)
+; ======================================================
+parse_proto_call:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne .pc_syntax_err
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call proto_lookup
+    cmp rax, -1
+    je .pc_undef
+    mov r15, rax ; proto_id
+
+    call advance ; consume name → '('
+    mov edi, TOK_LPAREN
+    call expect ; consume '('
+
+    ; Parse arguments left-to-right (side effects evaluate in order).
+    ; Register args (0-5) emit IR_CALL_ARG immediately; stack args are
+    ; deferred and emitted right-to-left just before IR_CALL so the callee
+    ; sees param 7 at [rsp+8], param 8 at [rsp+16], etc.
+    xor r12d, r12d ; arg count
+.pc_arg_loop:
+    mov eax, [current_token]
+    cmp eax, TOK_RPAREN
+    je .pc_args_done
+    cmp r12d, 65
+    jae .pc_arg_err
+    call parse_expr ; rax = vreg, rdx = type
+    mov [call_arg_vregs + r12*2], ax
+    mov [call_arg_types + r12*4], edx
+    cmp r12d, 6
+    jae .pc_arg_defer
+    ; Register argument: emit IR_CALL_ARG now
+    push rax
+    push rdx
+    mov rdi, IR_CALL_ARG
+    xor rsi, rsi
+    xor rdx, rdx
+    mov rcx, [rsp + 8] ; src1 = arg vreg
+    xor r8, r8
+    mov r9d, r12d      ; imm = arg index
+    xor r10, r10
+    call emit_ir
+    add rsp, 16
+    jmp .pc_arg_next
+.pc_arg_defer:
+    ; Stack argument: defer (vreg kept in call_arg_vregs)
+.pc_arg_next:
+    inc r12d
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .pc_args_done
+    call advance
+    jmp .pc_arg_loop
+.pc_args_done:
+    mov edi, TOK_RPAREN
+    call expect ; consume ')'
+
+    ; Validate argument count against the protocol signature
+    mov rdi, r15
+    call proto_get_param_count
+    cmp rax, r12
+    jne .pc_arg_count
+
+    ; Save caller's in-scope local vars before the call.  Protocol bodies
+    ; reuse the same absolute var slots, so a callee can overwrite this
+    ; body's slots (recursion / mutual calls).  Saves happen before the
+    ; stack-arg pushes so the callee's [rsp+8k] param reads stay correct.
+    cmp dword [block_nesting], 0
+    je .pc_no_saves
+    xor ebx, ebx
+.pc_save_loop:
+    cmp ebx, [sym_count]
+    jae .pc_saves_done
+    mov rdi, rbx
+    push rbx
+    call sym_get_scope
+    pop rbx
+    cmp rax, SCOPE_GLOBAL
+    je .pc_save_next
+    mov rdi, rbx
+    push rbx
+    call sym_get_offset
+    pop rbx
+    push rbx
+    push rax
+    mov rdi, IR_SAVE_LOCAL_VAR
+    xor rsi, rsi
+    xor rdx, rdx
+    xor rcx, rcx
+    xor r8, r8
+    pop r9 ; imm = var absolute offset
+    xor r10, r10
+    call emit_ir
+    pop rbx
+.pc_save_next:
+    inc ebx
+    jmp .pc_save_loop
+.pc_saves_done:
+.pc_no_saves:
+
+    ; Emit stack-argument pushes right-to-left (params 7..65)
+    mov r13d, r12d
+.pc_stack_loop:
+    cmp r13d, 6
+    jbe .pc_stack_done
+    dec r13d
+    movzx eax, word [call_arg_vregs + r13*2]
+    push rax
+    push r13
+    mov rdi, IR_CALL_ARG
+    xor rsi, rsi
+    xor rdx, rdx
+    mov rcx, [rsp + 8] ; src1 = arg vreg
+    xor r8, r8
+    mov r9d, r13d      ; imm = arg index
+    xor r10, r10
+    call emit_ir
+    add rsp, 16
+    jmp .pc_stack_loop
+.pc_stack_done:
+
+    ; Allocate return vregs
+    mov rdi, r15
+    call proto_get_ret_count
+    mov r14, rax ; ret count
+    cmp r14, 2
+    ja .pc_arity
+    xor ebx, ebx ; lo vreg
+    test r14, r14
+    jz .pc_no_lo
+    call alloc_vreg
+    mov rbx, rax
+.pc_no_lo:
+    xor r13d, r13d ; hi vreg
+    cmp r14, 2
+    jne .pc_no_hi
+    call alloc_vreg
+    mov r13, rax
+.pc_no_hi:
+    ; IR_CALL(dst = lo, src2 = hi, imm = proto_id, aux = arg_count)
+    push rbx
+    push r13
+    push r14
+    mov rdi, IR_CALL
+    xor rsi, rsi
+    mov rdx, rbx
+    xor rcx, rcx
+    mov r8, r13
+    mov r9, r15
+    mov r10, r12
+    call emit_ir
+    pop r14
+    pop r13
+    pop rbx
+
+    ; Restore caller's local vars (reverse order — LIFO)
+    cmp dword [block_nesting], 0
+    je .pc_no_restores
+    mov ebx, [sym_count]
+    jz .pc_no_restores
+.pc_restore_loop:
+    dec ebx
+    mov rdi, rbx
+    push rbx
+    call sym_get_scope
+    pop rbx
+    cmp rax, SCOPE_GLOBAL
+    je .pc_restore_next
+    mov rdi, rbx
+    push rbx
+    call sym_get_offset
+    pop rbx
+    push rbx
+    push rax
+    mov rdi, IR_RESTORE_LOCAL_VAR
+    xor rsi, rsi
+    xor rdx, rdx
+    xor rcx, rcx
+    xor r8, r8
+    pop r9
+    xor r10, r10
+    call emit_ir
+    pop rbx
+.pc_restore_next:
+    test ebx, ebx
+    jnz .pc_restore_loop
+.pc_restores_done:
+.pc_no_restores:
+
+    ; Record hi return vreg for multi-target mutation
+    mov [call_result_hi], r13d
+
+    ; Return lo vreg + type
+    xor rdx, rdx
+    test rbx, rbx
+    jz .pc_type_set
+    mov rdi, r15 ; proto_id
+    xor esi, esi ; return index 0 (lo)
+    call proto_get_ret_conc_type ; eax = concrete return type
+    mov rdx, rax
+.pc_type_set:
+    mov rax, rbx ; lo return vreg (recompute after type lookup clobbered rax)
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.pc_syntax_err:
+    mov rdi, err_syntax
+    jmp compile_error
+.pc_undef:
+    mov rdi, err_unknown_proto
+    jmp compile_error
+.pc_arg_err:
+    mov rdi, err_arity
+    jmp compile_error
+.pc_arg_count:
+    mov rdi, err_proto_arg_count
+    jmp compile_error
+.pc_arity:
+    mov rdi, err_arity
+    jmp compile_error
 
 ; ======================================================
 ; parse_postfix: parse a term followed by optional .method() chains
@@ -4286,6 +6418,26 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_int_ror
+    lea rdi, [str_gcd]
+    call ident_is
+    test rax,rax
+    jnz .pp_int_gcd
+    lea rdi, [str_lcm]
+    call ident_is
+    test rax,rax
+    jnz .pp_int_lcm
+    lea rdi, [str_to_bin]
+    call ident_is
+    test rax,rax
+    jnz .pp_int_to_bin
+    lea rdi, [str_to_hex]
+    call ident_is
+    test rax,rax
+    jnz .pp_int_to_hex
+    lea rdi, [str_to_oct]
+    call ident_is
+    test rax,rax
+    jnz .pp_int_to_oct
     jmp .pp_method_err
 
 .pp_int_abs:
@@ -4620,6 +6772,93 @@ parse_postfix:
     mov r12, rbx
     jmp .pp_loop
 
+.pp_int_gcd:
+    call parse_expr
+    mov r14, rax
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_GCD
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_int_lcm:
+    call parse_expr
+    mov r14, rax
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_LCM
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_int_to_bin:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_TO_BIN_STR
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
+.pp_int_to_hex:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_TO_HEX_STR
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
+.pp_int_to_oct:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_TO_OCT_STR
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
 ; ─────────── FLOAT methods ─────────────────────────────
 .pp_float_dispatch:
     lea rdi, [str_abs]
@@ -4690,6 +6929,30 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_float_is_finite
+    lea rdi, [str_sin]
+    call ident_is
+    test rax,rax
+    jnz .pp_float_sin
+    lea rdi, [str_cos]
+    call ident_is
+    test rax,rax
+    jnz .pp_float_cos
+    lea rdi, [str_tan]
+    call ident_is
+    test rax,rax
+    jnz .pp_float_tan
+    lea rdi, [str_pow]
+    call ident_is
+    test rax,rax
+    jnz .pp_float_pow
+    lea rdi, [str_cbrt]
+    call ident_is
+    test rax,rax
+    jnz .pp_float_cbrt
+    lea rdi, [str_signum]
+    call ident_is
+    test rax,rax
+    jnz .pp_float_signum
     jmp .pp_method_err
 
 .pp_float_abs:
@@ -5018,6 +7281,104 @@ parse_postfix:
     call emit_ir
     mov r12, rbx
     mov r13, TYPE_BOOL
+    jmp .pp_loop
+
+.pp_float_sin:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_SIN
+    mov rsi, TYPE_FLOAT
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_float_cos:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_COS
+    mov rsi, TYPE_FLOAT
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_float_tan:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_TAN
+    mov rsi, TYPE_FLOAT
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_float_pow:
+    call parse_expr
+    mov r14, rax
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_POW_F
+    mov rsi, TYPE_FLOAT
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_float_cbrt:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CBRT
+    mov rsi, TYPE_FLOAT
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_float_signum:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_SIGNUM_F
+    mov rsi, TYPE_FLOAT
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
     jmp .pp_loop
 
 ; ─────────── BOOL methods ──────────────────────────────

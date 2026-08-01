@@ -59,7 +59,7 @@ int x = 5           // immutable — no write site exists
 int y = 0           // will be mutated (compiler sees :y below)
 :y = x + 10         // explicit mutation — : is required here
 ++y                 // increment — self-evidently a mutation, no : needed
-swap x y            // swap — self-evidently a mutation, no : needed
+swap(x, y)            // swap — self-evidently a mutation, no : needed
 ```
 
 ### 3.2 Scope Rules
@@ -275,24 +275,25 @@ Type conversions use cast functions (`float(n)`, `str(n)`) not methods.
 
 | Method              | Returns | Notes                                              |
 |---------------------|---------|----------------------------------------------------|
-| `.abs()`            | `int`   | Absolute value                                     |
-| `.min(other)`       | `int`   | Smaller of self and `other`                        |
-| `.max(other)`       | `int`   | Larger of self and `other`                         |
-| `.clamp(lo, hi)`    | `int`   | `lo` if below, `hi` if above, self otherwise       |
-| `.pow(n)`           | `int`   | Self raised to the power `n` (integer exponentiation) |
-| `.gcd(other)`       | `int`   | Greatest common divisor                            |
-| `.lcm(other)`       | `int`   | Least common multiple                              |
-| `.signum()`         | `int`   | −1 if negative, 0 if zero, 1 if positive           |
+| `abs()`            | `int`   | Absolute value                                     |
+| `min(other)`       | `int`   | Smaller of self and `other`                        |
+| `max(other)`       | `int`   | Larger of self and `other`                         |
+| `clamp(lo, hi)`    | `int`   | `lo` if below, `hi` if above, self otherwise       |
+| `pow(n)`           | `int`   | Self raised to the power `n` (integer exponentiation) |
+| `gcd(other)`       | `int`   | Greatest common divisor                            |
+| `lcm(other)`       | `int`   | Least common multiple                              |
+| `signum()`         | `int`   | −1 if negative, 0 if zero, 1 if positive           |
 
 #### Predicates
 
 | Method              | Returns | Notes                                              |
 |---------------------|---------|----------------------------------------------------|
-| `.is_zero()`        | `bool`  | `true` if value is 0                               |
-| `.is_positive()`    | `bool`  | `true` if value > 0                                |
-| `.is_negative()`    | `bool`  | `true` if value < 0                                |
-| `.is_even()`        | `bool`  | `true` if value % 2 == 0                           |
-| `.is_odd()`         | `bool`  | `true` if value % 2 != 0                           |
+| `zero()`        | `bool`  | `true` if value is 0                               |
+| `positive()`    | `bool`  | `true` if value > 0                                |
+| `negative()`    | `bool`  | `true` if value < 0                                |
+| `even()`        | `bool`  | `true` if value % 2 == 0                           |
+| `odd()`         | `bool`  | `true` if value % 2 != 0                           |
+
 
 #### Bit Operations
 
@@ -310,26 +311,26 @@ Type conversions use cast functions (`float(n)`, `str(n)`) not methods.
 
 | Method              | Returns | Notes                                              |
 |---------------------|---------|----------------------------------------------------|
-| `.to_bin()`         | `str`   | Binary string e.g. `"1010"` (no `0b` prefix)      |
-| `.to_hex()`         | `str`   | Lowercase hex e.g. `"ff"` (no `0x` prefix)        |
-| `.to_oct()`         | `str`   | Octal string e.g. `"377"` (no `0o` prefix)        |
+| `bin()`         | `str`   | Binary string e.g. `"1010"` (no `0b` prefix)      |
+| `hex()`         | `str`   | Lowercase hex e.g. `"ff"` (no `0x` prefix)        |
+| `oct()`         | `str`   | Octal string e.g. `"377"` (no `0o` prefix)        |
 
 ```rex
 int n = -42
-output(n.abs())              // 42
-output(n.signum())           // -1
-output(n.clamp(-100, 0))     // -42
-output(n.is_negative())      // true
+output(abs(n))              // 42
+output(signum(n))           // -1
+output(clamp(n, -100, 0))     // -42
+output(negative(n))      // true
 
 int x = 255
 output(x.popcount())         // 8
-output(x.to_hex())           // "ff"
-output(x.to_bin())           // "11111111"
+output(hex(x))           // "ff"
+output(bin(x))           // "11111111"
 output(x.leading_zeros())    // 56
 
 output(@gcd(12, 8))         // — or:
-output(12.gcd(8))            // 4
-output(3.pow(4))             // 81
+output(gcd(12, 8))            // 4
+output(pow(3, 4))             // 81
 ```
 
 ---
@@ -342,35 +343,35 @@ All methods return new values. Type conversions use cast functions.
 
 | Method        | Returns | Notes                                              |
 |---------------|---------|----------------------------------------------------|
-| `.ceil()`     | `int`   | Round up toward positive infinity                  |
-| `.floor()`    | `int`   | Round down toward negative infinity                |
-| `.round()`    | `int`   | Round to nearest integer (half rounds up)          |
-| `.trunc()`    | `float` | Truncate fractional part (toward zero), keep float |
-| `.fract()`    | `float` | Fractional part only (self − trunc)                |
+| `ceil()`     | `int`   | Round up toward positive infinity                  |
+| `floor()`    | `int`   | Round down toward negative infinity                |
+| `round()`    | `int`   | Round to nearest integer (half rounds up)          |
+| `trunc()`    | `float` | Truncate fractional part (toward zero), keep float |
+| `fract()`    | `float` | Fractional part only (self − trunc)                |
 
 #### Arithmetic
 
 | Method              | Returns | Notes                                              |
 |---------------------|---------|----------------------------------------------------|
-| `.abs()`            | `float` | Absolute value                                     |
-| `.min(other)`       | `float` | Smaller of self and `other`                        |
-| `.max(other)`       | `float` | Larger of self and `other`                         |
-| `.clamp(lo, hi)`    | `float` | Clamp to `[lo, hi]` range                          |
-| `.signum()`         | `float` | −1.0, 0.0, or 1.0                                 |
-| `.pow(n)`           | `float` | Self raised to float power `n`                     |
-| `.sqrt()`           | `float` | Square root; runtime error if negative             |
-| `.cbrt()`           | `float` | Cube root                                          |
-| `.recip()`          | `float` | Reciprocal: 1.0 / self                             |
+| `abs()`            | `float` | Absolute value                                     |
+| `min(other)`       | `float` | Smaller of self and `other`                        |
+| `max(other)`       | `float` | Larger of self and `other`                         |
+| `clamp(lo, hi)`    | `float` | Clamp to `[lo, hi]` range                          |
+| `signum()`         | `float` | −1.0, 0.0, or 1.0                                 |
+| `pow(n)`           | `float` | Self raised to float power `n`                     |
+| `sqrt()`           | `float` | Square root; runtime error if negative             |
+| `cbrt()`           | `float` | Cube root                                          |
+| `recip()`          | `float` | Reciprocal: 1.0 / self                             |
 
 #### Logarithm and Exponential
 
 | Method              | Returns | Notes                                              |
 |---------------------|---------|----------------------------------------------------|
-| `.exp()`            | `float` | eˣ (natural exponential)                           |
-| `.ln()`             | `float` | Natural logarithm (base e)                         |
-| `.log2()`           | `float` | Logarithm base 2                                   |
-| `.log10()`          | `float` | Logarithm base 10                                  |
-| `.log(base)`        | `float` | Logarithm with arbitrary float base                |
+| `exp()`            | `float` | eˣ (natural exponential)                           |
+| `ln()`             | `float` | Natural logarithm (base e)                         |
+| `log2()`           | `float` | Logarithm base 2                                   |
+| `log10()`          | `float` | Logarithm base 10                                  |
+| `log(base)`        | `float` | Logarithm with arbitrary float base                |
 
 #### Trigonometry
 
@@ -383,37 +384,37 @@ All methods return new values. Type conversions use cast functions.
 | `.acos()`     | `float` | Arc cosine                    |
 | `.atan()`     | `float` | Arc tangent                   |
 | `.atan2(y)`   | `float` | Arc tangent of self/y (quadrant-aware) |
-| `.to_deg()`   | `float` | Convert radians to degrees    |
-| `.to_rad()`   | `float` | Convert degrees to radians    |
+| `.deg()`   | `float` | Convert radians to degrees    |
+| `.rad()`   | `float` | Convert degrees to radians    |
 
 #### Predicates
 
 | Method          | Returns | Notes                                              |
 |-----------------|---------|----------------------------------------------------|
-| `.is_nan()`     | `bool`  | `true` if not-a-number                             |
-| `.is_inf()`     | `bool`  | `true` if positive or negative infinity            |
-| `.is_finite()`  | `bool`  | `true` if neither NaN nor infinity                 |
-| `.is_zero()`    | `bool`  | `true` if value is 0.0                             |
-| `.is_positive()`| `bool`  | `true` if value > 0.0                              |
-| `.is_negative()`| `bool`  | `true` if value < 0.0                              |
+| `.nan()`     | `bool`  | `true` if not-a-number                             |
+| `.inf()`     | `bool`  | `true` if positive or negative infinity            |
+| `.finite()`  | `bool`  | `true` if neither NaN nor infinity                 |
+| `.zero()`    | `bool`  | `true` if value is 0.0                             |
+| `.positive()`| `bool`  | `true` if value > 0.0                              |
+| `.negative()`| `bool`  | `true` if value < 0.0                              |
 
 ```rex
 float f = 3.7
-output(f.ceil())         // 4
-output(f.floor())        // 3
-output(f.round())        // 4
-output(f.fract())        // 0.7
-output(f.abs())          // 3.7
+output(ceil(f))         // 4
+output(floor(f))        // 3
+output(round(f))        // 4
+output(fract(f))        // 0.7
+output(abs(f))          // 3.7
 
 float pi = 3.14159
 output(pi.sin())         // ~0.0
 output(pi.cos())         // ~-1.0
-output(pi.to_deg())      // ~180.0
+output(pi.deg())      // ~180.0
 
 float x = 2.0
-output(x.sqrt())         // 1.4142...
-output(x.pow(10.0))      // 1024.0
-output(x.log2())         // 1.0
+output(sqrt(x))         // 1.4142...
+output(pow(x, 10.0))      // 1024.0
+output(log2(x))         // 1.0
 ```
 
 ---
@@ -426,9 +427,9 @@ output(x.log2())         // 1.0
 | `.is_false()`    | `bool`  | `true` only if self is `false` (value −1)          |
 | `.is_neutral()`  | `bool`  | `true` only if self is `neutral` (value 0)         |
 | `.is_decided()`  | `bool`  | `true` if self is `true` or `false` (not neutral)  |
-| `.flip()`        | `bool`  | Negate: `true`↔`false`, `neutral` stays `neutral`  |
-| `.to_int()`      | `int`   | `true`→1, `neutral`→0, `false`→−1                 |
-| `.to_str()`      | `str`   | `"true"`, `"neutral"`, or `"false"`               |
+| `flip()`        | `bool`  | Negate: `true`↔`false`, `neutral` stays `neutral`  |
+| `int()`      | `int`   | `true`→1, `neutral`→0, `false`→−1                 |
+| `str()`      | `str`   | `"true"`, `"neutral"`, or `"false"`               |
 | `.and(other)`    | `bool`  | Same as `self and other` (min)                     |
 | `.or(other)`     | `bool`  | Same as `self or other` (max)                      |
 
@@ -442,13 +443,13 @@ output(b.is_neutral())   // true
 output(c.is_decided())   // true  (false is decided)
 output(b.is_decided())   // false (neutral is not decided)
 
-output(a.flip())         // false
-output(b.flip())         // neutral
-output(c.flip())         // true
+output(flip(a))         // false
+output(flip(b))         // neutral
+output(flip(c))         // true
 
-output(a.to_int())       // 1
-output(b.to_int())       // 0
-output(c.to_int())       // -1
+output(int(a))       // 1
+output(int(b))       // 0
+output(int(c))       // -1
 
 output(a.and(b))         // neutral
 output(a.or(c))          // true
@@ -464,47 +465,47 @@ A `char` is a single UTF-8 byte. Its methods inspect and transform the character
 
 | Method              | Returns | Notes                                              |
 |---------------------|---------|----------------------------------------------------|
-| `.is_alpha()`       | `bool`  | Letter (a–z, A–Z)                                  |
-| `.is_digit()`       | `bool`  | Decimal digit (0–9)                                |
-| `.is_alnum()`       | `bool`  | Letter or digit                                    |
-| `.is_whitespace()`  | `bool`  | Space, tab, newline, carriage return               |
-| `.is_upper()`       | `bool`  | Uppercase letter (A–Z)                             |
-| `.is_lower()`       | `bool`  | Lowercase letter (a–z)                             |
-| `.is_punct()`       | `bool`  | Printable non-alphanumeric (!, @, #, …)            |
-| `.is_printable()`   | `bool`  | Printable ASCII (code point 0x20–0x7E)             |
-| `.is_ascii()`       | `bool`  | Value ≤ 127                                        |
+| `.alpha()`       | `bool`  | Letter (a–z, A–Z)                                  |
+| `.digit()`       | `bool`  | Decimal digit (0–9)                                |
+| `.alnum()`       | `bool`  | Letter or digit                                    |
+| `.whitespace()`  | `bool`  | Space, tab, newline, carriage return               |
+| `.upper()`       | `bool`  | Uppercase letter (A–Z)                             |
+| `.lower()`       | `bool`  | Lowercase letter (a–z)                             |
+| `.punct()`       | `bool`  | Printable non-alphanumeric (!, @, #, …)            |
+| `.printable()`   | `bool`  | Printable ASCII (code point 0x20–0x7E)             |
+| `.ascii()`       | `bool`  | Value ≤ 127                                        |
 
 #### Transformation
 
 | Method        | Returns | Notes                                              |
 |---------------|---------|----------------------------------------------------|
-| `.to_upper()` | `char`  | Uppercase (A–Z only; others unchanged)             |
-| `.to_lower()` | `char`  | Lowercase (a–z only; others unchanged)             |
+| `.upper()` | `char`  | Uppercase (A–Z only; others unchanged)             |
+| `.lower()` | `char`  | Lowercase (a–z only; others unchanged)             |
 
 #### Conversion
 
 | Method        | Returns | Notes                                              |
 |---------------|---------|----------------------------------------------------|
-| `.to_int()`   | `int`   | UTF-8 code point (same as `int(c)`)                |
-| `.to_byte()`  | `byte`  | Raw byte value (same as `byte(c)`)                 |
-| `.to_str()`   | `str`   | Single-character string                            |
-| `.to_digit()` | `int`   | Numeric value of `'0'`–`'9'`; −1 if not a digit   |
+| `int()`   | `int`   | UTF-8 code point (same as `int(c)`)                |
+| `byte()`  | `byte`  | Raw byte value (same as `byte(c)`)                 |
+| `str()`   | `str`   | Single-character string                            |
+| `digit()` | `int`   | Numeric value of `'0'`–`'9'`; −1 if not a digit   |
 
 ```rex
 char c = 'R'
-output(c.is_alpha())        // true
-output(c.is_upper())        // true
-output(c.to_lower())        // 'r'
-output(c.to_int())          // 82
-output(c.to_str())          // "R"
+output(alpha(c))        // true
+output(upper(c))        // true
+output(lower(c))        // 'r'
+output(int(c))          // 82
+output(str(c))          // "R"
 
 char d = '7'
-output(d.is_digit())        // true
-output(d.to_digit())        // 7
+output(d.digit())        // true
+output(int(d))        // 7
 
 char sp = ' '
-output(sp.is_whitespace())  // true
-output(sp.is_printable())   // true
+output(sp.whitespace())  // true
+output(sp.printable())   // true
 ```
 
 ---
@@ -535,30 +536,30 @@ word fragment.
 
 | Method        | Returns | Notes                                              |
 |---------------|---------|----------------------------------------------------|
-| `.to_int()`   | `int`   | Zero-extend to 64-bit integer                      |
-| `.to_char()`  | `char`  | Interpret as UTF-8 byte (same as `char(b)`)        |
-| `.to_hex()`   | `str`   | Two-character lowercase hex e.g. `"0f"`, `"ff"`   |
-| `.to_bin()`   | `str`   | Eight-character binary string e.g. `"00001111"`   |
+| `int()`   | `int`   | Zero-extend to 64-bit integer                      |
+| `char()`  | `char`  | Interpret as UTF-8 byte (same as `char(b)`)        |
+| `hex()`   | `str`   | Two-character lowercase hex e.g. `"0f"`, `"ff"`   |
+| `bin()`   | `str`   | Eight-character binary string e.g. `"00001111"`   |
 
 #### Predicates
 
 | Method          | Returns | Notes                                              |
 |-----------------|---------|----------------------------------------------------|
-| `.is_zero()`    | `bool`  | `true` if value is 0                               |
-| `.is_ascii()`   | `bool`  | `true` if value ≤ 127                              |
+| `.zero()`    | `bool`  | `true` if value is 0                               |
+| `.ascii()`   | `bool`  | `true` if value ≤ 127                              |
 
 ```rex
 byte b = 0b10110100
 output(b.popcount())         // 4
 output(b.leading_zeros())    // 0
-output(b.to_hex())           // "b4"
-output(b.to_bin())           // "10110100"
+output(hex(b))           // "b4"
+output(bin(b))           // "10110100"
 output(b.bit(2))             // true  (bit 2 of 0b10110100 is 1)
 output(b.swap_nibbles())     // 0b01001011 = 0x4B
 
 byte x = 0xFF
 output(x.rotate_left(3))     // 0xFF (all bits set, rotation unchanged)
-output(x.to_char())          // char with code 255
+output(char(x))          // char with code 255
 ```
 
 ---
@@ -645,9 +646,9 @@ output(int(s))          // 0
 
 ```rex
 switch d:
-    is Direction.north, Direction.south:
+    -> Direction.north, Direction.south:
         output("vertical")
-    is Direction.east, Direction.west:
+    -> Direction.east, Direction.west:
         output("horizontal")
 ```
 
@@ -951,9 +952,9 @@ if "ell" in s:          // O(n+m) substring search
 ### 5.7 Increment, Decrement, Swap, Abs
 
 ```rex
-++x                 // x = x + 1
---x                 // x = x - 1
-swap x y            // exchange values (xchg)
+++x                 // x += 1
+--x                 // x -= 1
+swap(x, y)            // exchange values (xchg)
 int v = abs(x)      // absolute value
 ```
 
@@ -967,31 +968,31 @@ a + b -> @process()         // @process(a + b)
 ### 5.9 Hardware Features
 
 ```rex
-bool c = carry              // CPU carry flag — valid after + - * ++ -- and shifts
-bool ov = overflow          // CPU overflow flag — valid after + - * ++ --
-int n = rand                // hardware entropy integer via rdrand
-int h = hash s              // SipHash-2-4 of memory region s
+bool c = carry()              // CPU carry flag — valid after + - * ++ -- and shifts
+bool ov = overflow()          // CPU overflow flag — valid after + - * ++ --
+int n = rand()                // hardware entropy integer via rdrand
+int h = hash(s)              // SipHash-2-4 of memory region s
 ```
 
-**`carry`** is set by the CPU after: `+`, `-`, `*`, `++`, `--`, `<<`, `>>`.
+**`carry()`** is set by the CPU after: `+`, `-`, `*`, `++`, `--`, `<<`, `>>`.
 Undefined after: logical ops, bitwise-only ops, comparisons.
 
-**`overflow`** is set after: `+`, `-`, `*`, `++`, `--`.
+**`overflow()`** is set after: `+`, `-`, `*`, `++`, `--`.
 Undefined after all other operations.
 
-**`flip`** — boolean toggle. `flip b` is equivalent to `b = not b`:
+**`flip()`** — boolean toggle. `flip(b)` is equivalent to `b = not b`:
 
 ```rex
 bool b = true
-flip b              // b → false
-flip b              // b → true
+flip(b)              // b → false
+flip(b)              // b → true
 ```
 
-`flip` raises `"TypeError: flip requires bool"` if the operand is not `bool`:
+`flip()` raises `"TypeError: flip requires bool"` if the operand is not `bool`:
 
 ```rex
 int x = 5
-flip x              // raise "TypeError: flip requires bool, got int"
+flip(x)              // raise "TypeError: flip requires bool, got int"
 ```
 
 ### 5.10 Syscall Intercept
@@ -1094,7 +1095,7 @@ expressions. Blocks are indentation-delimited.
 
 ### 7.2 `switch` / `is`
 
-Value dispatch — replaces the old `when`/`is`. Each `is` case matches the
+Value dispatch — replaces the old `when`/`is`. Each `->` case matches the
 `switch` subject linearly; dense integer ranges compile to O(1) jump tables.
 Ranges are **exclusive** on the right (`1..5` matches 1, 2, 3, 4).
 
@@ -1102,13 +1103,13 @@ Ranges are **exclusive** on the right (`1..5` matches 1, 2, 3, 4).
 int code = 2
 
 switch code:
-    is 1:
+    -> 1:
         output("one")
-    is 2..5:
+    -> 2..5:
         output("two through four")
-    is 5:
+    -> 5:
         output("five")
-    else:
+    _:
         output("other")
 ```
 
@@ -1120,17 +1121,17 @@ No implicit fallthrough between cases — each case exits at its `<DEDENT>`.
 str status = "ok"
 
 switch status:
-    is "ok":
+    -> "ok":
         output("good")
-    is "warn":
+    -> "warn":
         output("warning")
-    else:
+    _:
         output("unknown: {status}")
 
 switch direction:
-    is Direction.north, Direction.south:
+    -> Direction.north, Direction.south:
         output("vertical")
-    is Direction.east, Direction.west:
+    -> Direction.east, Direction.west:
         output("horizontal")
 ```
 
@@ -1212,12 +1213,22 @@ for i in 0..10:
 for i in 0..20 step 2:
     output(i)
 
+for i in 0..=10:
+    output(i)        // inclusive upper bound: 0..10 inclusive
+
 for i in -5..5:
     output(i)
 ```
 
-Both bounds accept full expressions. `step` is optional (default 1). The loop
+Both bounds accept full expressions. `step` is optional (default 1); it may be
+a constant or a runtime expression (`step s`). Use `..=` for an inclusive
+upper bound (`0..=n` iterates through `n`; `0..n` stops before `n`). The loop
 variable `i` is implicitly mutable — the loop syntax implies it; no `:` needed.
+
+The loop variable persists after the loop (`output(i)` after the loop yields
+the first value that failed the bound). Reusing a loop variable name in a
+second loop, or one that was declared earlier as a plain `int`, reuses the
+existing variable rather than erroring.
 
 ### 8.2 `while`
 
@@ -1663,7 +1674,7 @@ except void operations that are explicitly mutating by design (marked **mut**).
 |----------------------|---------|-------------------------------------------------------|
 | `len(s)`             | `int`   | Number of elements currently stored                   |
 | `cap(s)`             | `int`   | Allocated capacity (elements before realloc)          |
-| `.is_empty()`        | `bool`  | `true` if `len(s)` == 0                               |
+| `.empty()`        | `bool`  | `true` if `len(s)` == 0                               |
 | `.clear()` **mut** | `void` | Set length to 0; capacity unchanged                      |
 | `.reserve(n)` **mut** | `void` | Ensure capacity for at least `n` elements          |
 | `.shrink()` **mut** | `void` | Reduce capacity to exactly `len()`                    |
@@ -1690,11 +1701,11 @@ except void operations that are explicitly mutating by design (marked **mut**).
 | `.last()`            | `T`     | Last element; runtime error if empty                       |
 | `.get(i)`            | `T`     | Same as `s[i]` — explicit form                             |
 | `.contains(x)`       | `bool`  | `true` if any element equals `x`                           |
-| `.index_of(x)`       | `int`   | Index of first match; −1 if not found                      |
-| `.last_index_of(x)`  | `int`   | Index of last match; −1 if not found                       |
-| `.count_of(x)`       | `int`   | Number of elements equal to `x`                            |
+| `.index(x)`       | `int`   | Index of first match; −1 if not found                      |
+| `.last_index(x)`  | `int`   | Index of last match; −1 if not found                       |
+| `.count(x)`       | `int`   | Number of elements equal to `x`                            |
 | `.find(pred)`        | `T`     | First element where predicate is `true`; error if none     |
-| `.find_index(pred)`  | `int`   | Index of first matching element; −1 if none                |
+| `.findex(pred)`  | `int`   | Index of first matching element; −1 if none                |
 
 ### 10.4 Slicing and Copying
 
@@ -1727,10 +1738,10 @@ Only valid for `seq[int]` and `seq[float]`.
 
 | Method       | Returns | Notes                                                         |
 |--------------|---------|---------------------------------------------------------------|
-| `.sum()`     | `T`     | Sum of all elements                                           |
-| `.product()` | `T`     | Product of all elements                                       |
-| `.mean()`    | `float` | Arithmetic mean (always float)                               |
-| `.median()`  | `float` | Median value (always float; sorts a copy internally)          |
+| `sum()`     | `T`     | Sum of all elements                                           |
+| `product()` | `T`     | Product of all elements                                       |
+| `mean()`    | `float` | Arithmetic mean (always float)                               |
+| `median()`  | `float` | Median value (always float; sorts a copy internally)          |
 
 ### 10.7 Set Operations
 
@@ -1770,9 +1781,9 @@ Both sequences must have the same element type `T`.
 
 | Method           | Returns    | Notes                                                  |
 |------------------|------------|--------------------------------------------------------|
-| `.to_str()`      | `str`      | `"[1, 2, 3]"` style representation                    |
+| `str()`      | `str`      | `"[1, 2, 3]"` style representation                    |
 | `.join(sep)`     | `str`      | Join with separator string; `T` must be `str` or `char` |
-| `.to_arr()`      | `arr[T, N]`| Only valid if size is compile-time known               |
+| `arr()`      | `arr[T, N]`| Only valid if size is compile-time known               |
 
 ```rex
 seq[int] nums = [5, 3, 8, 1, 9, 2]
@@ -1784,7 +1795,7 @@ int last = nums.pop()          // 10
 
 // Search
 output(nums.contains(8))       // true
-output(nums.index_of(99))      // 2
+output(nums.index(99))      // 2
 output(nums.find(fn(int x) -> bool: x > 7))  // 99
 
 // Sorting and slicing
@@ -1796,8 +1807,8 @@ seq[int] head = nums.take(3)   // [1, 2, 3]
 seq[int] doubled = nums.map(fn(int x) -> int: x * 2)
 seq[int] small = nums.filter(fn(int x) -> bool: x < 10)
 int total = nums.reduce(0, fn(int acc, int x) -> int: acc + x)
-output(nums.sum())             // 127
-output(nums.mean())            // 18.14...
+output(sum(nums))             // 127
+output(mean(nums))            // 18.14...
 
 // Sets
 seq[int] a = [1, 2, 3, 4]
@@ -1840,19 +1851,19 @@ arr[byte, 16] key = [0] * 16           // zero-fill
 | `.first()`       | `T`     | First element                                              |
 | `.last()`        | `T`     | Last element                                               |
 | `len(a)`         | `int`   | Always returns `N` (compile-time constant)                 |
-| `.is_empty()`    | `bool`  | Always `false` for `N > 0`                                 |
+| `.empty()`    | `bool`  | Always `false` for `N > 0`                                 |
 
 ### 11.2 Search
 
 | Method               | Returns | Notes                                                      |
 |----------------------|---------|------------------------------------------------------------|
 | `.contains(x)`       | `bool`  | Linear scan; `true` if any element equals `x`              |
-| `.index_of(x)`       | `int`   | Index of first match; −1 if not found                      |
-| `.count_of(x)`       | `int`   | Number of elements equal to `x`                            |
+| `.index(x)`       | `int`   | Index of first match; −1 if not found                      |
+| `.count(x)`       | `int`   | Number of elements equal to `x`                            |
 | `.find(pred)`        | `T`     | First element where predicate is `true`; error if none     |
-| `.find_index(pred)`  | `int`   | Index of first matching element; −1 if none                |
-| `.min()`             | `T`     | Smallest element                                           |
-| `.max()`             | `T`     | Largest element                                            |
+| `.findex(pred)`  | `int`   | Index of first matching element; −1 if none                |
+| `min()`             | `T`     | Smallest element                                           |
+| `max()`             | `T`     | Largest element                                            |
 
 ### 11.3 Slicing
 
@@ -1868,11 +1879,11 @@ arr[byte, 16] key = [0] * 16           // zero-fill
 
 | Method                   | Returns | Notes                                                   |
 |--------------------------|---------|---------------------------------------------------------|
-| `.sort()` **mut**        | `void`  | Sort in place ascending                                 |
-| `.sort_desc()` **mut**   | `void`  | Sort in place descending                                |
-| `.sort_by(cmp)` **mut**  | `void`  | Sort in place with custom comparator                    |
-| `.reverse()` **mut**     | `void`  | Reverse elements in place                               |
-| `.is_sorted()`           | `bool`  | `true` if elements are in non-decreasing order          |
+| `sort()` **mut**        | `void`  | Sort in place ascending                                 |
+| `sort_desc()` **mut**   | `void`  | Sort in place descending                                |
+| `sort_by(cmp)` **mut**  | `void`  | Sort in place with custom comparator                    |
+| `reverse()` **mut**     | `void`  | Reverse elements in place                               |
+| `sorted()`           | `bool`  | `true` if elements are in non-decreasing order          |
 
 ### 11.5 Math Aggregates
 
@@ -1880,9 +1891,9 @@ Only valid for `arr[int, N]` and `arr[float, N]`.
 
 | Method       | Returns | Notes                    |
 |--------------|---------|--------------------------|
-| `.sum()`     | `T`     | Sum of all elements       |
-| `.product()` | `T`     | Product of all elements   |
-| `.mean()`    | `float` | Arithmetic mean           |
+| `sum()`     | `T`     | Sum of all elements       |
+| `product()` | `T`     | Product of all elements   |
+| `mean()`    | `float` | Arithmetic mean           |
 
 ### 11.6 Functional
 
@@ -1900,7 +1911,7 @@ Only valid for `arr[int, N]` and `arr[float, N]`.
 
 | Method         | Returns    | Notes                                                   |
 |----------------|------------|---------------------------------------------------------|
-| `.to_seq()`    | `seq[T]`   | Copy elements into a new heap-allocated sequence        |
+| `seq()`    | `seq[T]`   | Copy elements into a new heap-allocated sequence        |
 | `.copy()`      | `arr[T, N]`| Stack copy of the entire array                          |
 
 ```rex
@@ -1910,10 +1921,10 @@ output(len(a))           // 5
 output(a.first())        // 4
 output(a.last())         // 9
 output(a.contains(7))    // true
-output(a.index_of(7))    // 2
-output(a.min())          // 1
-output(a.max())          // 9
-output(a.sum())          // 23
+output(a.index(7))    // 2
+output(min(a))          // 1
+output(max(a))          // 9
+output(sum(a))          // 23
 
 :a.sort()
 output(a[0])             // 1
@@ -2056,7 +2067,7 @@ Reassignment uses the `:` sigil: `:s = s.upper()`.
 | Method            | Returns | Notes                                                   |
 |-------------------|---------|---------------------------------------------------------|
 | `len(s)`          | `int`   | Byte count (UTF-8; may differ from character count)     |
-| `.is_empty()`     | `bool`  | `true` if `len(s)` == 0                                 |
+| `.empty()`     | `bool`  | `true` if `len(s)` == 0                                 |
 | `.char_count()`   | `int`   | Number of UTF-8 code points (≤ `len()`)                 |
 
 ### 13.3 Case and Whitespace
@@ -2066,8 +2077,8 @@ Reassignment uses the `:` sigil: `:s = s.upper()`.
 | `.upper()`        | `str`   | New uppercase copy (ASCII only)                         |
 | `.lower()`        | `str`   | New lowercase copy (ASCII only)                         |
 | `.trim()`         | `str`   | Strip leading and trailing whitespace                   |
-| `.trim_left()`    | `str`   | Strip leading whitespace only                           |
-| `.trim_right()`   | `str`   | Strip trailing whitespace only                          |
+| `.triml()`    | `str`   | Strip leading whitespace only                           |
+| `.trimr()`   | `str`   | Strip trailing whitespace only                          |
 | `.trim_char(c)`   | `str`   | Strip specific char from both ends                      |
 
 ### 13.4 Search and Testing
@@ -2077,7 +2088,7 @@ Reassignment uses the `:` sigil: `:s = s.upper()`.
 | `.contains(sub)`         | `bool`  | `true` if `sub` appears anywhere                      |
 | `.starts_with(prefix)`   | `bool`  | `true` if string begins with `prefix`                 |
 | `.ends_with(suffix)`     | `bool`  | `true` if string ends with `suffix`                   |
-| `.index_of(sub)`         | `int`   | First index of `sub`; −1 if not found                 |
+| `.index(sub)`         | `int`   | First index of `sub`; −1 if not found                 |
 | `.last_index_of(sub)`    | `int`   | Last index of `sub`; −1 if not found                  |
 | `.count(sub)`            | `int`   | Non-overlapping occurrences of `sub`                  |
 | `.find(pred)`            | `char`  | First character where predicate is `true`; error if none |
@@ -2877,6 +2888,20 @@ source.rex
 | Whole-program type checking   | Only sees declarations so far  | Full symbol table available in pass 3    |
 | Dead code at program scope    | Cannot detect cross-function   | Pass 4b sees full IR of all protocols    |
 | Constant propagation          | Bounded to one scope           | Pass 4a can fold across protocol calls   |
+
+**Loop-specific optimisations (run after 4a–4e, before emission):**
+
+- **Closed-form accumulation fold** (`pass_sum_fold`): for a canonical
+  `for i in 0..N` loop whose body only does `acc_k += i` (or `-= i`) for one
+  or more accumulators, the whole loop is replaced by `acc_k += C` where
+  `C = S·(K−1)·K/2` and `K` is the iteration count (`N/S` for `0..N`,
+  `N/S + 1` for `0..=N`); `i` is set to `S·K` to preserve the post-loop value.
+  Folds when `N` is a compile-time constant, `0 < S < 2^63` (constant or a
+  constant `step`), the start is `0`, and `K ≤ 2^32`; otherwise the loop is
+  left intact. `K == 0` becomes a no-op, `K == 1` sets only `i = S`.
+- **Register promotion** (`pass_loop_promote`): keeps a canonical loop's
+  bounds, induction variable, and loop-invariant constants in registers
+  instead of reloading from memory every iteration.
 
 ### 17.1 IR Record Layout (32 bytes)
 

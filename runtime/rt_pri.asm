@@ -12,7 +12,8 @@ BITS 64
 
     ; Check for INT64_MIN (negation would overflow)
     mov rcx, rax
-    cmp rcx, -0x8000000000000000
+    mov r11, 0x8000000000000000
+    cmp rcx, r11
     jne .not_min
     ; INT64_MIN: print directly from constant
     lea rsi, [rel .str_min]

@@ -1,4 +1,9 @@
 *.o
+*.bin
 hello
 output
+a.out
 rexc
+.mimicode/
+.replit
+cleanups/
