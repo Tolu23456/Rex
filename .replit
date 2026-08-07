@@ -24,7 +24,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "make clean && make all && echo 'Rex compiler built successfully! Run: ./rexc <source.rex> [-o output]'"
+args = "make clean && make all && echo 'Rex compiler built successfully! Run: ./rexc <source.rx> [-o output]'"
 
 [workflows.workflow.metadata]
 outputType = "console"

@@ -1,4 +1,4 @@
-// test_methods.rex
+// test_methods.rx
 // Tests method dispatch (§3–§4.9): int/float/bool/char methods
 //
 // Expected output:

@@ -1,4 +1,4 @@
-// test_seq_remove_val.rex
+// test_seq_remove_val.rx
 // Tests seq.remove(i) shifts elements correctly
 seq[int] s = [10, 20, 30, 40, 50]
 

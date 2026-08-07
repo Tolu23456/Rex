@@ -1,4 +1,4 @@
-// test_float_fold.rex
+// test_float_fold.rx
 // Tests float constant folding (Bug 7 fix).
 // All arithmetic involves constant float operands so the optimizer
 // folds them at compile time into LOAD_FIMM records.

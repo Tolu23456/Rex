@@ -1,4 +1,4 @@
-// test_peephole_opts.rex
+// test_peephole_opts.rx
 // Tests peephole optimizer: identity operations should be eliminated.
 // All outputs should equal the original value of x (= 7).
 //

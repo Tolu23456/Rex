@@ -1,4 +1,4 @@
-// test_char_methods.rex
+// test_char_methods.rx
 // char methods: predicates, transforms, conversions (§4.8)
 //
 // Expected output:

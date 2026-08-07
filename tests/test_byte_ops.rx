@@ -1,4 +1,4 @@
-// test_byte_ops.rex
+// test_byte_ops.rx
 // byte methods: bit ops, rotates, string representations, conversions (§4.9)
 //
 // Expected output:

@@ -4,7 +4,7 @@
 %include "include/rex_defs.inc"
 
 section .data
-    usage_msg       db "Usage: rexc <source.rex> [-o <output>]", 10
+    usage_msg       db "Usage: rexc <source.rx> [-o <output>]", 10
     usage_len       equ $ - usage_msg
     
     err_open_in     db "Error: Cannot open source file", 10
@@ -159,7 +159,7 @@ _start:
 
     ; 1.5 Prescan source for protocol (prot) definitions and validate
     ;     call sites / return statements. Reinitializes the lexer.
-    ;     Record the main source's directory so `use X` finds <dir>/X.rex.
+    ;     Record the main source's directory so `use X` finds <dir>/X.rx.
     mov rdi, r12 ; source file path
     call module_set_main_dir
     call prescan_protocols

@@ -107,15 +107,15 @@ Max product: 2 * IR_MAX_RECORDS * GRAPHCOL_VMAX = 2048 * 512 = 1 048 576 — fit
 ---
 
 ## Testing infrastructure
-**Files:** `tests/test_*.rex`, `tests/test_*.expected`, `run_tests.sh`
+**Files:** `tests/test_*.rx`, `tests/test_*.expected`, `run_tests.sh`
 **Tests (all green, 9/9):**
-- `test_arithmetic.rex` — all 5 arithmetic ops, precedence
-- `test_bool.rex` — Łukasiewicz three-valued logic
-- `test_constant_folding.rex` — compile-time integer folding
-- `test_float_fold.rex` — compile-time float folding (Bug 7)
-- `test_hex_bin_oct.rex` — 0x/0b/0o integer literal formats
-- `test_peephole_opts.rex` — identity ops (+0, *1, *0, *2)
-- `test_question_ops.rex` — ? token lexing (Bug 1)
-- `test_register_pressure.rex` — 8 variables forcing spills
-- `test_strings.rex` — string literal output
+- `test_arithmetic.rx` — all 5 arithmetic ops, precedence
+- `test_bool.rx` — Łukasiewicz three-valued logic
+- `test_constant_folding.rx` — compile-time integer folding
+- `test_float_fold.rx` — compile-time float folding (Bug 7)
+- `test_hex_bin_oct.rx` — 0x/0b/0o integer literal formats
+- `test_peephole_opts.rx` — identity ops (+0, *1, *0, *2)
+- `test_question_ops.rx` — ? token lexing (Bug 1)
+- `test_register_pressure.rx` — 8 variables forcing spills
+- `test_strings.rx` — string literal output
 **Runner:** `run_tests.sh --verbose` diffs actual vs `tests/*.expected`. 9/9 pass.

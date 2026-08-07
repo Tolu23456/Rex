@@ -426,7 +426,7 @@ module_import_find:
     ret
 
 ; ------------------------------------------------------------------
-; module_load_file — read <main_dir>/<name>.rex into the module's buffer.
+; module_load_file — read <main_dir>/<name>.rx into the module's buffer.
 ; rdi = module_id. Never returns on failure (compile_error).
 ; The module name is already stored in the table.
 ; Register budget: r12 = module_id (held for the whole function);
@@ -441,7 +441,7 @@ module_load_file:
 
     mov r12, rdi ; module_id (kept intact)
 
-    ; Build path: [main_dir]<name>.rex
+    ; Build path: [main_dir]<name>.rx
     lea rbx, [mod_path_buf] ; cursor
     mov rsi, [module_main_dir_ptr]
     mov rcx, [module_main_dir_len]
@@ -468,9 +468,8 @@ module_load_file:
 .mlf_name_done:
     mov byte [rbx], '.'
     mov byte [rbx + 1], 'r'
-    mov byte [rbx + 2], 'e'
-    mov byte [rbx + 3], 'x'
-    mov byte [rbx + 4], 0
+    mov byte [rbx + 2], 'x'
+    mov byte [rbx + 3], 0
 
     ; sys_open(path, O_RDONLY)
     mov rax, 2

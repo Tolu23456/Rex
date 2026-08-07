@@ -1,4 +1,4 @@
-// test_constant_folding.rex
+// test_constant_folding.rx
 // All arithmetic here involves only literals so constant folding should
 // collapse everything into LOAD_IMM records.
 //

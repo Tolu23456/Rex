@@ -1,4 +1,4 @@
-// test_seq_count_index.rex
+// test_seq_count_index.rx
 // seq `.count`/`.index` (design §10.3) plus the older `_of` aliases.
 
 seq[int] nums = [5, 3, 5, 7, 5]

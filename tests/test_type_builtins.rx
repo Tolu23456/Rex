@@ -1,4 +1,4 @@
-// test_type_builtins.rex
+// test_type_builtins.rx
 // Standalone type builtins: char classification, numeric predicates,
 // and string conversions (§4.2, §4.8, §6)
 //

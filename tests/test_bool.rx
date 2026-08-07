@@ -1,4 +1,4 @@
-// test_bool.rex
+// test_bool.rx
 // Tests Łukasiewicz three-valued boolean logic.
 // true=1  neutral=0  false=-1
 //

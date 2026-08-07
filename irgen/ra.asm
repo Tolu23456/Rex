@@ -514,7 +514,7 @@ allocate_registers:
     ; the carried value on a later iteration.  Loop promotion hoists
     ; exactly these loads (loop-invariant LOAD_IMM / LOAD_VAR) out of the
     ; loop, leaving their uses inside, which makes the bug observable
-    ; (e.g. skip2.rex: the hoisted b=0 constant was clobbered by the b+1
+    ; (e.g. skip2.rx: the hoisted b=0 constant was clobbered by the b+1
     ; add, so the inner loop restarted at b=3 instead of b=0).
     ;
     ; Fix: for every back-edge (JMP/JCC at index m targeting a LABEL at

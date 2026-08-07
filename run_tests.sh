@@ -2,7 +2,7 @@
 # run_tests.sh — Rex compiler regression test suite
 # Usage: ./run_tests.sh [--verbose]
 #
-# For each tests/*.rex that has a matching tests/*.expected file,
+# For each tests/*.rx that has a matching tests/*.expected file,
 # compiles the source, runs the binary, and diffs actual vs expected.
 
 set -euo pipefail
@@ -23,14 +23,14 @@ fi
 
 run_one() {
     local src="$1"
-    local expected_file="${src%.rex}.expected"
+    local expected_file="${src%.rx}.expected"
     local name
-    name=$(basename "$src" .rex)
+    name=$(basename "$src" .rx)
 
     if [[ ! -f "$expected_file" ]]; then
-        if [[ -f "${src%.rex}.err" ]]; then
+        if [[ -f "${src%.rx}.err" ]]; then
             # Negative test: compile must fail with the expected message.
-            local err_file="${src%.rex}.err"
+            local err_file="${src%.rx}.err"
             local compile_out compile_rc=0
             compile_out=$("$REXC" "$src" -o "$TMP_BIN" 2>&1) || compile_rc=$?
             if [[ $compile_rc -eq 0 ]]; then
@@ -97,7 +97,7 @@ run_one() {
 echo "=== Rex Compiler Test Suite ==="
 echo ""
 
-for f in tests/*.rex; do
+for f in tests/*.rx; do
     run_one "$f"
 done
 

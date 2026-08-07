@@ -1,4 +1,4 @@
-// test_question_ops.rex
+// test_question_ops.rx
 // Exercises code paths that follow a '?' token (Bug 1 fix: lexer no longer
 // consumes the character after '?' with a spurious read_char).
 //

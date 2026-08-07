@@ -1,13 +1,13 @@
 # AGENTS.md
 
 ## What this is
-Rex is an x86-64 compiler for the Rex language, written **entirely in NASM assembly** (no C, no libc, no other languages). `rexc` compiles `.rex` sources to standalone ELF64 binaries with the runtime inlined. `imp/design.md` is the source of truth for language syntax; `imp/grammar.md` and `imp/rex_ir.md` describe grammar and IR (some can be stale — when code and `design.md` disagree, `design.md` is the conformance target).
+Rex is an x86-64 compiler for the Rex language, written **entirely in NASM assembly** (no C, no libc, no other languages). `rexc` compiles `.rx` sources to standalone ELF64 binaries with the runtime inlined. `imp/design.md` is the source of truth for language syntax; `imp/grammar.md` and `imp/rex_ir.md` describe grammar and IR (some can be stale — when code and `design.md` disagree, `design.md` is the conformance target).
 
 ## Build & test
 - Requires `nasm` and `ld`.
 - `make` builds `./rexc`. `make test` runs `./run_tests.sh`. `make clean` removes all `.o`, `*.bin`, and `rexc`.
-- Single test: `./rexc tests/foo.rex -o /tmp/t && /tmp/t`, diff against `tests/foo.expected`. Tests without a `.expected` are skipped (suite is ~48). `run_tests.sh --verbose` shows diffs.
-- CLI: `rexc <source.rex> [-o <output>]` (default output `a.out`, no `.bin` suffix).
+- Single test: `./rexc tests/foo.rx -o /tmp/t && /tmp/t`, diff against `tests/foo.expected`. Tests without a `.expected` are skipped (suite is ~58). `run_tests.sh --verbose` shows diffs.
+- CLI: `rexc <source.rx> [-o <output>]` (default output `a.out`, no `.bin` suffix).
 
 ## Architecture (dependency order)
 `lexer/` → `parser/` (symtab, type_reg, proto, parser) → `irgen/` (`irgen.asm` emit, `ra.asm` register allocator, `opt.asm` optimizer) → `codegen/` (ELF emission) → `main/` (entry, plus `ir_dump.asm` debug hook). `include/rex_defs.inc` / `include/rex_ir.inc` hold all shared constants (token/type IDs, IR opcodes, record layout, limits) — every module depends on them.

@@ -1,4 +1,4 @@
-// test_loop_else.rex
+// test_loop_else.rx
 // Loop `else:` clause (design §8.6): runs on natural exit, skipped on `stop`.
 
 for i in 0..3:

@@ -1,6 +1,6 @@
 # Rex Compiler
 
-A self-hosting x86-64 compiler written entirely in NASM assembly. Rex compiles `.rex` source files to native ELF64 binaries.
+A self-hosting x86-64 compiler written entirely in NASM assembly. Rex compiles `.rx` source files to native ELF64 binaries.
 
 ## How to build
 
@@ -13,12 +13,12 @@ This assembles all runtime blobs (`runtime/*.bin`), compiles all compiler module
 ## How to run
 
 ```
-./rexc <source.rex> [-o output]
+./rexc <source.rx> [-o output]
 ```
 
 Example:
 ```
-./rexc tests/test_basic.rex -o out
+./rexc tests/test_basic.rx -o out
 ./out
 ```
 
@@ -32,7 +32,7 @@ Example:
 | `codegen/`  | x86-64 code generation (NASM)                 |
 | `runtime/`  | Flat binary runtime blobs (print functions)   |
 | `main/`     | Entry point                                   |
-| `tests/`    | `.rex` source test files                      |
+| `tests/`    | `.rx` source test files                      |
 | `include/`  | Shared NASM include files                     |
 
 ## User preferences

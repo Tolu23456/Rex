@@ -1,4 +1,4 @@
-// test_file_io.rex — file I/O (design.md §15.4)
+// test_file_io.rx — file I/O (design.md §15.4)
 str path = "/tmp/rex_test_io.txt"
 output(file_exists("/tmp/rex_never_exists_xyz_42.txt"))
 

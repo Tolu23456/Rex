@@ -53,7 +53,7 @@ A final x86 emission pass converts IR to machine code.
 ## 2. Pipeline (New)
 
 ```
-source.rex
+source.rx
     │
     ▼
 [ lexer + parser ]         unchanged — still produces the same parse events

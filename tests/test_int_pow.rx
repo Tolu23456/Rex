@@ -1,4 +1,4 @@
-// test_int_pow.rex
+// test_int_pow.rx
 // Integer exponentiation: method form and standalone builtin (§4.2)
 //
 // Expected output:

@@ -1,4 +1,4 @@
-// test_str_cast.rex
+// test_str_cast.rx
 // str() casts for every value type (§6)
 //
 // Expected output:

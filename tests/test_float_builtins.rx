@@ -1,4 +1,4 @@
-// test_float_builtins.rex
+// test_float_builtins.rx
 // Free float functions (design §4.6/§13.2): ceil, floor, round, trunc,
 // fract, sqrt, abs, pow. `ceil` was missing from the free-function dispatch;
 // `fract` used to return the trunc result.

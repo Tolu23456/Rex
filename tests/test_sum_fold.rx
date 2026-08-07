@@ -1,4 +1,4 @@
-// test_sum_fold.rex
+// test_sum_fold.rx
 // Closed-form accumulation fold:
 //   for i in 0..N: total += i  →  total += N*(N-1)/2 (compile-time)
 //

@@ -174,7 +174,7 @@ The following optimizations from the original arsenal remain unimplemented. They
 ### Current Architecture (Stack Machine → IR Pipeline)
 
 ```
-source.rex
+source.rx
     → lexer → parser
     → parser emits IR records (ir_buffer) + old codegen (out_buffer)
     → IR Pass 1: Constant Folding
@@ -210,7 +210,7 @@ Every optimization MUST be benchmarked before and after. The benchmark suite is 
 ```bash
 # Build benchmarks
 gcc -O3 -o benchmark/sum_c benchmark/sum.c
-./rexc benchmark/sum.rex -o benchmark/sum_rex
+./rexc benchmark/sum.rx -o benchmark/sum_rex
 
 # Run comparison
 time benchmark/sum_c
@@ -237,7 +237,7 @@ objdump -b binary -m i386:x86-64 -D --start-address=0x26de --stop-address=0x2720
    make test
    ```
 
-6. **Benchmark before and after.** The sum benchmark (`benchmark/sum.rex`) is the primary performance indicator. Always compare against C -O3.
+6. **Benchmark before and after.** The sum benchmark (`benchmark/sum.rx`) is the primary performance indicator. Always compare against C -O3.
 
 7. **The emit_tail circular buffer** tracks the last 32 bytes emitted. Use it for pattern matching. `emit_b`, `emit_d`, `emit_q` all update it.
 

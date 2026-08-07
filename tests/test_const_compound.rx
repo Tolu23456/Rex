@@ -1,4 +1,4 @@
-// test_const_compound.rex
+// test_const_compound.rx
 // Negative test: compound assignment to a const is also rejected.
 const MAX = 5
 :MAX += 1

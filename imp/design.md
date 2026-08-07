@@ -30,7 +30,7 @@ goals.
 
 ## 2. Source Layout and Comments
 
-Rex source files use the `.rex` extension. Encoding is UTF-8.
+Rex source files use the `.rx` extension. Encoding is UTF-8.
 
 ```rex
 // This is a comment — everything after // on a line is ignored
@@ -2629,7 +2629,7 @@ Rex `mm pool` is **~12× faster** than glibc for homogeneous allocations.
 
 Rex modules are the unit of namespace and code organisation. A module is
 either an **inline block** inside the current file or a **file module**
-(`name.rex` in the same directory). There is no package registry; all
+(`name.rx` in the same directory). There is no package registry; all
 resolution is local and compile-time.
 
 ### 17.1 Defining a Module
@@ -2653,14 +2653,14 @@ module math:
 
 #### File module
 
-Any `.rex` file in the same directory is automatically a module. The module
+Any `.rx` file in the same directory is automatically a module. The module
 name is the filename without extension.
 
 ```
 project/
-    main.rex
-    math.rex        ← module math
-    io_utils.rex    ← module io_utils
+    main.rx
+    math.rx        ← module math
+    io_utils.rx    ← module io_utils
 ```
 
 No declaration is needed in the file itself — the filename determines the
@@ -2719,13 +2719,13 @@ A decorator defined inside a module is scoped to that module. To use it
 externally:
 
 ```rex
-// in logger.rex
+// in logger.rx
 module logger:
     decorator log(str tag):
         before: output("→ {tag}")
         after:  output("← {tag}")
 
-// in main.rex
+// in main.rx
 use logger: log
 
 #log("main")
@@ -2739,7 +2739,7 @@ A module may contain top-level statements outside of any protocol.
 These run **once**, in declaration order, the first time the module is `use`d:
 
 ```rex
-// config.rex
+// config.rx
 int MAX_RETRIES = 3
 str HOST = "localhost"
 int PORT = 8080
@@ -2760,7 +2760,7 @@ Rules:
 By default, a module's `use mm` / `use gc` context is **scoped to the module**:
 
 ```rex
-// heavy.rex
+// heavy.rx
 use mm arena:
     seq[int] cache = [1, 2, 3]   // allocated from module-local arena
 ```
@@ -2789,10 +2789,10 @@ Names brought in via `use` are available only within the importing module,
 not to that module's own importers.
 
 ```rex
-// utils.rex
+// utils.rx
 use math: sqrt         // imported into utils
 
-// main.rex
+// main.rx
 use utils              // does NOT bring in sqrt — not re-exported
 float r = sqrt(4.0)   // error: sqrt not in scope
 ```
@@ -2806,7 +2806,7 @@ data structure and has a single, bounded responsibility. No pass peeks ahead
 into a later pass's concern.
 
 ```
-source.rex
+source.rx
     │
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -2973,10 +2973,10 @@ The bootstrap path is:
 Stage 0  rex_compiler.asm     — hand-written NASM; produces the first rex binary
               │
               ▼
-Stage 1  rex_compiler.rex     — Rex source of the compiler; compiled by Stage 0
+Stage 1  rex_compiler.rx     — Rex source of the compiler; compiled by Stage 0
               │
               ▼
-Stage 2  rex_compiler (self)  — Stage 1 binary compiles rex_compiler.rex
+Stage 2  rex_compiler (self)  — Stage 1 binary compiles rex_compiler.rx
               │
               ▼
          Quine check: Stage 1 output == Stage 2 output  ✓  self-hosting achieved

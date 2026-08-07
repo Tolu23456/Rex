@@ -1,4 +1,4 @@
-// test_register_pressure.rex
+// test_register_pressure.rx
 // Declares many variables simultaneously to exceed the 6 physical registers.
 // The graph-colouring allocator must spill some vregs to the stack.
 // All values should still be correct.

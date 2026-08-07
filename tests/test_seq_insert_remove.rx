@@ -1,4 +1,4 @@
-// test_seq_insert_remove.rex
+// test_seq_insert_remove.rx
 // Tests seq.insert(i, x) and seq.remove(i)
 seq[int] s = [10, 20, 30]
 

@@ -1,4 +1,4 @@
-// test_hex_bin_oct.rex
+// test_hex_bin_oct.rx
 // Tests alternative integer literal formats.
 //
 // Expected output:

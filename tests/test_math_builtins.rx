@@ -1,4 +1,4 @@
-// test_math_builtins.rex
+// test_math_builtins.rx
 // Tests standalone math functions: abs, floor, recip, neg
 //
 // Expected output:

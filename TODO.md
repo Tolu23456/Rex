@@ -361,19 +361,19 @@ Phase 3 (Carnifex):
 
 | Phase | Test File | Description |
 |-------|-----------|-------------|
-| 1.1 | `tests/test_range.rex` | `for i in 0..10` range loops |
-| 1.2 | `tests/test_if_else.rex` | `if`/`elif`/`else` branching |
-| 1.3 | `tests/test_loops.rex` | `for`, `while`, `each`, `repeat` loops |
-| 1.4 | `tests/test_protocols.rex` | Function definitions and calls |
-| 1.5 | `tests/test_return.rex` | Return values (single and multiple) |
-| 1.6 | `tests/test_structs.rex` | Struct definition, construction, field access |
-| 1.7 | `tests/test_collections.rex` | `seq`, `arr`, `dict` basic operations |
-| 2.1 | `tests/test_mm_arena.rex` | Arena allocator scope |
-| 2.2 | `tests/test_mm_stack.rex` | Stack allocator scope |
-| 3.1 | `tests/test_carnifex_region.rex` | Region tree construction |
-| 3.2 | `tests/test_carnifex_ownership.rex` | Owned/free binding semantics |
-| 3.3 | `tests/test_carnifex_pinned.rex` | No-transfer enforcement |
-| 3.6 | `tests/test_carnifex_gen_check.rex` | Runtime generation mismatch detection |
+| 1.1 | `tests/test_range.rx` | `for i in 0..10` range loops |
+| 1.2 | `tests/test_if_else.rx` | `if`/`elif`/`else` branching |
+| 1.3 | `tests/test_loops.rx` | `for`, `while`, `each`, `repeat` loops |
+| 1.4 | `tests/test_protocols.rx` | Function definitions and calls |
+| 1.5 | `tests/test_return.rx` | Return values (single and multiple) |
+| 1.6 | `tests/test_structs.rx` | Struct definition, construction, field access |
+| 1.7 | `tests/test_collections.rx` | `seq`, `arr`, `dict` basic operations |
+| 2.1 | `tests/test_mm_arena.rx` | Arena allocator scope |
+| 2.2 | `tests/test_mm_stack.rx` | Stack allocator scope |
+| 3.1 | `tests/test_carnifex_region.rx` | Region tree construction |
+| 3.2 | `tests/test_carnifex_ownership.rx` | Owned/free binding semantics |
+| 3.3 | `tests/test_carnifex_pinned.rx` | No-transfer enforcement |
+| 3.6 | `tests/test_carnifex_gen_check.rx` | Runtime generation mismatch detection |
 
 ### Scratch Files
 

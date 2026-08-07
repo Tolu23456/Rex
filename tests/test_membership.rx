@@ -1,4 +1,4 @@
-// test_membership.rex
+// test_membership.rx
 // `in` membership operator (design §5.6).
 
 seq[int] nums = [1, 2, 3]

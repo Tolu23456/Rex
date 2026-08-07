@@ -1,4 +1,4 @@
-// test_basics2.rex
+// test_basics2.rx
 // Tests swap, signum, min, max, gcd, lcm
 //
 // Expected output:

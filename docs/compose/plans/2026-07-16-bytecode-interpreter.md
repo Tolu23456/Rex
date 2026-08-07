@@ -507,7 +507,7 @@ emit_bytecode:
 
 - [ ] **Step 2: Test bytecode emitter produces non-empty output**
 
-Run: `cd /home/t85491005/Rex && echo 'output(42)' > /tmp/t.rex && ./rexc /tmp/t.rex -o /tmp/t --bytecode 2>&1`
+Run: `cd /home/t85491005/Rex && echo 'output(42)' > /tmp/t.rx && ./rexc /tmp/t.rx -o /tmp/t --bytecode 2>&1`
 Expected: Compilation successful
 
 ---
@@ -976,7 +976,7 @@ In `codegen_init`, check if bytecode mode is enabled. If so, call `emit_bytecode
 
 - [ ] **Step 2: Test bytecode mode with `output(42)`**
 
-Run: `./rexc test.rex -o test --bytecode && ./test`
+Run: `./rexc test.rx -o test --bytecode && ./test`
 Expected: Same output as native mode
 
 ---

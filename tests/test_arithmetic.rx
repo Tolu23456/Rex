@@ -1,4 +1,4 @@
-// test_arithmetic.rex
+// test_arithmetic.rx
 // Tests all integer arithmetic operators and operator precedence.
 //
 // Expected output:
