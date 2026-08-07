@@ -76,3 +76,7 @@ must fail with that message substring.
 - `imp/design.md` — language design and syntax (source of truth)
 - `imp/grammar.md` — grammar
 - `imp/rex_ir.md` — intermediate representation
+
+## License
+
+[MIT](LICENSE)
