@@ -1,0 +1,8 @@
+# GitHub linguist settings for the Rex repository.
+# - NASM assembly is the compiler implementation language (dominant).
+# - `linguist-language=Rex` activates once the "Rex" language is added to
+#   github/linguist (tracking issue: PR to languages.yml). Until then the
+#   attribute is ignored and .rex files are shown as REXX (default mapping).
+*.asm linguist-language=Assembly
+*.rex linguist-language=Rex
+*.inc linguist-language=Assembly
