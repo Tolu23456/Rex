@@ -20,6 +20,9 @@ IR_CAST_CTB     equ 0x0D  ; char → byte (no-op)
 IR_CAST_BCI     equ 0x0E  ; byte → int (no-op)
 IR_CAST_BTC     equ 0x0F  ; byte → char (no-op)
 IR_NULL_COALESCE equ 0x10 ; dst = src1 != 0 ? src1 : src2 (integer)
+IR_LOAD_FIELD    equ 0x5B ; dst = qword [src1 + imm]   (struct field load)
+IR_STORE_FIELD   equ 0x5C ; [src1 + imm] = src2        (struct field store)
+IR_LEA_FIELD     equ 0x5D ; dst = src1 + imm           (ptr to inline nested struct field)
 
 ; Category 2: Integer Arithmetic
 IR_ADD          equ 0x11
@@ -172,6 +175,20 @@ IR_TO_BIN_STR   equ 0xA8  ; dst:str = int→binary string  (e.g. "1010")
 IR_TO_HEX_STR   equ 0xA9  ; dst:str = int→hex string     (e.g. "ff")
 IR_TO_OCT_STR   equ 0xAA  ; dst:str = int→octal string    (e.g. "77")
 IR_SWAP_VARS    equ 0xAB  ; swap values of two stack slots (src1=vreg_a, src2=vreg_b)
+IR_ITOS         equ 0xAC  ; dst:str = int→decimal string
+IR_FTOS         equ 0xAD  ; dst:str = float→string (matches output(float) format)
+IR_STOI         equ 0xAE  ; dst:int = parse decimal string
+IR_STOF         equ 0xAF  ; dst:float = parse decimal string
+
+; Category 8d: Type→String Casts & Byte Ops (0x91–0x98)
+IR_BTOS         equ 0x91  ; dst:str = bool→"true"/"neutral"/"false"
+IR_CTOS         equ 0x92  ; dst:str = single-char string (char or byte value)
+IR_POW_I        equ 0x93  ; dst:int = src1^src2 (integer)
+IR_BYTE_BIT     equ 0x94  ; dst:bool = (byte >> n) & 1
+IR_BYTE_ROL     equ 0x95  ; dst:byte = rotate_left
+IR_BYTE_ROR     equ 0x96  ; dst:byte = rotate_right
+IR_BYTE_HEX     equ 0x97  ; dst:str = 2-char zero-padded lowercase hex
+IR_BYTE_BIN     equ 0x98  ; dst:str = 8-char zero-padded binary
 
 ; Category 11: Protocol Calls (0xB0-0xB5)
 IR_CALL_ARG           equ 0xB0 ; src1=vreg, imm=arg index (0-5=reg, 6+=stack)
@@ -184,6 +201,26 @@ IR_RESTORE_LOCAL_VAR  equ 0xB5 ; imm=var absolute offset (pop [var])
 ; Category 12: Control-flow extensions (0xC0-0xC1)
 IR_WHEN       equ 0xC0 ; dst:bool = monitor(cond) — tri-state state monitor
 IR_ABORT      equ 0xC1 ; abort with message (src1 = null-terminated str ptr)
+
+; Category 13: File I/O (0xC2-0xD3) — handle = heap ptr {fd:8, mode_flags:8, path_ptr:8}
+IR_FILE_OPEN         equ 0xC2 ; dst = open(src1=path_str, src2=mode_str)
+IR_FILE_CLOSE        equ 0xC3 ; close(src1=handle)
+IR_FILE_READ         equ 0xC4 ; dst:str = read whole rest of file (from current pos)
+IR_FILE_READ_LINE    equ 0xC5 ; dst:str = read one line incl '\n' (empty at EOF)
+IR_FILE_READ_BYTES   equ 0xC6 ; dst:seq[byte] = read up to src2 bytes
+IR_FILE_READ_ALL_BYTES equ 0xC7 ; dst:seq[byte] = read whole rest of file
+IR_FILE_LINES        equ 0xC8 ; dst:seq[str] = all remaining lines, '\n' stripped
+IR_FILE_WRITE        equ 0xC9 ; write(src1=handle, src2=str)
+IR_FILE_WRITELN      equ 0xCA ; writeln(src1=handle, src2=str)
+IR_FILE_WRITE_BYTES  equ 0xCB ; write_bytes(src1=handle, src2=seq[byte])
+IR_FILE_SEEK         equ 0xCC ; seek(src1=handle, src2=pos)
+IR_FILE_SEEK_END     equ 0xCD ; seek_end(src1=handle, src2=n bytes before end)
+IR_FILE_POS          equ 0xCE ; dst:int = current byte position
+IR_FILE_SIZE         equ 0xCF ; dst:int = total file size
+IR_FILE_IS_EOF       equ 0xD0 ; dst:bool = at end of file
+IR_FILE_FLUSH        equ 0xD1 ; flush(src1=handle)
+IR_FILE_PATH         equ 0xD2 ; dst:str = path as given to open
+IR_FILE_EXISTS       equ 0xD3 ; dst:bool = file_exists(src1=path_str)
 
 ; IR Record Structure (32 bytes per record)
 ; Offset  Size  Field

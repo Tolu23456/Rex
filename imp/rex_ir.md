@@ -323,6 +323,35 @@ TYPE_DICT    equ 7
 
 ---
 
+### Category 8d — Type→String Casts & Byte Ops (0x91–0x98)
+
+Emitted inline (except where noted); no runtime blob call.
+
+| Opcode      | Value | dst   | src1  | src2 | imm | aux | Description |
+|-------------|-------|-------|-------|------|-----|-----|-------------|
+| IR_BTOS     | 0x91  | str   | bool  | —    | —   | —   | `dst ← "true"` / `"neutral"` / `"false"` (Łukasiewicz) |
+| IR_CTOS     | 0x92  | str   | char/byte | — | —   | —   | `dst ← single-char string` (inline `rt_conv` blob call) |
+| IR_POW_I    | 0x93  | int   | int   | int  | —   | —   | `dst ← src1^src2` integer exponentiation (`rt_math` blob @0x185) |
+| IR_BYTE_BIT | 0x94  | bool  | byte  | int  | —   | —   | `dst ← (src1 >> src2) & 1` (bit test) |
+| IR_BYTE_ROL | 0x95  | byte  | byte  | int  | —   | —   | `dst ← rotate_left(src1, src2)` within 8 bits |
+| IR_BYTE_ROR | 0x96  | byte  | byte  | int  | —   | —   | `dst ← rotate_right(src1, src2)` within 8 bits |
+| IR_BYTE_HEX | 0x97  | str   | byte  | —    | —   | —   | `dst ← 2-char zero-padded lowercase hex` (`rt_conv` blob @0x67E) |
+| IR_BYTE_BIN | 0x98  | str   | byte  | —    | —   | —   | `dst ← 8-char zero-padded binary` (`rt_conv` blob @0x6B7) |
+
+### Category 10 extension — Decimal String Conversions (0xAC–0xAF)
+
+Used by `str(x)` casts (`IR_CAST_*` → `IR_ITOS`/`IR_FTOS`) and `int(str)` /
+`float(str)` casts (`IR_STOI`/`IR_STOF`).  All four call the `rt_conv` blob.
+
+| Opcode   | Value | dst    | src1    | src2 | imm | aux | Description |
+|----------|-------|--------|---------|------|-----|-----|-------------|
+| IR_ITOS  | 0xAC  | str    | int     | —    | —   | —   | `dst ← decimal string of src1` (rt_conv @0x141) |
+| IR_FTOS  | 0xAD  | str    | float   | —    | —   | —   | `dst ← string of src1` matching `output(float)` (rt_conv @0x196) |
+| IR_STOI  | 0xAE  | int    | str     | —    | —   | —   | `dst ← integer parsed from src1` (rt_conv @0x39E) |
+| IR_STOF  | 0xAF  | float  | str     | —    | —   | —   | `dst ← float parsed from src1` (rt_conv @0x4BD) |
+
+---
+
 ### Category 15 — Protocol Markers (0xF0–0xFF)
 
 | Opcode        | Value | imm       | Description |

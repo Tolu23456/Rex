@@ -443,9 +443,9 @@ output(b.is_neutral())   // true
 output(c.is_decided())   // true  (false is decided)
 output(b.is_decided())   // false (neutral is not decided)
 
-output(flip(a))         // false
-output(flip(b))         // neutral
-output(flip(c))         // true
+output(a.flip())         // false
+output(b.flip())         // neutral
+output(c.flip())         // true
 
 output(int(a))       // 1
 output(int(b))       // 0
@@ -953,7 +953,7 @@ if "ell" in s:          // O(n+m) substring search
 
 ```rex
 ++x                 // x += 1
---x                 // x -= 1
+x--                 // x -= 1 (postfix form also allowed: x++, --x)
 swap(x, y)            // exchange values (xchg)
 int v = abs(x)      // absolute value
 ```
@@ -980,19 +980,19 @@ Undefined after: logical ops, bitwise-only ops, comparisons.
 **`overflow()`** is set after: `+`, `-`, `*`, `++`, `--`.
 Undefined after all other operations.
 
-**`flip()`** — boolean toggle. `flip(b)` is equivalent to `b = not b`:
+**`flip()`** — boolean toggle method. `b.flip()` is equivalent to `:b = not b`:
 
 ```rex
 bool b = true
-flip(b)              // b → false
-flip(b)              // b → true
+b.flip()             // b → false
+b.flip()             // b → true
 ```
 
-`flip()` raises `"TypeError: flip requires bool"` if the operand is not `bool`:
+`flip()` raises `"TypeError: flip requires bool"` if the receiver is not `bool`:
 
 ```rex
 int x = 5
-flip(x)              // raise "TypeError: flip requires bool, got int"
+x.flip()             // raise "TypeError: flip requires bool, got int"
 ```
 
 ### 5.10 Syscall Intercept
@@ -2993,7 +2993,7 @@ authoritative reference implementation.
 
 ```rex
 int x = 5
-output(typeof x)    // prints compile-time type token as int
+output(typeof(x))    // prints compile-time type token as int
 ```
 
 Type tokens: `int=1`, `float=2`, `bool=3`, `str=5`, `seq=6`, `dict=7`.

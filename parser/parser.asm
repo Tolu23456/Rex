@@ -5,6 +5,7 @@
 %include "include/rex_ir.inc"
 
 section .data
+    global current_token
     current_token   dd 0
 
     ; Error messages
@@ -13,16 +14,39 @@ section .data
     err_undef       db "Compile Error: Undefined variable", 0
     err_uninit      db "Compile Error: Variable read before initialization", 0
 err_type_mismatch db "Compile Error: Type mismatch", 0
-err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable name", 0
+err_when_overflow db "Compile Error: Too many distinct `when` expressions (max 256)", 0
+err_loop_ctl_outside db "Compile Error: `stop`/`skip` outside a loop", 0
+err_loop_ctl_depth db "Compile Error: Loop control depth exceeds current nesting", 0
+err_loop_nesting db "Compile Error: Loop nesting too deep (max 32)", 0
+    err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable name", 0
+    err_private_member db "Compile Error: Cannot access private member", 0
+    err_unknown_module db "Compile Error: Unknown module", 0
+    err_nested_module db "Compile Error: 'module' blocks cannot be nested", 0
     err_immutable   db "Compile Error: Cannot mutate an immutable variable", 0
     err_newline_req db "Syntax Error: Expected newline or EOF at end of statement", 0
     ; Bug 5 fix: distinct message for symbol-table-full (was reusing err_dup_decl)
     err_sym_full    db "Compile Error: Symbol table full (too many variables)", 0
-    err_unknown_method db "Compile Error: Unknown method for this type", 0
+    err_unknown_method_on db "Compile Error: Unknown method", 0
+    err_unknown_field db "Compile Error: Unknown field", 0
+    str_on_type       db " on type ", 0
+    ; Type names for error messages
+    str_t_int         db "int", 0
+    str_t_float       db "float", 0
+    str_t_bool        db "bool", 0
+    str_t_struct      db "struct", 0
+    str_t_str         db "str", 0
+    str_t_seq         db "seq", 0
+    str_t_dict        db "dict", 0
+    str_t_char        db "char", 0
+    str_t_byte        db "byte", 0
+    str_t_file        db "file", 0
+    str_t_tuple       db "tuple", 0
+    str_t_value       db "value", 0
     err_unknown_proto db "Compile Error: Unknown protocol", 0
     err_proto_arg_count db "Compile Error: Wrong number of arguments to protocol", 0
     err_proto_multi db "Compile Error: Multi-return protocols must be assigned with ':a, :b ='", 0
     err_arity db "Compile Error: This protocol requires a different return arity", 0
+    err_label_overflow db "Compile Error: Too many control-flow labels (program too complex)", 0
     str_assert_default db "AssertionError: assertion failed", 0
     str_assert_default_len equ $ - str_assert_default
     str_unreachable_default db "UnreachableError: reached unreachable code", 0
@@ -35,11 +59,6 @@ err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable n
     str_max           db "max", 0
     str_clamp         db "clamp", 0
     str_signum        db "signum", 0
-    str_is_zero       db "is_zero", 0
-    str_is_positive   db "is_positive", 0
-    str_is_negative   db "is_negative", 0
-    str_is_even       db "is_even", 0
-    str_is_odd        db "is_odd", 0
     str_popcount      db "popcount", 0
     str_leading_zeros db "leading_zeros", 0
     str_trailing_zeros db "trailing_zeros", 0
@@ -77,9 +96,6 @@ err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable n
     str_to_char       db "to_char", 0
     str_to_digit      db "to_digit", 0
     str_swap_nibbles  db "swap_nibbles", 0
-    str_is_nan        db "is_nan", 0
-    str_is_infinite   db "is_infinite", 0
-    str_is_finite     db "is_finite", 0
     ; Seq method names
     str_push          db "push", 0
     str_len_m         db "len", 0
@@ -89,6 +105,8 @@ err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable n
     str_remove        db "remove", 0
     str_first         db "first", 0
     str_last          db "last", 0
+    str_index         db "index", 0
+    str_count         db "count", 0
     str_contains      db "contains", 0
     str_index_of      db "index_of", 0
     str_count_of      db "count_of", 0
@@ -112,8 +130,52 @@ err_sigil_req   db "Compile Error: Mutation requires ':' sigil before variable n
     str_to_bin        db "to_bin", 0
     str_to_hex        db "to_hex", 0
     str_to_oct        db "to_oct", 0
+    str_str_m         db "str", 0
+    str_int_m         db "int", 0
+    str_byte_m        db "byte", 0
+    str_char_m        db "char", 0
+    str_alpha         db "alpha", 0
+    str_digit         db "digit", 0
+    str_alnum_m       db "alnum", 0
+    str_whitespace    db "whitespace", 0
+    str_upper         db "upper", 0
+    str_lower         db "lower", 0
+    str_punct_m       db "punct", 0
+    str_printable_m   db "printable", 0
+    str_ascii_m       db "ascii", 0
+    str_bit           db "bit", 0
+    str_hex_m         db "hex", 0
+    str_bin_m         db "bin", 0
+    str_oct_m         db "oct", 0
+    str_zero          db "zero", 0
+    str_positive      db "positive", 0
+    str_negative      db "negative", 0
+    str_even          db "even", 0
+    str_odd           db "odd", 0
+    str_nan           db "nan", 0
+    str_inf           db "inf", 0
+    str_finite        db "finite", 0
+    ; File method names (design.md §15.4)
+    str_open          db "open", 0
+    str_file_exists   db "file_exists", 0
+    str_read          db "read", 0
+    str_read_line     db "read_line", 0
+    str_read_bytes    db "read_bytes", 0
+    str_read_all_bytes db "read_all_bytes", 0
+    str_lines_m       db "lines", 0
+    str_write_m       db "write", 0
+    str_writeln       db "writeln", 0
+    str_write_bytes   db "write_bytes", 0
+    str_seek          db "seek", 0
+    str_seek_end      db "seek_end", 0
+    str_pos           db "pos", 0
+    str_size          db "size", 0
+    str_is_eof        db "is_eof", 0
+    str_flush         db "flush", 0
+    str_close_m       db "close", 0
+    str_path          db "path", 0
+    str_mode_r        db "r", 0
     float_pp_one      dq 0x3FF0000000000000
-
     ; scope() built-in string constants
     str_scope_global  db "global", 0
     str_scope_local   db "local", 0
@@ -157,6 +219,29 @@ section .bss
     label_counter   resd 1
     ; Vreg to struct type_id mapping (for field access)
     vreg_type_map   resd 65536
+    ; Vreg to container element type (seq[T]/dict[T]/arr[T]) for bracket indexing
+    vreg_elem_types resd 65536
+    ; Element type parsed from seq[T]/dict[T]/arr[T,N] during a declaration
+    pending_elem_type resd 1
+    ; Struct construction scratch pool bump offset into the output's data
+    ; segment (STRUCT_SCRATCH_BASE + offset is emitted as the LEA_VAR imm).
+    struct_scratch_ptr resd 1
+    ; output() argument buffers (max 256 args)
+    out_arg_vregs   resw 256
+    out_arg_types   resd 256
+    ; `when` monitor dedup table (design §7.3): one monitor per unique expr text
+    when_hash_table resq WHEN_MONITOR_MAX
+    when_count      resd 1
+    ; Loop context stack for stop/skip (design §8.5)
+    loop_end_labels resq LOOP_MAX_DEPTH
+    loop_skip_labels resq LOOP_MAX_DEPTH
+    loop_depth      resd 1
+    ; Scratch buffer for composing error messages (e.g. "Undefined variable 'name'")
+    error_msg_buf   resb 192
+    ; Scratch buffer for the caret line under the offending source line
+    err_caret_buf   resb 132
+    ; Number-print scratch buffer (digits written back-to-front)
+    print_num_buf   resb 16
 
 section .text
     global parse_program
@@ -164,11 +249,17 @@ section .text
     
     extern next_token
     extern get_error_loc
+    extern lexer_peek_token
     extern tok_type
     extern tok_str_ptr
     extern tok_str_len
     extern tok_ival
     extern tok_fval
+    extern src_ptr
+    extern src_idx
+    extern src_len
+    extern line_num
+    extern line_start_idx
 
     extern sym_add
     extern sym_lookup
@@ -180,18 +271,37 @@ section .text
     extern sym_get_offset
     extern sym_get_scope
     extern sym_set_private
+    extern sym_is_private
+    extern sym_set_const
+    extern sym_is_const
+    extern sym_lookup_module
     extern sym_count
     extern sym_remove_block_scope
     extern sym_remove_after
     extern proto_lookup
+    extern proto_lookup_module
+    extern proto_resolve_call
+    extern proto_get_private
     extern proto_get_param_count
     extern proto_get_ret_count
     extern proto_set_param_var_idx
     extern proto_get_ret_conc_type
 
+    extern current_module
+    extern current_sym_module
+    extern module_lookup
+    extern module_get_kind
+    extern module_get_status
+    extern module_import_add
+    extern module_parse_depth
+    extern parse_module_body
+
     extern alloc_vreg
     extern emit_ir
     extern type_name_buf
+    extern type_lookup
+    extern type_get_kind
+    extern type_struct_field_at
 
 ; Advance to the next token
 advance:
@@ -217,6 +327,11 @@ parse_program:
     ; Initialize lexer first
     call advance
     mov dword [label_counter], 0
+    ; Struct construction scratch pool bump offset into the OUTPUT's data
+    ; segment (STRUCT_SCRATCH_BASE). Absolute base + offset is emitted as the
+    ; LEA_VAR imm, so constructions land in the running program's mapped bss
+    ; instead of rexc's own buffer address.
+    mov dword [struct_scratch_ptr], 0
     
 .loop:
     mov eax, [current_token]
@@ -273,6 +388,10 @@ parse_program:
     je .loop
     cmp eax, TOK_COLON
     je .loop
+    cmp eax, TOK_USE
+    je .loop
+    cmp eax, TOK_MODULE
+    je .loop
     
     ; If not newline or EOF, it's an error
     mov rdi, err_newline_req
@@ -287,7 +406,11 @@ parse_program:
     jmp .loop
 
 .done:
-    ; Emit halt
+    ; Emit halt — but only for the outermost file. File modules return their
+    ; IR inline into the using file's stream at the first-`use` site, so a
+    ; module-level halt would stop the program mid-parse.
+    cmp dword [module_parse_depth], 0
+    jne .done_no_halt
     mov rdi, IR_HALT
     xor rsi, rsi
     xor rdx, rdx
@@ -296,6 +419,7 @@ parse_program:
     xor r9, r9
     xor r10, r10
     call emit_ir
+.done_no_halt:
     ret
 
 ; Parse Statement
@@ -352,6 +476,11 @@ parse_stmt:
     cmp eax, TOK_SWAP
     je .swap_stmt
     
+    cmp eax, TOK_PLUSPLUS
+    je .inc_dec_prefix
+    cmp eax, TOK_MINUSMINUS
+    je .inc_dec_prefix
+    
     cmp eax, TOK_PROT
     je .prot_stmt
     
@@ -363,6 +492,15 @@ parse_stmt:
     
     cmp eax, TOK_UNREACHABLE
     je .unreachable_stmt
+    
+    cmp eax, TOK_WITH
+    je .with_stmt
+    
+    cmp eax, TOK_USE
+    je .use_stmt
+    
+    cmp eax, TOK_MODULE
+    je .module_stmt
     
     ; Unknown statement — try as expression statement
     call parse_expr
@@ -481,6 +619,7 @@ parse_stmt:
     pop r10 ; length
     pop r9  ; string ptr
     call emit_ir
+    mov rax, rdx ; return vreg (emit_ir clobbers rax)
     ret
 
 ; ============ Protocol Definition ============
@@ -491,10 +630,11 @@ parse_stmt:
     cmp eax, TOK_IDENT
     jne expected_ident
 
-    ; Protocol was pre-registered by prescan_protocols
+    ; Protocol was pre-registered by the prescan (same name + module)
     mov rdi, [tok_str_ptr]
     mov rsi, [tok_str_len]
-    call proto_lookup
+    mov edx, [current_module]
+    call proto_lookup_module
     cmp rax, -1
     je .prot_undef
     mov r14, rax ; proto_id
@@ -647,6 +787,164 @@ parse_stmt:
     mov rdi, err_syntax
     jmp compile_error
 
+; ============ Use Statement ============
+; use <mod>            — star import
+; use <mod> : <a>, <b> — selective import
+; A file module's init statements are emitted inline into the IR here on its
+; first `use` (once, in declaration order). Inline modules emit at their
+; definition site instead.
+.use_stmt:
+    push rbx
+    push r12
+    push r13
+    call advance ; consume 'use' → IDENT (module name)
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    ; Resolve the module (registered by the prescan).
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call module_lookup
+    cmp rax, -1
+    je .use_undef
+    mov r12, rax ; module id
+    call advance ; consume module name
+    ; Optional ': import_list'
+    mov eax, [current_token]
+    cmp eax, TOK_COLON
+    jne .use_no_imports
+    call advance ; consume ':'
+    mov eax, [current_token]
+    cmp eax, TOK_STAR
+    je .use_star
+    jmp .use_import_item
+.use_import_item:
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    ; Record the import into the current module.
+    mov rdi, r12          ; target module
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    xor ecx, ecx          ; is_star = 0
+    call module_import_add
+    call advance ; consume import name
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .use_no_imports
+    call advance
+    jmp .use_import_item
+.use_star:
+    ; Star import: name ptr = 0, is_star = 1.
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    mov ecx, 1
+    call module_import_add
+    call advance ; consume '*'
+.use_no_imports:
+    ; First `use` of a file module emits its init code here.
+    mov rdi, r12
+    call module_get_kind
+    cmp rax, MOD_KIND_INLINE
+    je .use_done
+    mov rdi, r12
+    call module_get_status
+    cmp rax, MOD_ST_PARSED
+    je .use_done
+    mov rdi, r12
+    call parse_module_body
+.use_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.use_undef:
+    mov rdi, err_unknown_module
+    jmp compile_error
+
+; ============ Module Definition (inline) ============
+; module <IDENT> ":" NEWLINE INDENT { top_level_item } DEDENT
+.module_stmt:
+    push rbx
+    push r12
+    call advance ; consume 'module' → IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    ; Resolve the inline module registered by the prescan.
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call module_lookup
+    cmp rax, -1
+    je .mod_stmt_undef
+    mov r12, rax ; module id
+    ; Only inline modules have a body in this file (a file module reached
+    ; here means the name collides across a `use` and an inline block).
+    mov rdi, r12
+    call module_get_kind
+    cmp rax, MOD_KIND_INLINE
+    jne .mod_stmt_conflict
+    ; Nested module blocks are illegal (grammar.md §10.3).
+    cmp dword [module_parse_depth], 0
+    jne .mod_stmt_nested
+    call advance ; consume module name → ':'
+    mov edi, TOK_COLON
+    call expect
+    ; Expect NEWLINE INDENT body DEDENT (not parse_block: its block_nesting
+    ; increment would demote module globals to SCOPE_LOCAL).
+    mov eax, [current_token]
+    cmp eax, TOK_NEWLINE
+    jne .mod_stmt_syntax
+    call advance
+    mov eax, [current_token]
+    cmp eax, TOK_INDENT
+    jne .mod_stmt_syntax
+    call advance ; consume INDENT
+    ; Switch context to the module for its body. Its init statements run
+    ; inline here (once, at this position in the flat IR stream).
+    mov eax, [current_module]
+    push rax
+    mov eax, [current_sym_module]
+    push rax
+    mov dword [current_module], r12d
+    mov dword [current_sym_module], r12d
+    inc dword [module_parse_depth]
+.mod_body_loop:
+    mov eax, [current_token]
+    cmp eax, TOK_DEDENT
+    je .mod_body_done
+    cmp eax, TOK_EOF
+    je .mod_body_done
+    call parse_stmt
+    mov eax, [current_token]
+    cmp eax, TOK_NEWLINE
+    jne .mod_body_loop
+    call advance
+    jmp .mod_body_loop
+.mod_body_done:
+    call advance ; consume DEDENT
+    dec dword [module_parse_depth]
+    pop rax
+    mov [current_sym_module], eax
+    pop rax
+    mov [current_module], eax
+    pop r12
+    pop rbx
+    ret
+.mod_stmt_undef:
+    mov rdi, err_unknown_module
+    jmp compile_error
+.mod_stmt_conflict:
+    mov rdi, err_nested_module
+    jmp compile_error
+.mod_stmt_nested:
+    mov rdi, err_nested_module
+    jmp compile_error
+.mod_stmt_syntax:
+    mov rdi, err_syntax
+    jmp compile_error
+
 .const_decl:
     call advance ; consume const
     mov eax, [current_token]
@@ -692,6 +990,11 @@ parse_stmt:
     mov rsi, 1
     call sym_set_private
 .const_not_private:
+    
+    ; Mark as constant — mutation via ':' is forbidden (design.md §4.17)
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_const
     
     ; Emit store
     mov rdi, r14
@@ -752,11 +1055,27 @@ parse_stmt:
     je .struct_done
     
     cmp eax, TOK_TYPE
-    jne .struct_syntax_err
-    
+    je .struct_type_token
+    cmp eax, TOK_IDENT
+    je .struct_ident_type
+    jmp .struct_syntax_err
+
+.struct_type_token:
     mov r14, [tok_ival] ; field_type_id
     call advance ; consume TYPE
-    
+    jmp .struct_field_name
+
+.struct_ident_type:
+    ; User-defined field type (e.g. a nested struct)
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call type_lookup
+    cmp rax, -1
+    je .struct_syntax_err
+    mov r14, rax ; field_type_id
+    call advance ; consume IDENT
+
+.struct_field_name:
     mov eax, [current_token]
     cmp eax, TOK_IDENT
     jne .struct_syntax_err
@@ -765,8 +1084,23 @@ parse_stmt:
     mov rdx, [tok_str_len]
     push rsi
     push rdx
+    ; Allocate a unique slot in type_name_buf for this field name
+    ; (M8 fix: previously every field copied to offset 0, so all field
+    ;  names shared one pointer and type_struct_find_field could only ever
+    ;  match the LAST field declared.)
+    extern type_name_idx
+    mov r15d, [type_name_idx]   ; r15 = slot offset (type_name_idx is a dword)
+    cmp r15d, TYPE_NAME_BUF_SIZE - 2
+    jge .field_name_skip        ; no room — store field without a name copy
     mov rcx, rdx
-    lea rdi, [type_name_buf]
+    lea rax, [r15 + rcx + 1]
+    cmp rax, TYPE_NAME_BUF_SIZE
+    jbe .field_name_fits
+    mov rcx, TYPE_NAME_BUF_SIZE - 1
+    sub rcx, r15
+    jbe .field_name_skip
+.field_name_fits:
+    lea rdi, [type_name_buf + r15]
     cmp rcx, TYPE_NAME_BUF_SIZE - 1
     jle .field_name_ok
     mov rcx, TYPE_NAME_BUF_SIZE - 1
@@ -782,7 +1116,14 @@ parse_stmt:
     jl .field_name_copy
 .field_name_done:
     mov byte [rdi + rcx], 0
-    mov r8, rcx ; save length
+    mov rbx, rcx ; save length (rbx survives advance/expect below)
+    ; Advance type_name_idx by len + 1
+    lea eax, [rcx + 1]
+    add dword [type_name_idx], eax
+    jmp .field_name_add
+.field_name_skip:
+    mov rbx, rdx ; save raw length; no stable name copy (buffer full)
+.field_name_add:
     pop rdx
     pop rsi
     call advance ; consume IDENT
@@ -790,10 +1131,14 @@ parse_stmt:
     mov edi, TOK_NEWLINE
     call expect
     
+    ; Align field offset to 8 bytes (fields hold qwords/pointers)
+    lea r13, [r13 + 7]
+    and r13, -8
+
     ; Add field
     mov rdi, r12 ; struct_type_id
-    lea rsi, [type_name_buf] ; field_name_ptr (stable copy)
-    mov rdx, r8 ; field_name_len
+    lea rsi, [type_name_buf + r15] ; field_name_ptr (unique stable copy)
+    mov rdx, rbx ; field_name_len
     mov rcx, r14 ; field_type_id
     mov r8, r13 ; field_offset
     extern type_struct_add_field
@@ -1015,6 +1360,12 @@ parse_stmt:
     ; Check for elif/else
 .if_chain:
     mov eax, [current_token]
+    cmp eax, TOK_NEWLINE
+    jne .if_chain_cont
+    call advance ; single-line bodies end with a NEWLINE before the next
+                 ; elif/else keyword on the following line
+    mov eax, [current_token]
+.if_chain_cont:
     cmp eax, TOK_ELIF
     je .elif_branch
     cmp eax, TOK_ELSE
@@ -1077,6 +1428,79 @@ parse_stmt:
     pop rdi ; end_label
     call emit_label
     ret
+
+; ============ With Statement ============
+; with open(path [, mode]) as <ident>:
+;     <body>
+; The handle is opened before the body and closed (IR_FILE_CLOSE) after it.
+.with_stmt:
+    call advance ; consume 'with'
+    call parse_expr ; rax = handle vreg, rdx = type
+    mov r15, rax ; save handle vreg across sym_add
+    cmp rdx, TYPE_FILE
+    jne .with_type_err
+
+    mov edi, TOK_AS
+    call expect ; consume 'as'
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    call save_ident
+    call advance ; consume IDENT
+
+    ; Add alias symbol: sym_add(name, len, TYPE_FILE, scope)
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    call determine_scope
+    mov rcx, rax ; scope
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    mov rdx, TYPE_FILE
+    call sym_add
+    cmp rax, -2
+    je dup_error
+    cmp rax, -1
+    je full_error
+    mov r14, rax ; sym index
+
+    ; Mark initialized and store the handle into the alias variable
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_init
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax ; imm = var offset
+    mov rdi, IR_STORE_VAR
+    mov rsi, TYPE_FILE
+    xor rdx, rdx
+    mov rcx, r15 ; src1 = handle vreg
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    mov edi, TOK_COLON
+    call expect ; consume ':'
+
+    ; Save handle vreg on the stack across parse_block (parse_block may
+    ; clobber r15); restore it afterwards for the auto-close.
+    push r15
+    call parse_block
+    pop r15
+
+    ; Auto-close the file after the body
+    mov rdi, IR_FILE_CLOSE
+    mov rsi, TYPE_FILE
+    xor rdx, rdx ; dst = 0 (void)
+    mov rcx, r15 ; src1 = handle vreg
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    ret
+
+.with_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
 
 ; ============ Switch Statement ============
 ; switch <expr>:
@@ -1708,9 +2132,18 @@ parse_stmt:
     push rax ; loop_start
     call gen_label
     push rax ; loop_end
+    ; Third label = loop_else_entry (natural-exit target; design §8.6 else)
+    call gen_label
+    push rax
+    ; Fourth label = loop_skip (target of `skip`; emitted before the increment)
+    call gen_label
+    push rax
+    mov rdi, [rsp + 16] ; loop_end
+    pop rsi             ; loop_skip
+    call push_loop_context
 
     ; Emit loop_start label
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp + 16]
     call emit_label
 
     ; Load loop variable (fresh vreg each iteration)
@@ -1759,8 +2192,8 @@ parse_stmt:
 .cmp_cond_done:
     call emit_ir
 
-    ; JCC to loop_end if NOT (loop_var < end)
-    mov rdi, [rsp + 8] ; loop_end
+    ; JCC to loop_else_entry if NOT (loop_var < end)
+    mov rdi, [rsp + 8] ; loop_else_entry
     mov rsi, COND_NE
     pop rcx ; cmp result vreg
     call emit_jcc
@@ -1774,6 +2207,9 @@ parse_stmt:
     pop r15
     pop r14
     pop r13
+
+    ; loop_skip label: `skip` lands here, before the increment step
+    call emit_loop_skip_label
 
     ; Increment: i = i + 1 (or i + __for_step when step given)
     call alloc_vreg
@@ -1840,13 +2276,13 @@ parse_stmt:
     call emit_ir
 
     ; JMP back to loop_start
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp + 16]
     call emit_jmp
 
-    ; Emit loop_end label
-    pop rdi
-    pop rax
-    call emit_label
+    ; Emit loop_end label (or else block + loop_end)
+    call loop_else_chain
+    add rsp, 24 ; drop loop_start/loop_end/loop_else_entry
+    call pop_loop_context
     ret
 
 .for_syntax_err:
@@ -1862,9 +2298,18 @@ parse_stmt:
     push rax ; loop_start on stack
     call gen_label
     push rax ; loop_end on stack
+    call gen_label
+    push rax ; loop_else_entry on stack
+    ; While has no increment section — `skip` re-checks the condition, so the
+    ; skip target IS loop_start (design §8.5)
+    push rax            ; temp: [temp][else_entry][loop_end][loop_start]
+    mov rdi, [rsp + 16] ; loop_end
+    mov rsi, [rsp + 24] ; loop_start
+    pop rax             ; discard placeholder
+    call push_loop_context
 
     ; Emit loop_start label
-    mov rdi, [rsp + 8] ; loop_start
+    mov rdi, [rsp + 16] ; loop_start
     call emit_label
 
     ; Parse condition
@@ -1874,9 +2319,9 @@ parse_stmt:
     mov edi, TOK_COLON
     call expect
 
-    ; JCC to loop_end if condition false
+    ; JCC to loop_else_entry if condition false
     ; The JCC codegen already does CMP reg, 1 before the jump
-    mov rdi, [rsp] ; loop_end (top of stack)
+    mov rdi, [rsp] ; loop_else_entry (top of stack)
     mov rsi, COND_NE
     mov rcx, r12
     call emit_jcc
@@ -1885,13 +2330,13 @@ parse_stmt:
     call parse_block
 
     ; JMP back to loop_start
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp + 16] ; loop_start
     call emit_jmp
 
-    ; Emit loop_end label
-    pop rdi ; loop_end
-    pop rax ; loop_start (discard)
-    call emit_label
+    ; Emit loop_end label (or else block + loop_end)
+    call loop_else_chain
+    add rsp, 24 ; drop loop_start/loop_end/loop_else_entry
+    call pop_loop_context
     ret
 
 ; ============ Each Loop ============
@@ -2064,9 +2509,17 @@ parse_stmt:
     push rax ; loop_start
     call gen_label
     push rax ; loop_end
+    call gen_label
+    push rax ; loop_else_entry
+    ; Fourth label = loop_skip (target of `skip`; emitted before index increment)
+    call gen_label
+    push rax
+    mov rdi, [rsp + 16] ; loop_end
+    pop rsi             ; loop_skip
+    call push_loop_context
 
     ; Emit loop_start label
-    mov rdi, [rsp + 8] ; loop_start
+    mov rdi, [rsp + 16] ; loop_start
     call emit_label
 
     ; Load index (fresh vreg each iteration)
@@ -2121,8 +2574,8 @@ parse_stmt:
     mov r10, COND_LT
     call emit_ir
 
-    ; JCC to loop_end if NOT (index < len)
-    mov rdi, [rsp + 16] ; loop_end
+    ; JCC to loop_else_entry if NOT (index < len)
+    mov rdi, [rsp + 16] ; loop_else_entry
     mov rsi, COND_NE
     pop rcx ; cmp result vreg
     pop r12 ; len vreg (discard)
@@ -2188,6 +2641,9 @@ parse_stmt:
     pop r14
     pop r13
 
+    ; loop_skip label: `skip` lands here, before the index increment
+    call emit_loop_skip_label
+
     ; Increment: index = index + 1
     call alloc_vreg
     mov rbx, rax
@@ -2237,13 +2693,13 @@ parse_stmt:
     call emit_ir
 
     ; JMP back to loop_start
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp + 16]
     call emit_jmp
 
-    ; Emit loop_end label
-    pop rdi ; loop_end
-    pop rax ; loop_start (discard)
-    call emit_label
+    ; Emit loop_end label (or else block + loop_end)
+    call loop_else_chain
+    add rsp, 24 ; drop loop_start/loop_end/loop_else_entry
+    call pop_loop_context
     ret
 
 ; ============ Repeat Loop ============
@@ -2293,9 +2749,17 @@ parse_stmt:
     push rax ; loop_start
     call gen_label
     push rax ; loop_end
+    call gen_label
+    push rax ; loop_else_entry
+    ; Fourth label = loop_skip (target of `skip`; emitted before the decrement)
+    call gen_label
+    push rax
+    mov rdi, [rsp + 16] ; loop_end
+    pop rsi             ; loop_skip
+    call push_loop_context
 
     ; Emit loop_start label
-    mov rdi, [rsp + 8] ; loop_start
+    mov rdi, [rsp + 16] ; loop_start
     call emit_label
 
     ; Load counter (fresh vreg each iteration)
@@ -2324,8 +2788,8 @@ parse_stmt:
     mov r10, COND_GT
     call emit_ir
 
-    ; JCC to loop_end if NOT (counter > 0)
-    mov rdi, [rsp + 8] ; loop_end
+    ; JCC to loop_else_entry if NOT (counter > 0)
+    mov rdi, [rsp + 8] ; loop_else_entry
     mov rsi, COND_NE
     pop rcx ; cmp result vreg
     call emit_jcc
@@ -2337,6 +2801,9 @@ parse_stmt:
     call parse_block
     pop r15
     pop r14
+
+    ; loop_skip label: `skip` lands here, before the decrement
+    call emit_loop_skip_label
 
     ; Decrement: counter = counter - 1
     call alloc_vreg
@@ -2387,13 +2854,13 @@ parse_stmt:
     call emit_ir
 
     ; JMP back to loop_start
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp + 16]
     call emit_jmp
 
-    ; Emit loop_end label
-    pop rdi ; loop_end
-    pop rax ; loop_start (discard)
-    call emit_label
+    ; Emit loop_end label (or else block + loop_end)
+    call loop_else_chain
+    add rsp, 24 ; drop loop_start/loop_end/loop_else_entry
+    call pop_loop_context
     ret
 
 ; ============ Return ============
@@ -2451,19 +2918,78 @@ parse_stmt:
     ret
 
 ; ============ Stop ============
+; Grammar: stop_stmt ::= "stop" <INTEGER-LITERAL>? <NEWLINE>
+; stop → break innermost loop; stop N → break N levels (design §8.5)
 .stop_stmt:
     call advance ; consume 'stop'
+    mov edx, 1 ; depth (default 1)
+    mov eax, [current_token]
+    cmp eax, TOK_INT_LIT
+    jne .stop_no_arg
+    mov rcx, [tok_ival]
+    cmp rcx, 1
+    jl .stop_depth_err
+    mov edx, ecx
+    push rdx
+    call advance ; consume depth literal
+    pop rdx
+.stop_no_arg:
+    ; Compile-time check: depth must not exceed current nesting
+    mov ecx, [loop_depth]
+    cmp edx, ecx
+    jg .stop_outside_err
+    ; Target the loop N levels up from the innermost: slot [loop_depth - depth]
+    sub ecx, edx
+    lea rax, [loop_end_labels]
+    mov rdi, [rax + rcx * 8]
+    call emit_jmp
     ret
+.stop_depth_err:
+    mov rdi, err_loop_ctl_depth
+    jmp compile_error
+.stop_outside_err:
+    mov rdi, err_loop_ctl_outside
+    jmp compile_error
 
 ; ============ Skip ============
+; Grammar: skip_stmt ::= "skip" <INTEGER-LITERAL>? <NEWLINE>
+; skip → continue innermost loop; skip N → continue N levels (design §8.5)
 .skip_stmt:
     call advance ; consume 'skip'
+    mov edx, 1 ; depth (default 1)
+    mov eax, [current_token]
+    cmp eax, TOK_INT_LIT
+    jne .skip_no_arg
+    mov rcx, [tok_ival]
+    cmp rcx, 1
+    jl .skip_depth_err
+    mov edx, ecx
+    push rdx
+    call advance ; consume depth literal
+    pop rdx
+.skip_no_arg:
+    mov ecx, [loop_depth]
+    cmp edx, ecx
+    jg .skip_outside_err
+    ; Target the loop N levels up from the innermost: slot [loop_depth - depth]
+    sub ecx, edx
+    lea rax, [loop_skip_labels]
+    mov rdi, [rax + rcx * 8]
+    call emit_jmp
     ret
+.skip_depth_err:
+    mov rdi, err_loop_ctl_depth
+    jmp compile_error
+.skip_outside_err:
+    mov rdi, err_loop_ctl_outside
+    jmp compile_error
 
 ; ============ Swap ============
-; Grammar: swap_stmt ::= "swap" <IDENT> <IDENT> <NEWLINE>
+; Grammar: swap_stmt ::= "swap" "(" <IDENT> "," <IDENT> ")" <NEWLINE>
 .swap_stmt:
     call advance ; consume 'swap'
+    mov edi, TOK_LPAREN
+    call expect
     mov eax, [current_token]
     cmp eax, TOK_IDENT
     jne expected_ident
@@ -2475,6 +3001,8 @@ parse_stmt:
     je .swap_undef
     mov r12, rax ; sym_idx_a
     call advance ; consume first ident
+    mov edi, TOK_COMMA
+    call expect
     mov eax, [current_token]
     cmp eax, TOK_IDENT
     jne expected_ident
@@ -2485,6 +3013,8 @@ parse_stmt:
     je .swap_undef
     mov r13, rax ; sym_idx_b
     call advance ; consume second ident
+    mov edi, TOK_RPAREN
+    call expect
     ; Get stack offsets for both variables
     mov rdi, r12
     call sym_get_offset
@@ -2503,8 +3033,138 @@ parse_stmt:
     call emit_ir
     ret
 .swap_undef:
-    mov rdi, err_undef
+    jmp undef_error
+
+; ============ Inc/Dec Statements ============
+; Grammar (grammar.md §13): inc_dec_stmt ::= ( "++" | "--" ) <IDENT> <NEWLINE>
+;                                                   | <IDENT> ( "++" | "--" ) <NEWLINE>
+; Design §5.7: ++x desugars to x += 1. Self-evidently a mutation, no ':' sigil needed.
+.inc_dec_prefix:
+    ; Prefix: ++IDENT / --IDENT
+    mov r12d, [current_token] ; TOK_PLUSPLUS or TOK_MINUSMINUS
+    call advance ; consume '++' / '--'
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call sym_lookup
+    cmp rax, -1
+    je .inc_undef
+    mov r14, rax
+    jmp .inc_dec_emit
+
+.inc_dec_emit:
+    ; r14 = symbol index, r12d = TOK_PLUSPLUS or TOK_MINUSMINUS
+    ; Desugar to: :x = x + 1  (or x - 1)
+    ; Retroactive mutability (design §3.1), same as :name =.
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_mutable
+    call advance ; consume IDENT (both prefix and postfix have IDENT as current token)
+
+    ; Postfix form: IDENT ++ / IDENT -- — consume the trailing operator
+    mov eax, [current_token]
+    cmp eax, TOK_PLUSPLUS
+    je .inc_consume_op
+    cmp eax, TOK_MINUSMINUS
+    jne .inc_no_trailing_op
+.inc_consume_op:
+    call advance
+.inc_no_trailing_op:
+
+    ; Variable must be numeric
+    mov rdi, r14
+    call sym_get_type
+    mov rbx, rax ; variable type
+    cmp rbx, TYPE_INT
+    je .inc_const_int
+    cmp rbx, TYPE_BYTE
+    je .inc_const_int
+    cmp rbx, TYPE_FLOAT
+    je .inc_const_float
+    mov rdi, err_type_mismatch
     jmp compile_error
+
+.inc_const_int:
+    ; Constant 1 as an int vreg
+    call alloc_vreg
+    mov r15, rax
+    mov rdi, IR_LOAD_IMM
+    mov rsi, TYPE_INT
+    mov rdx, r15
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, 1
+    xor r10, r10
+    call emit_ir
+    jmp .inc_op
+
+.inc_const_float:
+    ; Constant 1.0 as a float vreg (double bits 0x3FF0000000000000)
+    call alloc_vreg
+    mov r15, rax
+    mov rdi, IR_LOAD_FIMM
+    mov rsi, TYPE_FLOAT
+    mov rdx, r15
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, 0x3FF0000000000000
+    xor r10, r10
+    call emit_ir
+
+.inc_op:
+    ; Load current value: vreg r13 = var
+    call alloc_vreg
+    mov r13, rax
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_LOAD_VAR
+    mov rsi, rbx
+    mov rdx, r13
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+    ; result = old_value +- 1
+    call alloc_vreg
+    push rax ; result vreg
+    mov rdi, IR_ADD
+    cmp r12d, TOK_PLUSPLUS
+    je .inc_is_add
+    mov rdi, IR_SUB
+.inc_is_add:
+    mov rsi, rbx
+    mov rdx, [rsp]
+    mov rcx, r13
+    mov r8, r15
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+
+    ; Store back: var = result
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax
+    mov rdi, IR_STORE_VAR
+    mov rsi, rbx
+    xor rdx, rdx
+    mov rcx, [rsp]
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+    add rsp, 8
+
+    ; Mark initialized
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_init
+    ret
+
+.inc_undef:
+    jmp undef_error
 
 ; Helper: skip an indented block (consume until DEDENT)
 .skip_block:
@@ -2539,6 +3199,7 @@ parse_stmt:
 
 .explicit_decl:
     ; explicit_decl: type_expr [ "[" type_expr "]" ] <IDENT> [ "=" expr ]
+    mov dword [pending_elem_type], 0
     mov r12, [tok_ival] ; Save type ID
     call advance ; consume TYPE
     
@@ -2580,6 +3241,7 @@ parse_stmt:
     cmp eax, TOK_TYPE
     jne .param_type_err
     mov r13, [tok_ival] ; element type ID
+    mov [pending_elem_type], r13d
     call advance ; consume element type
     ; Check if this is arr[T, N] — needs a second parameter
     cmp r12, TYPE_ARR
@@ -2629,6 +3291,12 @@ parse_stmt:
     je full_error
 
     mov r14, rax ; Save symbol index
+
+    ; Record container element type (seq[T]/dict[T]/arr[T,N]) on the symbol
+    mov edi, r14d
+    mov esi, [pending_elem_type]
+    extern sym_set_elem_type
+    call sym_set_elem_type
 
     ; Check for _ prefix (but not __) → mark as private
     cmp qword [ident_len], 1
@@ -2714,8 +3382,12 @@ parse_stmt:
 .not_dict_init:
     call parse_expr ; rax = vreg, rdx = type
     
-    ; Type check
-    cmp rdx, r12
+    ; Type check (rax holds the expr vreg — save it across the check;
+    ; .type_ok expects rax = vreg)
+    push rax ; save expr vreg
+    mov rax, r12 ; declared type
+    call types_compatible
+    pop rax ; restore expr vreg (does not alter ZF)
     je .type_ok
     cmp r12, TYPE_BYTE
     jne type_error
@@ -2900,8 +3572,15 @@ parse_stmt:
     jmp .type_ok
 .type_ok:
     
+    ; If the declared type is a struct, the RHS is a struct pointer vreg;
+    ; copy it field-by-field into this variable's slot (value semantics).
+    push rax ; save expr vreg
+    mov rdi, r12
+    call type_get_kind
+    cmp al, TYPE_COMPLEX
+    je .type_ok_struct
+
     ; Emit IR_STORE_VAR
-    push rax
     ; imm = variable offset
     mov rdi, r14
     call sym_get_offset
@@ -2913,9 +3592,30 @@ parse_stmt:
     xor r8, r8
     xor r10, r10
     call emit_ir
-    pop rax
-    
+    jmp .type_ok_done
+
+.type_ok_struct:
+    ; [rsp] = rhs ptr vreg, r12 = struct type id, r14 = sym idx
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax ; imm = destination absolute address
+    call alloc_vreg
+    mov rdx, rax ; dst ptr vreg
+    push rax
+    mov rdi, IR_LEA_VAR
+    mov rsi, r12
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+    pop rdi ; dst ptr vreg
+    mov rsi, [rsp] ; rhs ptr vreg
+    mov rdx, r12 ; struct type id
+    call emit_struct_copy
+
+.type_ok_done:
     ; Mark as initialized
+    pop rax
     mov rdi, r14
     mov rsi, 1
     call sym_set_init
@@ -2930,11 +3630,29 @@ parse_stmt:
 
 .mutation:
     ; mutation: ":" <IDENT> "=" expr  OR  ":" <IDENT> "." method "(" args ")"
+    ; Qualified mutation: ":" <mod> "." <name> "=" expr
     call advance ; consume ':'
     mov eax, [current_token]
     cmp eax, TOK_IDENT
     jne expected_ident
-    
+
+    call lexer_peek_token
+    cmp eax, TOK_DOT
+    jne .mut_not_qualified
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call module_lookup
+    cmp rax, -1
+    je .mut_not_qualified
+    mov r15, rax ; module id
+    call advance ; consume module name → '.'
+    mov edi, TOK_DOT
+    call expect ; consume '.' → current token = member IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    jmp parse_qualified_mutation
+.mut_not_qualified:
     ; Lookup variable
     mov rdi, [tok_str_ptr]
     mov rsi, [tok_str_len]
@@ -2943,6 +3661,11 @@ parse_stmt:
     je .undef_error
     
     mov r14, rax ; Save symbol index
+    ; Constants cannot be mutated (design.md §4.17).
+    mov rdi, r14
+    call sym_is_const
+    test rax, rax
+    jnz .mutation_not_allowed
     ; Per design.md §3.1: writing `:name =` makes the variable mutable.
     ; Mark it mutable now (retroactive mutability).
     mov rdi, r14
@@ -2998,8 +3721,7 @@ parse_stmt:
     push rdx
     call sym_get_type
     pop rdx
-    
-    cmp rax, rdx
+    call types_compatible
     je .mut_type_ok
     cmp rax, TYPE_BYTE
     jne type_error
@@ -3057,6 +3779,12 @@ parse_stmt:
     je .undef_error
     cmp r15d, 65
     jae .multi_err
+    push rax
+    mov rdi, rax
+    call sym_is_const
+    test rax, rax
+    jnz .mutation_not_allowed
+    pop rax
     mov [mut_target_syms + r15*4], eax
     inc r15d
     call advance ; consume IDENT
@@ -3159,6 +3887,7 @@ parse_stmt:
     ; Parse RHS expression
     call parse_expr ; rax = rhs vreg, rdx = rhs type
     mov r15, rax ; rhs vreg
+    push rdx ; rhs type (for mixed-arithmetic promotion in .compound_emit)
 
     ; Emit binary operation: dst = old_value op rhs
     call alloc_vreg
@@ -3221,6 +3950,7 @@ parse_stmt:
 .compound_emit:
     ; rdi = IR opcode
     pop rdx ; result vreg
+    pop r8 ; rhs type
     pop rsi ; variable type (float compounds must be float-typed)
     ; String += must desugar to concat, not integer add on pointers
     cmp rsi, TYPE_STR
@@ -3229,6 +3959,30 @@ parse_stmt:
     jne type_error
     mov rdi, IR_STR_CONCAT
 .compound_not_str:
+    ; int/byte var op= float RHS → float dominates, but the result can't be
+    ; stored back into an int/byte var → type mismatch.
+    cmp rsi, TYPE_INT
+    je .compound_rhs_float_check
+    cmp rsi, TYPE_BYTE
+    jne .compound_promote
+.compound_rhs_float_check:
+    cmp r8, TYPE_FLOAT
+    je .compound_type_error
+.compound_promote:
+    ; float var op= int/byte RHS → promote RHS to float (design §5.2)
+    cmp rsi, TYPE_FLOAT
+    jne .compound_emit_op
+    cmp r8, TYPE_FLOAT
+    je .compound_emit_op
+    push rdi ; save IR opcode
+    push rdx ; save result vreg (coerce_to_float clobbers rdx)
+    mov rdi, r15
+    mov rsi, r8
+    call coerce_to_float
+    pop rdx
+    pop rdi
+    mov r15, rax
+.compound_emit_op:
     mov rcx, r13 ; src1 = old value vreg
     mov r8, r15 ; src2 = rhs vreg
     xor r9, r9
@@ -3264,6 +4018,11 @@ parse_stmt:
     mov rdi, err_syntax
     jmp compile_error
 
+.compound_type_error:
+    ; Reached from .compound_emit after all three stack items are popped.
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
 .mutation_method:
     ; :name.method(args) — load variable, then dispatch method
     ; First, load the variable to get its vreg
@@ -3286,7 +4045,16 @@ parse_stmt:
     mov r13, rax ; type
     mov r12, r15 ; vreg
 
+    ; Struct vars hold pointers: load with LEA_VAR, not LOAD_VAR.
+    mov rdi, r13
+    call type_get_kind
+    cmp al, TYPE_COMPLEX
+    jne .mut_method_load_var
+    mov rdi, IR_LEA_VAR
+    jmp .mut_method_emit_load
+.mut_method_load_var:
     mov rdi, IR_LOAD_VAR
+.mut_method_emit_load:
     mov rsi, r13
     mov rdx, r12
     xor rcx, rcx
@@ -3313,6 +4081,100 @@ parse_stmt:
     jmp .mut_method_type_err
 
 .mut_method_name_ok:
+    ; Struct base → field access: :q.x = v or a chain :q.x.y = v
+    mov rdi, r13
+    call type_get_kind
+    cmp al, TYPE_COMPLEX
+    jne .mut_real_method_name
+    ; r12 = base pointer vreg, r13 = struct type; field name is current token
+    mov rdi, r13
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call type_struct_find_field ; rax = offset, rcx = field type
+    cmp rax, -1
+    je .mut_struct_field_miss
+    push rax                ; [rsp]   = field offset
+    push rcx                ; [rsp+8] = field type
+    call advance            ; consume field name
+    mov eax, [current_token]
+    cmp eax, TOK_ASSIGN
+    je .mut_field_store
+    ; Chain: :q.x.y = v — LEA_FIELD down into the field, update base, loop.
+    pop rcx                 ; field type
+    pop r9                  ; field offset
+    push rcx                ; save field type across alloc_vreg
+    push r9                 ; save offset across alloc_vreg
+    call alloc_vreg
+    mov rbx, rax            ; new base vreg
+    pop r9
+    pop rcx
+    push rcx                ; save field type across emit_ir
+    mov rdi, IR_LEA_FIELD
+    mov rsi, rcx            ; type
+    mov rdx, rbx            ; dst = new base vreg
+    mov rcx, r12            ; src1 = current base vreg
+    xor r8, r8
+    ; r9 = field offset
+    xor r10, r10
+    call emit_ir
+    pop rcx                 ; field type
+    mov [vreg_type_map + rbx * 4], ecx
+    mov r12, rbx
+    mov r13, rcx
+    jmp .mut_method_loop
+
+.mut_struct_field_miss:
+    ; Current token is the unknown field name. Stash it, then report
+    ; "Unknown field '<name>' on type <struct>". r13 = struct type id.
+    mov rsi, [tok_str_ptr]
+    mov rcx, [tok_str_len]
+    cmp rcx, 31
+    jle .mut_fnlen_ok
+    mov rcx, 31
+.mut_fnlen_ok:
+    mov [method_len], rcx
+    lea rdi, [method_buf]
+    test rcx, rcx
+    jz .mut_fcopy_done
+.mut_fcopy:
+    mov al, [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .mut_fcopy
+.mut_fcopy_done:
+    lea rdi, [method_buf]
+    add rdi, [method_len]
+    mov byte [rdi], 0
+    jmp unknown_field_error
+
+.mut_field_store:
+    ; :q.x = value — STORE_FIELD [base + off] = value
+    pop rcx                 ; field type
+    pop r9                  ; field offset
+    push rcx                ; save field type across expect/parse_expr
+    push r9                 ; save offset across expect/parse_expr
+    mov edi, TOK_ASSIGN
+    call expect             ; consume '='
+    call parse_expr         ; rax = value vreg, rdx = value type
+    pop r9                  ; field offset
+    pop rcx                 ; field type
+    push rax                ; save value vreg
+    mov rax, rcx            ; field type
+    call types_compatible
+    pop r8                  ; r8 = value vreg
+    jne .mut_method_type_err
+    mov rdi, IR_STORE_FIELD
+    mov rsi, rcx            ; field type
+    xor rdx, rdx
+    mov rcx, r12            ; base pointer vreg
+    ; r9 = offset, r8 = value vreg
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_done
+
+.mut_real_method_name:
     ; Copy method name into method_buf
     mov rsi, [tok_str_ptr]
     mov rcx, [tok_str_len]
@@ -3346,7 +4208,193 @@ parse_stmt:
     ; Dispatch by type
     cmp r13, TYPE_SEQ
     je .mut_seq_dispatch
-    jmp .mut_method_type_err
+    cmp r13, TYPE_FILE
+    je .mut_file_dispatch
+    jmp .mut_method_unknown_err
+
+.mut_file_dispatch:
+    lea rdi, [str_write_m]
+    call ident_is
+    test rax, rax
+    jnz .mut_file_write
+    lea rdi, [str_writeln]
+    call ident_is
+    test rax, rax
+    jnz .mut_file_writeln
+    lea rdi, [str_write_bytes]
+    call ident_is
+    test rax, rax
+    jnz .mut_file_write_bytes
+    lea rdi, [str_seek]
+    call ident_is
+    test rax, rax
+    jnz .mut_file_seek
+    lea rdi, [str_seek_end]
+    call ident_is
+    test rax, rax
+    jnz .mut_file_seek_end
+    lea rdi, [str_flush]
+    call ident_is
+    test rax, rax
+    jnz .mut_file_flush
+    lea rdi, [str_close_m]
+    call ident_is
+    test rax, rax
+    jnz .mut_file_close
+    jmp .mut_method_unknown_err
+
+.mut_file_write:
+    ; :f.write(s) — void
+    call parse_expr ; s vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_STR
+    jne .mut_method_type_err
+    mov rdi, IR_FILE_WRITE
+    mov rsi, TYPE_FILE
+    xor rdx, rdx       ; dst = 0 (void)
+    mov rcx, r12       ; src1 = handle
+    mov r8, r14        ; src2 = s
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_loop
+
+.mut_file_writeln:
+    ; :f.writeln(s) — void
+    call parse_expr ; s vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_STR
+    jne .mut_method_type_err
+    mov rdi, IR_FILE_WRITELN
+    mov rsi, TYPE_FILE
+    xor rdx, rdx       ; dst = 0 (void)
+    mov rcx, r12       ; src1 = handle
+    mov r8, r14        ; src2 = s
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_loop
+
+.mut_file_write_bytes:
+    ; :f.write_bytes(b) — void
+    call parse_expr ; b vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_SEQ
+    jne .mut_method_type_err
+    mov rdi, IR_FILE_WRITE_BYTES
+    mov rsi, TYPE_FILE
+    xor rdx, rdx       ; dst = 0 (void)
+    mov rcx, r12       ; src1 = handle
+    mov r8, r14        ; src2 = b
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_loop
+
+.mut_file_seek:
+    ; :f.seek(pos) — void
+    call parse_expr ; pos vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_INT
+    jne .mut_method_type_err
+    mov rdi, IR_FILE_SEEK
+    mov rsi, TYPE_FILE
+    xor rdx, rdx       ; dst = 0 (void)
+    mov rcx, r12       ; src1 = handle
+    mov r8, r14        ; src2 = pos
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_loop
+
+.mut_file_seek_end:
+    ; :f.seek_end(n) — void (n bytes before end; default 0)
+    mov r14, r12 ; save handle vreg
+    mov eax, [current_token]
+    cmp eax, TOK_RPAREN
+    je .mut_seek_end_default
+    call parse_expr ; n vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r15
+    cmp rdx, TYPE_INT
+    jne .mut_method_type_err
+    jmp .mut_seek_end_emit
+.mut_seek_end_default:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    push rax
+    mov rdi, IR_LOAD_IMM
+    xor rsi, rsi
+    mov rdx, [rsp]
+    xor rcx, rcx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    pop r15
+.mut_seek_end_emit:
+    mov r12, r14 ; restore handle vreg
+    mov rdi, IR_FILE_SEEK_END
+    mov rsi, TYPE_FILE
+    xor rdx, rdx
+    mov rcx, r12     ; src1 = handle
+    mov r8, r15      ; src2 = n
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_loop
+
+.mut_file_flush:
+    ; :f.flush() — void
+    mov edi, TOK_RPAREN
+    call expect
+    mov rdi, IR_FILE_FLUSH
+    mov rsi, TYPE_FILE
+    xor rdx, rdx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_loop
+
+.mut_file_close:
+    ; :f.close() — void
+    mov edi, TOK_RPAREN
+    call expect
+    mov rdi, IR_FILE_CLOSE
+    mov rsi, TYPE_FILE
+    xor rdx, rdx
+    mov rcx, r12
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .mut_method_loop
 
 .mut_seq_dispatch:
     lea rdi, [str_push]
@@ -3560,13 +4608,7 @@ parse_stmt:
     jmp compile_error
 
 .mut_method_unknown_err:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    mov rdi, err_unknown_method
-    jmp compile_error
+    jmp unknown_method_error
 
 .mutation_bracket:
     ; :name[index] = value — seq bracket write
@@ -3652,14 +4694,59 @@ parse_stmt:
     ret
 
 .undef_error:
-    mov rdi, err_undef
-    jmp compile_error
+    jmp undef_error
 
 .mutation_not_allowed:
     mov rdi, err_immutable
     jmp compile_error
 
 .ident_stmt:
+    ; Qualified access: mod.name (design.md §17.2). A registered module name
+    ; followed by '.' starts a qualified reference — either a call statement
+    ; `mod.f(...)` or a mutation that requires the ':' sigil.
+    call lexer_peek_token
+    cmp eax, TOK_DOT
+    jne .ident_stmt_not_qual
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call module_lookup
+    cmp rax, -1
+    je .ident_stmt_not_qual
+    mov r15, rax ; module id
+    call advance ; consume module name → '.'
+    mov edi, TOK_DOT
+    call expect ; consume '.' → current token = member IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    call save_ident
+    call lexer_peek_token
+    cmp eax, TOK_LPAREN
+    jne .ident_stmt_qual_sigil
+    call parse_qualified_expr
+    ret
+.ident_stmt_qual_sigil:
+    mov rdi, err_sigil_req
+    jmp compile_error
+.ident_stmt_not_qual:
+    ; A struct type name reaches here as TOK_IDENT (only builtin types are
+    ; TOK_TYPE). If the ident names a registered struct, treat this as a
+    ; declaration:  Point p [= Point{...}]
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call type_lookup
+    cmp rax, -1
+    je .ident_stmt_not_struct
+    push rax
+    mov rdi, rax
+    call type_get_kind
+    mov rcx, rax
+    pop rax
+    cmp rcx, TYPE_COMPLEX
+    jne .ident_stmt_not_struct
+    mov [tok_ival], rax
+    jmp .explicit_decl
+.ident_stmt_not_struct:
     ; Could be type-inferred declaration: x = 5
     ; or illegal reassignment without ':': x = 5 (when x exists)
     mov rdi, [tok_str_ptr]
@@ -3670,6 +4757,20 @@ parse_stmt:
     
     ; Variable exists. Check if it's mutable (from a prior :name = site).
     mov r14, rax ; Save symbol index
+
+    ; Postfix inc/dec: x++ / x-- (statement form, grammar.md §13)
+    call lexer_peek_token
+    cmp eax, TOK_PLUSPLUS
+    je .ident_inc_dec
+    cmp eax, TOK_MINUSMINUS
+    je .ident_inc_dec
+
+    ; Method-call statement: ident.method(args) (design.md §15.4)
+    ; Same as the ':' mutation form, but without the sigil.
+    call lexer_peek_token
+    cmp eax, TOK_DOT
+    je .ident_method_call
+
     mov rdi, r14
     call sym_is_mutable
     test rax, rax
@@ -3711,7 +4812,7 @@ parse_stmt:
     push rdx
     call sym_get_type
     pop rdx
-    cmp rax, rdx
+    call types_compatible
     je .ident_reassign_type_ok
     jmp type_error
 .ident_reassign_type_ok:
@@ -3731,6 +4832,16 @@ parse_stmt:
 .immutable_reassign:
     mov rdi, err_sigil_req
     jmp compile_error
+
+.ident_method_call:
+    ; Method-call statement without ':' sigil (e.g. f.writeln("x")).
+    ; r14 = sym_idx, current token = IDENT. Identical handling to the
+    ; ':' mutation method form.
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_mutable
+    call advance ; consume IDENT
+    jmp .mutation_method
 
 .ident_compound:
     ; Compound assignment for mutable variable without ':' prefix
@@ -3764,6 +4875,7 @@ parse_stmt:
     ; Parse RHS expression
     call parse_expr ; rax = rhs vreg, rdx = rhs type
     mov r15, rax ; rhs vreg
+    push rdx ; rhs type (for mixed-arithmetic promotion in .ident_compound_emit)
 
     ; Emit binary operation
     call alloc_vreg
@@ -3825,6 +4937,7 @@ parse_stmt:
 
 .ident_compound_emit:
     pop rdx ; result vreg
+    pop r8 ; rhs type
     pop rsi ; variable type (float compounds must be float-typed)
     ; String += must desugar to concat, not integer add on pointers
     cmp rsi, TYPE_STR
@@ -3833,6 +4946,30 @@ parse_stmt:
     jne type_error
     mov rdi, IR_STR_CONCAT
 .ident_compound_not_str:
+    ; int/byte var op= float RHS → float dominates, but the result can't be
+    ; stored back into an int/byte var → type mismatch.
+    cmp rsi, TYPE_INT
+    je .ident_compound_rhs_float_check
+    cmp rsi, TYPE_BYTE
+    jne .ident_compound_promote
+.ident_compound_rhs_float_check:
+    cmp r8, TYPE_FLOAT
+    je .ident_compound_type_error
+.ident_compound_promote:
+    ; float var op= int/byte RHS → promote RHS to float (design §5.2)
+    cmp rsi, TYPE_FLOAT
+    jne .ident_compound_emit_op
+    cmp r8, TYPE_FLOAT
+    je .ident_compound_emit_op
+    push rdi ; save IR opcode
+    push rdx ; save result vreg (coerce_to_float clobbers rdx)
+    mov rdi, r15
+    mov rsi, r8
+    call coerce_to_float
+    pop rdx
+    pop rdi
+    mov r15, rax
+.ident_compound_emit_op:
     mov rcx, r13 ; src1 = old value
     mov r8, r15 ; src2 = rhs
     xor r9, r9
@@ -3856,7 +4993,24 @@ parse_stmt:
     call emit_ir
     ret
 
+.ident_compound_type_error:
+    ; Reached from .ident_compound_emit after all three stack items are popped.
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
+.ident_inc_dec:
+    ; Postfix inc/dec statement: x++ / x--
+    ; r14 = symbol index, current_token = IDENT, eax = peeked op token
+    mov r12d, eax
+    jmp .inc_dec_emit
+
 .inferred_decl:
+    ; ++/-- on an undeclared variable is an error (no self-evident mutation target)
+    call lexer_peek_token
+    cmp eax, TOK_PLUSPLUS
+    je .inc_undef
+    cmp eax, TOK_MINUSMINUS
+    je .inc_undef
     ; Save identifier name and length
     call save_ident
     call advance ; consume IDENT
@@ -3917,123 +5071,222 @@ parse_stmt:
     ret
 
 .output_stmt:
-    ; output_stmt: output "(" expr ["," expr]* ")"
-    push r13     ; Preserve r13
-    
+    ; output_stmt: output "(" [arg ("," arg)*] ")"
+    ;   arg := expr | "sep" "=" expr | "end" "=" expr
+    ; Values are printed space-separated (default sep=" ") and terminated
+    ; by end (default end="\n"). sep/end are keyword args only.
+    push rbx      ; sep vreg (0 = default " ")
+    push r13      ; sep type
+    push r14      ; end vreg (0 = default "\n")
+    push r15      ; end type
+    push r12      ; arg count
+    xor ebx, ebx
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    xor r12d, r12d
+
     call advance ; consume output
     mov edi, TOK_LPAREN
-    call expect ; consume '('
-    
-    ; Parse first argument
-    call parse_expr ; rax = vreg, rdx = type
-    mov r12, rdx ; Save type
-    push rax     ; save expr vreg on stack
+    call expect  ; consume '('
 
-    ; Check if next token is comma (multi-arg) or rparen (single arg)
+.parse_loop:
     mov eax, [current_token]
-    cmp eax, TOK_COMMA
-    je .multi_arg
     cmp eax, TOK_RPAREN
-    je .single_arg
+    je .args_done
+    cmp eax, TOK_IDENT
+    jne .parse_value_arg
 
-    ; Could be precision for float: "," integer_literal
-    ; For now, treat as error
-    jmp .single_arg
+    ; IDENT — could be a "sep=" or "end=" keyword arg.
+    push rdi
+    mov rdi, [tok_str_ptr]
+    mov eax, [tok_str_len]
+    cmp eax, 3
+    jne .not_kwarg
+    movzx edx, byte [rdi]
+    cmp dl, 's'
+    je .try_sep_kwarg
+    cmp dl, 'e'
+    jne .not_kwarg
+    cmp byte [rdi + 1], 'n'
+    jne .not_kwarg
+    cmp byte [rdi + 2], 'd'
+    jne .not_kwarg
+    ; "end" — check next token is '='
+    call lexer_peek_token
+    cmp eax, TOK_ASSIGN
+    jne .not_kwarg
+    pop rdi
+    jmp .parse_kwarg_end
+.try_sep_kwarg:
+    cmp byte [rdi + 1], 'e'
+    jne .not_kwarg
+    cmp byte [rdi + 2], 'p'
+    jne .not_kwarg
+    ; "sep" — check next token is '='
+    call lexer_peek_token
+    cmp eax, TOK_ASSIGN
+    jne .not_kwarg
+    pop rdi
+    jmp .parse_kwarg_sep
+.not_kwarg:
+    pop rdi
+    jmp .parse_value_arg
 
-.single_arg:
-    ; Single argument output
-    mov edi, TOK_RPAREN
-    call expect ; consume ')'
-    pop rcx ; restore src1 vreg
-    
-    cmp r12, TYPE_INT
-    je .single_out_int
-    cmp r12, TYPE_FLOAT
-    je .single_out_float
-    cmp r12, TYPE_BOOL
-    je .single_out_bool
-    cmp r12, TYPE_STR
-    je .single_out_str
-    cmp r12, TYPE_CHAR
-    je .single_out_char
-    cmp r12, TYPE_BYTE
-    je .single_out_int
-    mov rdi, err_type_mismatch
+.parse_kwarg_sep:
+    test rbx, rbx
+    jnz .dup_kwarg
+    call .parse_kwarg_value
+    mov rbx, rax
+    mov r13d, edx
+    jmp .parse_after_arg
+.parse_kwarg_end:
+    test r14, r14
+    jnz .dup_kwarg
+    call .parse_kwarg_value
+    mov r14, rax
+    mov r15d, edx
+    jmp .parse_after_arg
+.dup_kwarg:
+    mov rdi, err_syntax
     jmp compile_error
 
-.single_out_int:
+.parse_kwarg_value:
+    ; current_token = kwarg name; value must be str or char.
+    call advance ; consume kwarg name
+    mov edi, TOK_ASSIGN
+    call expect  ; consume '='
+    call parse_expr ; rax = vreg, rdx = type
+    cmp edx, TYPE_STR
+    je .kwarg_type_ok
+    cmp edx, TYPE_CHAR
+    je .kwarg_type_ok
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.kwarg_type_ok:
+    ret
+
+.parse_value_arg:
+    call parse_expr ; rax = vreg, rdx = type
+    cmp r12d, 256
+    jae .too_many_args
+    mov [out_arg_vregs + r12 * 2], ax
+    mov [out_arg_types + r12 * 4], edx
+    inc r12d
+.parse_after_arg:
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .expect_rparen
+    call advance
+    jmp .parse_loop
+.expect_rparen:
+    mov edi, TOK_RPAREN
+    call expect
+    jmp .emit_output
+.args_done:
+    mov edi, TOK_RPAREN
+    call expect
+    jmp .emit_output
+.too_many_args:
+    mov rdi, err_syntax
+    jmp compile_error
+
+.emit_output:
+    ; Emit each value, separated by sep, then end.
+    xor r8d, r8d ; i = 0
+.emit_value_loop:
+    cmp r8d, r12d
+    jae .emit_end
+    movzx eax, word [out_arg_vregs + r8 * 2]
+    mov edx, dword [out_arg_types + r8 * 4]
+    push r8
+    call .emit_output_value ; rax = vreg, edx = type
+    pop r8
+    ; sep between values
+    lea eax, [r8 + 1]
+    cmp eax, r12d
+    jae .no_sep
+    push r8
+    call .emit_sep
+    pop r8
+.no_sep:
+    inc r8d
+    jmp .emit_value_loop
+.emit_end:
+    push r8
+    call .emit_end_val
+    pop r8
+    pop r12
+    pop r15
+    pop r14
+    pop r13
+    pop rbx
+    ret
+
+; Emit output IR for value vreg in rax, type in edx.
+.emit_output_value:
+    mov rcx, rax ; src1
+    cmp edx, TYPE_INT
+    je .eov_int
+    cmp edx, TYPE_FLOAT
+    je .eov_float
+    cmp edx, TYPE_BOOL
+    je .eov_bool
+    cmp edx, TYPE_STR
+    je .eov_str
+    cmp edx, TYPE_CHAR
+    je .eov_char
+    cmp edx, TYPE_BYTE
+    je .eov_int
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.eov_int:
     mov rdi, IR_OUT_INT
     xor r9, r9
-    jmp .single_emit_out
-.single_out_float:
+    jmp .eov_emit
+.eov_float:
     mov rdi, IR_OUT_FLOAT
     xor r9, r9
-    jmp .single_emit_out
-.single_out_bool:
+    jmp .eov_emit
+.eov_bool:
     mov rdi, IR_OUT_BOOL
     xor r9, r9
-    jmp .single_emit_out
-.single_out_str:
+    jmp .eov_emit
+.eov_str:
     mov rdi, IR_OUT_STR
     xor r9, r9
-    jmp .single_emit_out
-.single_out_char:
+    jmp .eov_emit
+.eov_char:
     mov rdi, IR_OUT_CHAR
     xor r9, r9
-.single_emit_out:
-    mov rsi, r12
-    xor rdx, rdx
+.eov_emit:
+    mov rsi, rdx ; type
+    xor rdx, rdx ; no dst
     xor r8, r8
     xor r10, r10
     call emit_ir
-    pop r13
     ret
 
-.multi_arg:
-    ; We have multiple arguments. Emit the first one, then loop.
-    pop rcx ; restore first arg vreg
-    call .emit_output_for_type ; emit output for first arg
-
-.arg_loop:
-    ; Check if current token is comma
-    mov eax, [current_token]
-    cmp eax, TOK_COMMA
-    jne .multi_arg_done
-    call advance ; consume comma
-
-    ; Emit space separator
+; Emit sep: custom vreg (rbx, type r13d) or default ' '.
+.emit_sep:
+    test rbx, rbx
+    jz .emit_default_sep
+    mov rax, rbx
+    mov edx, r13d
+    jmp .emit_output_value
+.emit_default_sep:
     call .emit_space
-
-    ; Parse next argument
-    call parse_expr
-    mov r12, rdx ; save type
-    push rax     ; save vreg
-    pop rcx      ; vreg
-    call .emit_output_for_type
-    jmp .arg_loop
-
-.multi_arg_done:
-    mov edi, TOK_RPAREN
-    call expect ; consume ')'
-    ; Emit newline
-    call .emit_newline
-    pop r13
     ret
 
-; Helper: emit output IR for value in rcx, type in r12
-.emit_output_for_type:
-    cmp r12, TYPE_INT
-    je .out_int
-    cmp r12, TYPE_FLOAT
-    je .out_float_no_prec
-    cmp r12, TYPE_BOOL
-    je .out_bool
-    cmp r12, TYPE_STR
-    je .out_str
-    cmp r12, TYPE_CHAR
-    je .out_char
-    cmp r12, TYPE_BYTE
-    je .out_int
+; Emit end: custom vreg (r14, type r15d) or default '\n'.
+.emit_end_val:
+    test r14, r14
+    jz .emit_default_end
+    mov rax, r14
+    mov edx, r15d
+    jmp .emit_output_value
+.emit_default_end:
+    call .emit_newline
     ret
 
 ; Helper: emit a space character output
@@ -4082,50 +5335,14 @@ parse_stmt:
     call emit_ir
     ret
 
-.error_syntax_prec:
-    mov rdi, err_syntax
-    jmp compile_error
-
-.error_prec_type_mismatch:
-    mov rdi, err_type_mismatch
-    jmp compile_error
-
-.out_char:
-    mov rdi, IR_OUT_CHAR
-    xor r9, r9
-    jmp .emit_out
-.out_int:
-    mov rdi, IR_OUT_INT
-    xor r9, r9
-    jmp .emit_out
-.out_float_no_prec:
-    xor r13, r13
-.out_float:
-    mov rdi, IR_OUT_FLOAT
-    mov r9, r13  ; Pass precision in r9 (imm)
-    jmp .emit_out
-.out_bool:
-    mov rdi, IR_OUT_BOOL
-    xor r9, r9
-    jmp .emit_out
-.out_str:
-    mov rdi, IR_OUT_STR
-    xor r9, r9
-.emit_out:
-    mov rsi, r12 ; type
-    xor rdx, rdx ; no dst
-    xor r8, r8
-    ; r9 already contains the precision
-    xor r10, r10
-    call emit_ir
-    ret
-
 ; Parse Expression
 parse_expr:
-    jmp parse_comparison
+    ; Precedence chain (loosest to tightest) per grammar §27:
+    ; or -> and -> not -> comparison -> ?? -> & | ^ -> + - -> * / % << >> -> unary -> postfix
+    jmp parse_bool_or
 
 parse_comparison:
-    ; Comparison operators: == != < > <= >= (lowest precedence)
+    ; Comparison operators: == != < > <= >= is is not
     ; Supports chained comparisons: a < b < c means (a < b) and (b < c)
     push rbx
     push r12
@@ -4149,15 +5366,85 @@ parse_comparison:
     je .do_cmp
     cmp eax, TOK_GE
     je .do_cmp
+    cmp eax, TOK_IS
+    je .do_cmp
+    cmp eax, TOK_IS_NOT
+    je .do_cmp
+    cmp eax, TOK_IN
+    je .do_cmp
     jmp .done
 .do_cmp:
     ; Save operator token type
     mov r14, rax
     call advance
     push r12
+    push r13       ; save left type across parse_null_coalesce
     call parse_null_coalesce
     mov r15, rax
+    pop r13        ; restore left type
     pop r12
+    push rdx       ; [rsp] = right operand type
+
+    ; `is`/`is not` are always identity (pointer) compares, even for structs.
+    cmp r14, TOK_IS
+    je .scalar_cmp
+    cmp r14, TOK_IS_NOT
+    je .scalar_cmp
+    cmp r14, TOK_IN
+    je .do_membership
+    ; Struct comparison: if either operand is a struct, compare field-by-field.
+    mov edi, r13d
+    call type_get_kind
+    cmp al, TYPE_COMPLEX
+    je .do_struct_cmp
+    mov edi, [rsp]
+    call type_get_kind
+    cmp al, TYPE_COMPLEX
+    je .do_struct_cmp
+    jmp .scalar_cmp
+.do_membership:
+    ; `x in collection` (design.md §5.6). r12 = element vreg, r15 = collection
+    ; vreg, [rsp] = collection type.
+    mov eax, [rsp]
+    cmp eax, TYPE_SEQ
+    je .mem_seq
+    cmp eax, TYPE_STR
+    je .mem_str
+    cmp eax, TYPE_DICT
+    je .mem_dict
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.mem_seq:
+    add rsp, 8     ; discard collection type
+    ; seq.contains(element): src1 = seq, src2 = element
+    push r12
+    push r15
+    call alloc_vreg
+    mov rbx, rax
+    pop r15
+    pop r12
+    mov rdi, IR_SEQ_CONTAINS
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    mov rcx, r15    ; seq
+    mov r8, r12     ; element
+    mov r9, SEQ_ELEMENT_SIZE
+    xor r10, r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_BOOL
+    jmp .done
+.mem_str:
+    ; str `in` (substring search) is not yet implemented — runtime helper absent.
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.mem_dict:
+    ; dict `in` (key lookup) is not yet implemented.
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
+.scalar_cmp:
+    add rsp, 8     ; discard right type
     push r12
     push r15
     call alloc_vreg
@@ -4185,12 +5472,22 @@ parse_comparison:
     je .cond_le
     cmp r14, TOK_GE
     je .cond_ge
+    cmp r14, TOK_IS
+    je .cond_is
+    cmp r14, TOK_IS_NOT
+    je .cond_is_not
     jmp .cond_done
 .cond_eq:
     xor r10, r10       ; COND_EQ = 0
     jmp .cond_done
 .cond_ne:
     mov r10, 1         ; COND_NE = 1
+    jmp .cond_done
+.cond_is:
+    xor r10, r10       ; identity == EQ for value/reference comparisons
+    jmp .cond_done
+.cond_is_not:
+    mov r10, 1         ; identity-ne == NE
     jmp .cond_done
 .cond_lt:
     mov r10, 2         ; COND_LT = 2
@@ -4206,7 +5503,33 @@ parse_comparison:
 .cond_done:
     xor r9, r9
     call emit_ir
+    jmp .chain_check
 
+.do_struct_cmp:
+    ; Both operands must be structs of the same type; op must be == or !=
+    mov eax, [rsp]     ; right type
+    cmp eax, r13d
+    jne .cmp_struct_err
+    cmp r14, TOK_EQ
+    je .cmp_struct_eq
+    cmp r14, TOK_NE
+    je .cmp_struct_ne
+.cmp_struct_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.cmp_struct_eq:
+    xor rcx, rcx       ; mode = EQ
+    jmp .cmp_struct_call
+.cmp_struct_ne:
+    mov rcx, 1         ; mode = NE
+.cmp_struct_call:
+    add rsp, 8         ; discard right type
+    mov rdi, r12       ; ptr_a
+    mov rsi, r15       ; ptr_b
+    mov rdx, r13       ; struct type id
+    call emit_struct_cmp
+    mov rbx, rax       ; result vreg
+.chain_check:
     ; Check for chained comparison: another comparison op follows?
     ; If so, we need to AND this result with the next comparison.
     ; The right operand (r15) becomes the left operand of the next comparison.
@@ -4222,6 +5545,10 @@ parse_comparison:
     cmp eax, TOK_LE
     je .chain
     cmp eax, TOK_GE
+    je .chain
+    cmp eax, TOK_IS
+    je .chain
+    cmp eax, TOK_IS_NOT
     je .chain
     ; No chain — single comparison, result is in rbx
     mov r12, rbx
@@ -4265,11 +5592,21 @@ parse_comparison:
     je .chain_cond_le
     cmp r14, TOK_GE
     je .chain_cond_ge
+    cmp r14, TOK_IS
+    je .chain_cond_is
+    cmp r14, TOK_IS_NOT
+    je .chain_cond_is_not
     jmp .chain_cond_done
 .chain_cond_eq:
     xor r10, r10
     jmp .chain_cond_done
 .chain_cond_ne:
+    mov r10, 1
+    jmp .chain_cond_done
+.chain_cond_is:
+    xor r10, r10
+    jmp .chain_cond_done
+.chain_cond_is_not:
     mov r10, 1
     jmp .chain_cond_done
 .chain_cond_lt:
@@ -4321,7 +5658,7 @@ parse_null_coalesce:
     push r13
     push r14
     push r15
-    call parse_bool_or
+    call parse_bitwise_or
     mov r12, rax
     mov r13, rdx
 .loop:
@@ -4426,7 +5763,7 @@ parse_bool_and:
     push r13
     push r14
     push r15
-    call parse_bitwise_or
+    call parse_bool_not
     mov r12, rax
     mov r13, rdx
 .loop:
@@ -4435,7 +5772,7 @@ parse_bool_and:
     jne .done
     call advance
     push r12
-    call parse_bitwise_or
+    call parse_bool_not
     mov r15, rax
     pop r12
     cmp r13, TYPE_BOOL
@@ -4472,75 +5809,116 @@ parse_bool_and:
     mov rdi, err_type_mismatch
     jmp compile_error
 
+; Parse Bool NOT ('not' = negate) -- tier 4, binds looser than comparison,
+; tighter than and/or. Right-associative: 'not not x' = not(not x).
+parse_bool_not:
+    mov eax, [current_token]
+    cmp eax, TOK_BOOL_NOT
+    jne .no_not
+    call advance ; consume 'not'
+    call parse_bool_not ; right-assoc operand
+    push rax
+    push rdx
+    call alloc_vreg
+    mov rbx, rax
+    pop rdx  ; operand type
+    pop rcx  ; operand vreg
+    mov rdi, IR_BOOL_NOT
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    mov rax, rbx
+    mov rdx, TYPE_BOOL
+    ret
+.no_not:
+    call parse_comparison
+    ret
+
 parse_bitwise_or:
+    ; Tier 4 (design §5.1): `+ - | & ^` all share the SAME precedence,
+    ; left-associative. `| & ^` are int/byte-only; `+ -` also handle float
+    ; promotion (int/byte + float → float) and str concatenation (`+`).
     push rbx
     push r12
     push r13
     push r14
     push r15
-    call parse_bitwise_xor
+    call parse_mult
     mov r12, rax
     mov r13, rdx
 .loop:
     mov eax, [current_token]
     cmp eax, TOK_OR
-    jne .done
-    mov r14, IR_OR
-    call advance
-    push r12
-    call parse_bitwise_xor
-    mov r15, rax
-    pop r12
-    cmp rdx, r13
-    jne .type_error
-    push r12
-    push r15
-    call alloc_vreg
-    mov rbx, rax
-    pop r15
-    pop r12
-    mov rdi, r14
-    mov rsi, r13
-    mov rdx, rbx
-    mov rcx, r12
-    mov r8, r15
-    xor r9, r9
-    xor r10, r10
-    call emit_ir
-    mov r12, rbx
-    jmp .loop
-.type_error:
-    mov rdi, err_type_mismatch
-    jmp compile_error
-.done:
-    mov rax, r12
-    mov rdx, r13
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-parse_bitwise_xor:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    call parse_bitwise_and
-    mov r12, rax
-    mov r13, rdx
-.loop:
-    mov eax, [current_token]
+    je .op_or
     cmp eax, TOK_XOR
-    jne .done
+    je .op_xor
+    cmp eax, TOK_AND
+    je .op_and
+    cmp eax, TOK_PLUS
+    je .op_plus
+    cmp eax, TOK_MINUS
+    je .op_minus
+    jmp .done
+.op_or:
+    mov r14, IR_OR
+    jmp .have_op
+.op_xor:
     mov r14, IR_XOR
+    jmp .have_op
+.op_and:
+    mov r14, IR_AND
+    jmp .have_op
+.op_plus:
+    cmp r13, TYPE_STR
+    je .op_concat
+    mov r14, IR_ADD
+    jmp .have_op
+.op_concat:
+    mov r14, IR_STR_CONCAT
+    jmp .have_op
+.op_minus:
+    mov r14, IR_SUB
+.have_op:
     call advance
     push r12
-    call parse_bitwise_and
+    call parse_mult
     mov r15, rax
     pop r12
+
+    ; Float promotion for `+`/`-` (mixed int/byte with float). Bitwise ops
+    ; and str concat require matching operand types — skip promotion.
+    cmp r14, IR_ADD
+    je .promote
+    cmp r14, IR_SUB
+    je .promote
+    cmp rdx, r13
+    jne .type_error
+    jmp .no_promote
+.promote:
+    cmp r13, TYPE_FLOAT
+    je .promote_right
+    cmp rdx, TYPE_FLOAT
+    jne .no_promote
+    ; left is non-float, right is float → promote left
+    mov rdi, r12
+    mov rsi, r13
+    call coerce_to_float
+    mov r12, rax
+    mov r13, TYPE_FLOAT
+    mov rdx, TYPE_FLOAT
+    jmp .no_promote
+.promote_right:
+    cmp rdx, TYPE_FLOAT
+    je .no_promote
+    mov rdi, r15
+    mov rsi, rdx
+    call coerce_to_float
+    mov r15, rax
+    mov rdx, TYPE_FLOAT
+.no_promote:
     cmp rdx, r13
     jne .type_error
     push r12
@@ -4572,113 +5950,271 @@ parse_bitwise_xor:
     pop rbx
     ret
 
-parse_bitwise_and:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    call parse_add
-    mov r12, rax
-    mov r13, rdx
-.loop:
-    mov eax, [current_token]
-    cmp eax, TOK_AND
-    jne .done
-    mov r14, IR_AND
-    call advance
-    push r12
-    call parse_add
-    mov r15, rax
-    pop r12
-    cmp rdx, r13
-    jne .type_error
-    push r12
-    push r15
+; Coerce a numeric operand to float for mixed arithmetic (design §5.2:
+; "float dominates in mixed arithmetic"). INT/BYTE → IR_CAST_ITF; FLOAT → no-op.
+; rdi = src vreg, rsi = src type → rax = float vreg. Clobbers rdi/rsi/rcx/r8/r9/r10/rax.
+coerce_to_float:
+    cmp rsi, TYPE_FLOAT
+    je .coerce_already
+    cmp rsi, TYPE_INT
+    je .coerce_cast
+    cmp rsi, TYPE_BYTE
+    jne .coerce_bad
+.coerce_cast:
+    push rdi
     call alloc_vreg
-    mov rbx, rax
-    pop r15
-    pop r12
-    mov rdi, r14
-    mov rsi, r13
-    mov rdx, rbx
-    mov rcx, r12
-    mov r8, r15
+    mov rcx, [rsp] ; src vreg
+    mov r8, rax    ; dst vreg
+    mov rdi, IR_CAST_ITF
+    mov rsi, TYPE_FLOAT
+    mov rdx, r8
+    xor r8, r8
     xor r9, r9
     xor r10, r10
     call emit_ir
-    mov r12, rbx
-    jmp .loop
-.type_error:
+    mov rax, rdx
+    add rsp, 8
+    ret
+.coerce_already:
+    mov rax, rdi
+    ret
+.coerce_bad:
     mov rdi, err_type_mismatch
     jmp compile_error
-.done:
-    mov rax, r12
-    mov rdx, r13
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
 
 ; Parse Additive Expression
-parse_add:
+; ─────────────────────────────────────────────────────────────
+; emit_struct_copy: copy a struct field-by-field (value semantics).
+; rdi = dst ptr vreg, rsi = src ptr vreg, rdx = struct type id
+; Preserves rbx, r12-r15. Nested struct fields are copied recursively.
+emit_struct_copy:
     push rbx
     push r12
     push r13
     push r14
     push r15
-    call parse_mult
-    mov r12, rax
-    mov r13, rdx
-.loop:
-    mov eax, [current_token]
-    cmp eax, TOK_PLUS
-    je .add
-    cmp eax, TOK_MINUS
-    je .sub
-    jmp .done
-.add:
-    cmp r13, TYPE_STR
-    je .str_concat
-    mov r14, IR_ADD
-    jmp .consume
-.str_concat:
-    mov r14, IR_STR_CONCAT
-    jmp .consume
-.sub:
-    mov r14, IR_SUB
-.consume:
-    call advance
-    push r12
-    call parse_mult
-    mov r15, rax
-    pop r12
-    cmp rdx, r13
-    jne .type_error
-    push r12
-    push r15
-    call alloc_vreg
-    mov rbx, rax
-    pop r15
-    pop r12
-    mov rdi, r14
+    mov r12, rdx ; struct type id
+    mov r14, rdi ; dst ptr vreg
+    mov r15, rsi ; src ptr vreg
+    xor r13d, r13d ; field index
+.copy_loop:
+    mov rdi, r12
     mov rsi, r13
+    call type_struct_field_at ; rax = offset (-1 if none), rcx = ftype
+    cmp rax, -1
+    je .copy_done
+    push rcx       ; [rsp]   = ftype
+    push rax       ; [rsp+8] = offset
+    mov rdi, rcx
+    call type_get_kind
+    cmp al, TYPE_COMPLEX
+    je .copy_nested
+    ; Scalar: LOAD_FIELD tmp, src, off; STORE_FIELD dst, tmp, off
+    call alloc_vreg ; rax = tmp
+    push rax       ; [rsp] = tmp ; [rsp+8] = offset ; [rsp+16] = ftype
+    mov rdi, IR_LOAD_FIELD
+    mov rsi, [rsp+16]
+    mov rdx, [rsp]
+    mov rcx, r15
+    xor r8, r8
+    mov r9, [rsp+8]
+    xor r10, r10
+    call emit_ir
+    mov rdi, IR_STORE_FIELD
+    mov rsi, [rsp+16]
+    xor rdx, rdx
+    mov rcx, r14
+    mov r8, [rsp]
+    mov r9, [rsp+8]
+    xor r10, r10
+    call emit_ir
+    add rsp, 24
+    inc r13d
+    jmp .copy_loop
+.copy_nested:
+    ; dn = LEA_FIELD(dst, off); sn = LEA_FIELD(src, off); recurse(dn, sn, ftype)
+    call alloc_vreg ; rax = dn
+    push rax       ; [rsp] = dn ; [rsp+8] = offset ; [rsp+16] = ftype
+    mov rdi, IR_LEA_FIELD
+    mov rsi, [rsp+16]
+    mov rdx, [rsp]
+    mov rcx, r14
+    xor r8, r8
+    mov r9, [rsp+8]
+    xor r10, r10
+    call emit_ir
+    call alloc_vreg ; rax = sn
+    push rax       ; [rsp] = sn ; [rsp+8] = dn ; [rsp+16] = offset ; [rsp+24] = ftype
+    mov rdi, IR_LEA_FIELD
+    mov rsi, [rsp+24]
+    mov rdx, [rsp]
+    mov rcx, r15
+    xor r8, r8
+    mov r9, [rsp+16]
+    xor r10, r10
+    call emit_ir
+    mov rdi, [rsp+8]  ; dn
+    mov rsi, [rsp]    ; sn
+    mov rdx, [rsp+24] ; ftype
+    call emit_struct_copy
+    add rsp, 32
+    inc r13d
+    jmp .copy_loop
+.copy_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; emit_struct_cmp: compare two structs field-by-field (value semantics).
+; rdi = ptr_a vreg, rsi = ptr_b vreg, rdx = struct type id, rcx = mode (0=EQ→AND, 1=NE→OR)
+; Returns rax = bool result vreg. Preserves rbx, r12-r15. Nested structs recurse.
+emit_struct_cmp:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdx ; struct type id
+    mov r14, rdi ; ptr_a vreg
+    mov r15, rsi ; ptr_b vreg
+    mov r13, rcx ; mode (0=EQ, 1=NE)
+    xor ebx, ebx ; acc vreg (0 = none yet)
+    xor eax, eax ; field index
+.cmp_loop:
+    push rax     ; [rsp] = field index
+    mov rdi, r12
+    mov rsi, rax
+    call type_struct_field_at ; rax = offset (-1 if none), rcx = ftype
+    cmp rax, -1
+    je .cmp_done
+    push rcx     ; [rsp] = ftype ; [rsp+8] = field index
+    push rax     ; [rsp] = offset ; [rsp+8] = ftype ; [rsp+16] = field index
+    mov rdi, rcx
+    call type_get_kind
+    cmp al, TYPE_COMPLEX
+    je .cmp_nested
+    ; Scalar field: t1=LOAD_FIELD(a,off), t2=LOAD_FIELD(b,off), c=CMP_BOOL(t1,t2,cond)
+    call alloc_vreg ; rax = t1
+    push rax     ; [rsp] = t1 ; [rsp+8] = offset ; [rsp+16] = ftype ; [rsp+24] = field index
+    mov rdi, IR_LOAD_FIELD
+    mov rsi, [rsp+16]
+    mov rdx, [rsp]
+    mov rcx, r14
+    xor r8, r8
+    mov r9, [rsp+8]
+    xor r10, r10
+    call emit_ir
+    call alloc_vreg ; rax = t2
+    push rax     ; [rsp] = t2 ; [rsp+8] = t1 ; [rsp+16] = offset ; [rsp+24] = ftype ; [rsp+32] = field index
+    mov rdi, IR_LOAD_FIELD
+    mov rsi, [rsp+24]
+    mov rdx, [rsp]
+    mov rcx, r15
+    xor r8, r8
+    mov r9, [rsp+16]
+    xor r10, r10
+    call emit_ir
+    call alloc_vreg ; rax = c
+    push rax     ; [rsp] = c ; [rsp+8] = t2 ; [rsp+16] = t1 ; [rsp+24] = offset ; [rsp+32] = ftype ; [rsp+40] = field index
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, [rsp+16]
+    mov r8, [rsp+8]
+    xor r9, r9
+    mov r10, r13 ; cond = mode (EQ=0, NE=1)
+    call emit_ir
+    pop rax      ; c
+    pop rcx      ; t2
+    pop rdx      ; t1
+    pop r9       ; offset
+    pop r10      ; ftype
+    jmp .cmp_combine
+.cmp_nested:
+    ; pa=LEA_FIELD(a,off), pb=LEA_FIELD(b,off), c=recurse(pa,pb,ftype,mode)
+    call alloc_vreg ; rax = pa
+    push rax     ; [rsp] = pa ; [rsp+8] = offset ; [rsp+16] = ftype ; [rsp+24] = field index
+    mov rdi, IR_LEA_FIELD
+    mov rsi, [rsp+16]
+    mov rdx, [rsp]
+    mov rcx, r14
+    xor r8, r8
+    mov r9, [rsp+8]
+    xor r10, r10
+    call emit_ir
+    call alloc_vreg ; rax = pb
+    push rax     ; [rsp] = pb ; [rsp+8] = pa ; [rsp+16] = offset ; [rsp+24] = ftype ; [rsp+32] = field index
+    mov rdi, IR_LEA_FIELD
+    mov rsi, [rsp+24]
+    mov rdx, [rsp]
+    mov rcx, r15
+    xor r8, r8
+    mov r9, [rsp+16]
+    xor r10, r10
+    call emit_ir
+    mov rdi, [rsp+8]  ; pa
+    mov rsi, [rsp]    ; pb
+    mov rdx, [rsp+24] ; ftype
+    mov rcx, r13      ; mode
+    call emit_struct_cmp ; rax = c
+    pop rcx      ; pb
+    pop rdx      ; pa
+    pop r9       ; offset
+    pop r10      ; ftype
+.cmp_combine:
+    ; rax = this field's result; rbx = acc (0 = none yet)
+    test rbx, rbx
+    jz .cmp_first
+    push rbx     ; old acc
+    push rax     ; c
+    call alloc_vreg ; rax = new acc
+    mov rbx, rax
+    pop r8       ; c
+    pop rcx      ; old acc
+    push rbx     ; new acc
+    mov rdi, IR_BOOL_AND
+    test r13, r13
+    jz .cmp_emit
+    mov rdi, IR_BOOL_OR
+.cmp_emit:
+    mov rsi, TYPE_BOOL
     mov rdx, rbx
-    mov rcx, r12
-    mov r8, r15
     xor r9, r9
     xor r10, r10
     call emit_ir
-    mov r12, rbx
-    jmp .loop
-.type_error:
-    mov rdi, err_type_mismatch
-    jmp compile_error
-.done:
-    mov rax, r12
-    mov rdx, r13
+    pop rbx      ; rbx = new acc
+    jmp .cmp_next
+.cmp_first:
+    mov rbx, rax ; acc = c
+.cmp_next:
+    pop rax      ; field index
+    inc rax
+    jmp .cmp_loop
+.cmp_done:
+    add rsp, 8   ; discard field index
+    ; acc in rbx; if 0 (empty struct): EQ → true, NE → false
+    test rbx, rbx
+    jnz .cmp_return
+    call alloc_vreg ; rax = literal
+    push rax
+    mov rdi, IR_LOAD_BOOL
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    xor rcx, rcx
+    xor r8, r8
+    xor r9, r9
+    mov r10, 1   ; true
+    test r13, r13
+    jz .cmp_lit
+    mov r10, 0   ; false for NE of empty struct
+.cmp_lit:
+    call emit_ir
+    pop rbx
+.cmp_return:
+    mov rax, rbx
     pop r15
     pop r14
     pop r13
@@ -4704,6 +6240,10 @@ parse_mult:
     je .div
     cmp eax, TOK_MOD
     je .mod
+    cmp eax, TOK_LSHIFT
+    je .lshift
+    cmp eax, TOK_RSHIFT
+    je .rshift
     jmp .done
 .mul:
     mov r14, IR_MUL
@@ -4713,12 +6253,52 @@ parse_mult:
     jmp .consume
 .mod:
     mov r14, IR_MOD
+    jmp .consume
+.lshift:
+    mov r14, IR_SHL
+    jmp .consume
+.rshift:
+    mov r14, IR_SHR
 .consume:
     call advance
     push r12
     call parse_postfix
     mov r15, rax
     pop r12
+
+    ; Mixed arithmetic (design §5.2): int/byte op float → promote to float.
+    ; Only MUL/DIV promote; MOD/SHL/SHR are integer-only (reject float operands).
+    cmp r14, IR_MUL
+    je .may_promote_mult
+    cmp r14, IR_DIV
+    je .may_promote_mult
+    cmp r13, TYPE_FLOAT
+    je .type_error
+    cmp rdx, TYPE_FLOAT
+    je .type_error
+    jmp .no_promote_mult
+.may_promote_mult:
+    cmp r13, TYPE_FLOAT
+    je .promote_mult_right
+    cmp rdx, TYPE_FLOAT
+    jne .no_promote_mult
+    ; left is non-float, right is float → promote left
+    mov rdi, r12
+    mov rsi, r13
+    call coerce_to_float
+    mov r12, rax
+    mov r13, TYPE_FLOAT
+    mov rdx, TYPE_FLOAT
+    jmp .no_promote_mult
+.promote_mult_right:
+    cmp rdx, TYPE_FLOAT
+    je .no_promote_mult
+    mov rdi, r15
+    mov rsi, rdx
+    call coerce_to_float
+    mov r15, rax
+    mov rdx, TYPE_FLOAT
+.no_promote_mult:
     cmp rdx, r13
     jne .type_error
     push r12
@@ -4793,7 +6373,69 @@ parse_term:
     cmp eax, TOK_WHEN
     je .when_expr
     
+    cmp eax, TOK_OPEN
+    je .open_builtin
+    
     mov rdi, err_syntax
+    jmp compile_error
+
+.open_builtin:
+    ; open(path) or open(path, mode) → file handle (TYPE_FILE)
+    ; open() is a builtin function, not a constructor: the handle is
+    ; created by the runtime (rt_file_open), not by struct construction.
+    call advance ; consume 'open'
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr ; rax = path vreg, rdx = path type
+    push rax
+    push rdx
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .open_default_mode
+    call advance ; consume ','
+    call parse_expr ; rax = mode vreg, rdx = mode type
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13 ; mode type
+    pop r12 ; mode vreg
+    cmp r13, TYPE_STR
+    jne .open_type_err
+    jmp .open_emit
+.open_default_mode:
+    mov edi, TOK_RPAREN
+    call expect
+    ; Synthesize a default "r" mode literal via IR_LOAD_STR
+    call alloc_vreg
+    mov r12, rax
+    mov rdi, IR_LOAD_STR
+    mov rsi, TYPE_STR
+    mov rdx, r12
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, str_mode_r ; imm = string ptr (compiler-space)
+    mov r10, 1         ; aux = length
+    call emit_ir
+.open_emit:
+    pop rdx ; path type
+    pop rcx ; path vreg
+    cmp rdx, TYPE_STR
+    jne .open_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_FILE_OPEN
+    mov rsi, TYPE_FILE
+    mov rdx, [rsp] ; dst vreg
+    mov r8, r12    ; src2 = mode vreg
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_FILE
+    ret
+.open_type_err:
+    mov rdi, err_type_mismatch
     jmp compile_error
 
 .inline_if:
@@ -4846,21 +6488,22 @@ parse_term:
     call expect
     ; else-expr
     call parse_expr ; rax = else vreg, rdx = else type
+    push rax ; else vreg
     push rdx ; else type
     ; Type check: then type == else type
-    mov rax, [rsp + 16] ; then type
+    mov rax, [rsp + 24] ; then type
     cmp rax, [rsp]     ; else type
     jne type_error
     mov rdi, IR_MOV
     mov rsi, [rsp] ; type
     mov rdx, r13 ; result vreg
-    mov rcx, [rsp + 24] ; else vreg
+    mov rcx, [rsp + 8] ; else vreg
     xor r8, r8
     xor r9, r9
     xor r10, r10
     call emit_ir
     ; done_label:
-    pop rdi ; (discard else type)
+    add rsp, 16 ; (discard else type + else vreg)
     pop rdi ; done_label
     call emit_label
     pop rdx ; then type
@@ -4875,25 +6518,85 @@ parse_term:
 
 .when_expr:
     ; when <expr> → tri-state bool monitor (-1/0/1)
+    ; design §7.3: one hidden state cell per unique `when expr` text;
+    ; repeated occurrences of the same expression share the monitor.
     push rbx
+    push r12
+    push r13
+    push r14
     call advance ; consume 'when'
-    call parse_expr ; rax = cond vreg, rdx = type
-    push rax ; cond vreg
-    push rdx ; cond type
+    mov r14, [tok_str_ptr] ; start of expression text (first token)
+    call parse_expr ; rax = cond vreg, rdx = cond type
+    mov r13, [tok_str_ptr] ; end of expression text (start of next token)
+    push rax ; save cond vreg
+    ; FNV-1a 64 hash of the expression source span [r14, r13)
+    mov rdi, r14
+    mov rsi, r13
+    call .hash_span
+    mov r12, rax ; r12 = hash
+    call .when_monitor_id ; rax = monitor_id (dedup)
+    mov r14, rax ; r14 = monitor_id
     call alloc_vreg
     mov rbx, rax ; dst vreg
-    pop r8  ; cond type (unused)
     pop rcx ; cond vreg
     mov rdi, IR_WHEN
     mov rsi, TYPE_BOOL
     mov rdx, rbx
-    xor r9, r9
+    xor r8, r8
+    mov r9, r14 ; imm = monitor_id
     xor r10, r10
     call emit_ir
     mov rax, rbx
     mov rdx, TYPE_BOOL
+    pop r14
+    pop r13
+    pop r12
     pop rbx
     ret
+
+; FNV-1a 64 hash of the byte span [rdi, rsi). Returns hash in rax.
+; Clobbers rcx, rdx, r8, rdi, rsi. Preserves rbx, r12-r15.
+.hash_span:
+    mov rax, 0xcbf29ce484222325
+    mov r8, 0x100000001b3
+    mov rcx, rdi
+    mov rdx, rsi
+    sub rdx, rdi
+    jz .done
+.loop:
+    movzx rdi, byte [rcx]
+    xor rax, rdi
+    imul rax, r8
+    inc rcx
+    dec rdx
+    jnz .loop
+.done:
+    ret
+
+; Look up/insert monitor hash (r12) → returns monitor_id in rax.
+.when_monitor_id:
+    xor ecx, ecx
+.lookup:
+    cmp ecx, [when_count]
+    jae .add_new
+    mov rax, [when_hash_table + rcx*8]
+    cmp rax, r12
+    je .found
+    inc ecx
+    jmp .lookup
+.add_new:
+    mov eax, [when_count]
+    cmp eax, WHEN_MONITOR_MAX
+    jae .overflow
+    mov [when_hash_table + rax*8], r12
+    inc dword [when_count]
+    ret
+.found:
+    mov eax, ecx
+    ret
+.overflow:
+    mov rdi, err_when_overflow
+    jmp compile_error
 
 .proto_call:
     ; '@' proto_name '(' args ')'
@@ -5021,6 +6724,45 @@ parse_term:
     ret
 
 .ident:
+    ; Struct construction: Type{ field: expr, ... } — the type name is a
+    ; TOK_IDENT followed by '{'. Peek before committing.
+    call lexer_peek_token
+    cmp eax, TOK_LBRACE
+    jne .ident_not_brace
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call type_lookup
+    cmp rax, -1
+    je .undef_error
+    push rax
+    mov rdi, rax
+    call type_get_kind
+    mov rcx, rax
+    pop rax
+    cmp rcx, TYPE_COMPLEX
+    jne .ident_not_construct
+    jmp .struct_construct
+.ident_not_brace:
+    ; Qualified module access: `mod.name` (design.md §17.2). A registered
+    ; module name followed by '.' resolves to one of its members. Module
+    ; names win over variable names when they collide.
+    call lexer_peek_token
+    cmp eax, TOK_DOT
+    jne .ident_not_construct
+    mov rdi, [tok_str_ptr]
+    mov rsi, [tok_str_len]
+    call module_lookup
+    cmp rax, -1
+    je .ident_not_construct
+    mov r15, rax ; module id
+    call advance ; consume module name → '.'
+    mov edi, TOK_DOT
+    call expect ; consume '.' → current token = member IDENT
+    mov eax, [current_token]
+    cmp eax, TOK_IDENT
+    jne expected_ident
+    jmp parse_qualified_expr
+.ident_not_construct:
     mov rdi, [tok_str_ptr]
     mov rsi, [tok_str_len]
     call sym_lookup
@@ -5045,7 +6787,17 @@ parse_term:
     mov rdi, [rsp + 16] ; sym_idx
     call sym_get_offset
     mov r9, rax ; offset
-    
+
+    ; Struct variables hold a pointer to their slot: emit LEA_VAR instead of
+    ; LOAD_VAR (the struct body lives in the variable's storage).
+    mov rdi, [rsp + 8] ; type
+    push rdi
+    call type_get_kind
+    mov rcx, rax
+    pop rdi
+    cmp rcx, TYPE_COMPLEX
+    je .ident_struct_var
+
     mov rdi, IR_LOAD_VAR
     mov rsi, [rsp + 8] ; type
     mov rdx, [rsp] ; dst
@@ -5053,17 +6805,193 @@ parse_term:
     xor r8, r8
     xor r10, r10
     call emit_ir
-    
+    jmp .ident_vreg_ready
+
+.ident_struct_var:
+    mov rdi, IR_LEA_VAR
+    mov rsi, [rsp + 8] ; type
+    mov rdx, [rsp] ; dst
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+
+.ident_vreg_ready:
     pop rax ; vreg
     pop rdx ; type
     ; Store type_id in vreg_type_map for struct field access
     push rax
     push rdx
     mov [vreg_type_map + rax * 4], edx
+    ; Store container element type for bracket indexing
+    push rbx
+    push rcx
+    push rax
+    mov rdi, [rsp + 40] ; sym_idx
+    extern sym_get_elem_type
+    call sym_get_elem_type
+    mov rcx, rax
+    pop rax
+    mov [vreg_elem_types + rax * 4], ecx
+    pop rcx
+    pop rbx
     pop rdx
     pop rax
     add rsp, 8 ; clean up sym_idx
     ret
+
+; ─────────────────────────────────────────────────────────────
+; Struct construction:  Type{ field: expr, ... }
+; rax = struct type id on entry (from type_lookup in .ident)
+; Returns: rax = scratch pointer vreg, rdx = struct type id
+; The struct body is built into a bump-allocated scratch slot; the
+; surrounding context (declaration/mutation/copy) moves it into place.
+.struct_construct:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rax ; struct type id
+
+    ; Allocate a scratch slot for the body (bump, never reclaimed)
+    mov rdi, r12
+    call type_get_size ; rax = struct size
+    add rax, 7
+    and rax, -8        ; round up to 8
+    push rax           ; [rsp] = slot size (rounded)
+    mov eax, [struct_scratch_ptr] ; bump offset into scratch pool
+    push rax           ; [rsp] = offset ; [rsp+8] = slot size
+    add eax, [rsp + 8]
+    mov [struct_scratch_ptr], eax
+    ; Base address in the running program = SCRATCH_BASE + offset
+    mov eax, STRUCT_SCRATCH_BASE
+    add eax, [rsp]
+    mov [rsp], eax     ; [rsp] = absolute base address
+
+    ; LEA base → pointer vreg (r15)
+    call alloc_vreg
+    mov r15, rax
+    mov rdi, IR_LEA_VAR
+    mov rsi, r12
+    mov rdx, r15
+    xor rcx, rcx
+    xor r8, r8
+    mov r9, [rsp] ; base address
+    xor r10, r10
+    call emit_ir
+    mov [vreg_type_map + r15 * 4], r12d
+    add rsp, 16 ; drop base + slot size
+
+    ; Consume type name + '{'
+    call advance ; consume Type name IDENT
+    mov edi, TOK_LBRACE
+    call expect
+
+.field_loop:
+    mov eax, [current_token]
+    cmp eax, TOK_RBRACE
+    je .field_done
+    cmp eax, TOK_IDENT
+    jne .construct_err
+    ; Find field
+    mov rdi, r12
+    mov rsi, [tok_str_ptr]
+    mov rdx, [tok_str_len]
+    call type_struct_find_field ; rax = offset, rcx = field type
+    cmp rax, -1
+    je .construct_err
+    mov r13, rax ; field offset
+    mov r14, rcx ; field type
+    call advance ; consume field name
+    mov edi, TOK_COLON
+    call expect
+    ; Parse the field value
+    call parse_expr ; rax = value vreg, rdx = value type
+    ; r15 = base ptr vreg, r13 = offset, r14 = field type
+    push rax                ; [rsp] = value vreg (survives the calls below)
+    push rdx                ; [rsp+8] = value type
+    mov rdi, r14
+    call type_get_kind
+    pop rdx                 ; rdx = value type
+    cmp al, TYPE_COMPLEX
+    jne .field_scalar_check
+    mov rax, [rsp]
+    add rsp, 8              ; drop saved value vreg
+    jmp .field_nested
+.field_scalar_check:
+    ; Scalar field: type check then STORE_FIELD
+    mov rax, r14
+    call types_compatible   ; compares r14 (field) vs rdx (value type)
+    je .field_scalar_ok
+    cmp r14, TYPE_BYTE
+    je .byte_field_checks
+    add rsp, 8              ; drop saved value vreg
+    jmp .construct_err
+.byte_field_checks:
+    cmp rdx, TYPE_CHAR
+    je .field_scalar_ok
+    cmp rdx, TYPE_INT
+    je .field_scalar_ok
+    add rsp, 8              ; drop saved value vreg
+    jmp .construct_err
+.field_scalar_ok:
+    ; STORE_FIELD base_ptr, value, off
+    mov rdi, IR_STORE_FIELD
+    mov rsi, r14
+    xor rdx, rdx
+    mov rcx, r15 ; base ptr
+    mov r8, [rsp] ; value
+    mov r9, r13 ; offset
+    xor r10, r10
+    call emit_ir
+    add rsp, 8              ; drop saved value vreg
+    jmp .field_next
+.field_nested:
+    ; rax = value ptr vreg, rdx = value type; field type r14 is a struct.
+    ; Copy value field-by-field into [base + off].
+    push rax ; rax pushed first → [rsp+8] = value ptr vreg
+    push rdx ; rdx pushed second → [rsp]   = value type
+    mov rax, r14
+    mov rdx, [rsp]   ; value type (at [rsp], since rdx was pushed last)
+    call types_compatible
+    jne .construct_err
+    add rsp, 8 ; drop value type
+    call alloc_vreg ; rax = target vreg
+    push rax ; [rsp] = target vreg ; [rsp+8] = value ptr vreg
+    mov rdi, IR_LEA_FIELD
+    mov rsi, r14
+    mov rdx, [rsp]
+    mov rcx, r15
+    xor r8, r8
+    mov r9, r13
+    xor r10, r10
+    call emit_ir
+    mov rdi, [rsp]   ; dst = target vreg
+    mov rsi, [rsp+8] ; src = value ptr vreg
+    mov rdx, r14     ; struct type
+    call emit_struct_copy
+    add rsp, 16
+.field_next:
+    mov eax, [current_token]
+    cmp eax, TOK_COMMA
+    jne .field_done
+    call advance
+    jmp .field_loop
+.field_done:
+    mov edi, TOK_RBRACE
+    call expect
+    mov rax, r15
+    mov rdx, r12
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.construct_err:
+    mov rdi, err_syntax
+    jmp compile_error
 
 .undef_error:
     ; Check if this is a known builtin function name before erroring
@@ -5096,6 +7024,10 @@ parse_term:
     call ident_is
     test rax,rax
     jnz .builtin_abs
+    lea rdi, [str_ceil]
+    call ident_is
+    test rax,rax
+    jnz .builtin_ceil
     lea rdi, [str_sqrt]
     call ident_is
     test rax,rax
@@ -5180,8 +7112,91 @@ parse_term:
     call ident_is
     test rax,rax
     jnz .builtin_sum
-    mov rdi, err_undef
-    jmp compile_error
+    lea rdi, [str_alpha]
+    call ident_is
+    test rax,rax
+    jnz .builtin_alpha
+    lea rdi, [str_digit]
+    call ident_is
+    test rax,rax
+    jnz .builtin_digit
+    lea rdi, [str_upper]
+    call ident_is
+    test rax,rax
+    jnz .builtin_upper
+    lea rdi, [str_lower]
+    call ident_is
+    test rax,rax
+    jnz .builtin_lower
+    lea rdi, [str_whitespace]
+    call ident_is
+    test rax,rax
+    jnz .builtin_whitespace
+    lea rdi, [str_alnum_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_alnum
+    lea rdi, [str_punct_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_punct
+    lea rdi, [str_printable_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_printable
+    lea rdi, [str_ascii_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_ascii
+    lea rdi, [str_hex_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_hex
+    lea rdi, [str_bin_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_bin
+    lea rdi, [str_oct_m]
+    call ident_is
+    test rax,rax
+    jnz .builtin_oct
+    lea rdi, [str_zero]
+    call ident_is
+    test rax,rax
+    jnz .builtin_zero
+    lea rdi, [str_positive]
+    call ident_is
+    test rax,rax
+    jnz .builtin_positive
+    lea rdi, [str_negative]
+    call ident_is
+    test rax,rax
+    jnz .builtin_negative
+    lea rdi, [str_even]
+    call ident_is
+    test rax,rax
+    jnz .builtin_even
+    lea rdi, [str_odd]
+    call ident_is
+    test rax,rax
+    jnz .builtin_odd
+    lea rdi, [str_nan]
+    call ident_is
+    test rax,rax
+    jnz .builtin_nan
+    lea rdi, [str_inf]
+    call ident_is
+    test rax,rax
+    jnz .builtin_inf
+    lea rdi, [str_finite]
+    call ident_is
+    test rax,rax
+    jnz .builtin_finite
+    lea rdi, [str_file_exists]
+    call ident_is
+    test rax,rax
+    jnz .builtin_file_exists
+    jmp undef_error
 
 .uninit_error:
     add rsp, 8 ; clean up sym_idx
@@ -5236,15 +7251,49 @@ parse_term:
     mov rdx, TYPE_FLOAT
     ret
 
+.builtin_ceil:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_CEIL
+    mov rsi, TYPE_FLOAT
+    mov rdx, [rsp]
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+
+.builtin_float_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
 .builtin_sqrt:
     call advance
     mov edi, TOK_LPAREN
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_SQRT
@@ -5264,9 +7313,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_FLOOR
@@ -5286,9 +7339,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_ROUND
@@ -5308,9 +7365,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_TRUNC_F
@@ -5330,9 +7391,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop r12
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_TRUNC_F
@@ -5353,8 +7418,8 @@ parse_term:
     xor r9,r9
     xor r10,r10
     call emit_ir
-    add rsp, 8
     pop rax
+    add rsp, 8
     mov rdx, TYPE_FLOAT
     ret
 
@@ -5598,8 +7663,12 @@ parse_term:
     call expect
     call parse_expr
     push rax                ; [arg]
+    push rdx                ; [argtype, arg]
     mov edi, TOK_RPAREN
     call expect
+    pop rdx                 ; [arg]
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax                ; [one, arg]
     mov rdi, IR_LOAD_FIMM
@@ -5631,9 +7700,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_SIN
@@ -5653,9 +7726,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_COS
@@ -5675,9 +7752,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_TAN
@@ -5697,29 +7778,58 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_COMMA
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
-    pop r8
-    pop rcx
-    push rcx
-    push r8
+    pop r15          ; arg2 type
+    pop r14          ; arg2 vreg
+    pop r13          ; arg1 type
+    pop r12          ; arg1 vreg
+    ; Both int → integer exponentiation
+    cmp r13, TYPE_INT
+    jne .builtin_pow_float
+    cmp r15, TYPE_INT
+    jne .builtin_pow_float
     call alloc_vreg
-    pop r8
-    pop rcx
+    push rax
+    mov rdi, IR_POW_I
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+.builtin_pow_float:
+    ; Both args must be float (no implicit int→float coercion in Rex)
+    cmp r13, TYPE_FLOAT
+    jne .builtin_pow_type_err
+    cmp r15, TYPE_FLOAT
+    jne .builtin_pow_type_err
+    call alloc_vreg
     push rax
     mov rdi, IR_POW_F
     mov rsi, TYPE_FLOAT
     mov rdx, [rsp]
+    mov rcx, r12
+    mov r8, r14
     xor r9,r9
     xor r10,r10
     call emit_ir
     pop rax
     mov rdx, TYPE_FLOAT
     ret
+.builtin_pow_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
 
 .builtin_cbrt:
     call advance
@@ -5727,9 +7837,13 @@ parse_term:
     call expect
     call parse_expr
     push rax
+    push rdx
     mov edi, TOK_RPAREN
     call expect
+    pop rdx
     pop rcx
+    cmp rdx, TYPE_FLOAT
+    jne .builtin_float_type_err
     call alloc_vreg
     push rax
     mov rdi, IR_CBRT
@@ -5899,6 +8013,502 @@ parse_term:
     mov rdi, err_type_mismatch
     jmp compile_error
 
+; Single-arg char predicates: alpha / whitespace / alnum / punct / printable
+; Uses r13=type, returns bool
+%macro builtin_char_pred 1
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_CHAR
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, %1
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+%endmacro
+
+.builtin_alpha:        builtin_char_pred IR_IS_ALPHA
+.builtin_whitespace:   builtin_char_pred IR_IS_SPACE
+.builtin_alnum:        builtin_char_pred IR_IS_ALNUM
+.builtin_punct:        builtin_char_pred IR_IS_PUNCT
+.builtin_printable:    builtin_char_pred IR_IS_PRINT
+
+.char_pred_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
+.builtin_digit:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_CHAR
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_DIGIT
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_INT
+    ret
+
+.builtin_upper:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_CHAR
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_UPPER
+    mov rsi, TYPE_CHAR
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_CHAR
+    ret
+
+.builtin_lower:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_CHAR
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_LOWER
+    mov rsi, TYPE_CHAR
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_CHAR
+    ret
+
+.builtin_ascii:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_CHAR
+    je .ascii_cmp
+    cmp r13, TYPE_BYTE
+    jne .char_pred_type_err
+.ascii_cmp:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    mov r9,128
+    mov r10,COND_LT
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
+.builtin_hex:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_INT
+    je .hex_int
+    cmp r13, TYPE_BYTE
+    je .hex_byte
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.hex_int:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_HEX_STR
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+.hex_byte:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_BYTE_HEX
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+
+.builtin_bin:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_INT
+    je .bin_int
+    cmp r13, TYPE_BYTE
+    je .bin_byte
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.bin_int:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_BIN_STR
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+.bin_byte:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_BYTE_BIN
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+
+.builtin_oct:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_INT
+    je .oct_int
+    mov rdi, err_type_mismatch
+    jmp compile_error
+.oct_int:
+    call alloc_vreg
+    push rax
+    mov rdi, IR_TO_OCT_STR
+    mov rsi, TYPE_STR
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_STR
+    ret
+
+; zero/positive/negative: int/byte via CMP_BOOL, float via IR_IS_*_F
+%macro builtin_cmp_bool 2
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_FLOAT
+    je .num_pred_float_%2
+    call alloc_vreg
+    push rax
+    mov rdi, IR_CMP_BOOL
+    mov rsi, TYPE_INT
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    mov r10,%1
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+%endmacro
+
+.builtin_zero:
+    builtin_cmp_bool COND_EQ, zero
+.builtin_positive:
+    builtin_cmp_bool COND_GT, pos
+.builtin_negative:
+    builtin_cmp_bool COND_LT, neg
+
+.num_pred_float_zero:
+    mov rdi, IR_IS_ZERO_F
+    jmp .num_pred_float_emit
+.num_pred_float_pos:
+    mov rdi, IR_IS_POS_F
+    jmp .num_pred_float_emit
+.num_pred_float_neg:
+    mov rdi, IR_IS_NEG_F
+.num_pred_float_emit:
+    push rdi
+    call alloc_vreg
+    pop rdi
+    push rax
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
+.builtin_even:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_FLOAT
+    je .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_IS_EVEN
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
+.builtin_odd:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_FLOAT
+    je .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_IS_ODD
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
+.builtin_nan:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_FLOAT
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_IS_NAN
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
+.builtin_inf:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_FLOAT
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_IS_INF
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
+.builtin_finite:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_FLOAT
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_IS_FINITE
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
+; file_exists(path) — bool
+.builtin_file_exists:
+    call advance
+    mov edi, TOK_LPAREN
+    call expect
+    call parse_expr
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop r13
+    pop r12
+    cmp r13, TYPE_STR
+    jne .char_pred_type_err
+    call alloc_vreg
+    push rax
+    mov rdi, IR_FILE_EXISTS
+    mov rsi, TYPE_BOOL
+    mov rdx, [rsp]
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    pop rax
+    mov rdx, TYPE_BOOL
+    ret
+
 .paren:
     call advance ; consume '('
     call parse_expr
@@ -6018,8 +8628,8 @@ parse_term:
     xor r9, r9
     xor r10, r10
     call emit_ir
+    mov rbx, [rsp+8] ; recover dst vreg (was pushed, not yet popped)
     add rsp, 24
-    pop rbx ; restore dst
     mov rax, rbx
     mov rdx, TYPE_INT
     ret
@@ -6076,8 +8686,7 @@ parse_term:
     mov rdx, TYPE_STR
     ret
 .undef_error_scope:
-    mov rdi, err_undef
-    jmp compile_error
+    jmp undef_error
 
 ; len() built-in: returns length of seq or str as int
 .len_builtin:
@@ -6145,41 +8754,68 @@ parse_term:
 ; Array literal: [expr, expr, ...]
 ; Stores values on the stack and returns count as int
 .array_literal:
+    ; [v1, v2, ...] in expression context → real seq value (TYPE_SEQ).
+    ; (M-fix: previously this merely counted elements and returned an int,
+    ;  so f.write_bytes([1,2,3]) saw an int and failed to type-check.)
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
     call advance ; consume '['
-    xor r12, r12 ; count = 0
+
+    ; Emit IR_SEQ_NEW with capacity 8, element size 8
+    call alloc_vreg
+    mov r15, rax       ; r15 = seq vreg (callee-saved, preserved across loop)
+    mov rdi, IR_SEQ_NEW
+    mov rsi, TYPE_SEQ
+    mov rdx, r15       ; dst = seq vreg
+    xor rcx, rcx       ; src1 = 0
+    xor r8, r8         ; src2 = 0
+    mov r9, 8          ; imm = initial capacity
+    mov r10, 8         ; aux = element size
+    call emit_ir
+
 .array_loop:
     mov eax, [current_token]
     cmp eax, TOK_RBRACKET
     je .array_done
     cmp eax, TOK_EOF
     je .array_done
-    ; Parse the value
-    call parse_expr
-    ; Store the value on the stack (for now, just count)
-    inc r12
+    ; Parse the element value
+    call parse_expr    ; rax = elem vreg, rdx = elem type
+    mov r14, rax       ; save elem vreg
+    mov rbx, rdx       ; save elem type
+
+    ; Emit IR_SEQ_PUSH
+    mov rdi, IR_SEQ_PUSH
+    mov rsi, rbx       ; element type
+    xor rdx, rdx       ; dst = 0 (void)
+    mov rcx, r15       ; src1 = seq vreg
+    mov r8, r14        ; src2 = elem vreg
+    mov r9, SEQ_ELEMENT_SIZE  ; imm = element size
+    xor r10, r10
+    call emit_ir
+
     ; Check for comma
     mov eax, [current_token]
     cmp eax, TOK_COMMA
-    jne .array_no_comma
+    jne .array_done
     call advance ; consume comma
-.array_no_comma:
     jmp .array_loop
 .array_done:
     mov edi, TOK_RBRACKET
     call expect ; consume ']'
-    ; Return the count as an integer literal
-    call alloc_vreg
-    push rax
-    mov rdi, IR_LOAD_IMM
-    mov rsi, TYPE_INT
-    mov rdx, [rsp]
-    xor rcx, rcx
-    xor r8, r8
-    mov r9, r12 ; count
-    xor r10, r10
-    call emit_ir
-    pop rax
-    mov rdx, TYPE_INT
+
+    mov rax, r15
+    mov rdx, TYPE_SEQ
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
 
 ; Type cast: type_name(expr)
@@ -6215,6 +8851,8 @@ parse_term:
     je .cast_to_char
     cmp r12, TYPE_BYTE
     je .cast_to_byte
+    cmp r12, TYPE_STR
+    je .cast_to_str
     ; Unsupported cast target
     jmp .cast_done_emit
 
@@ -6227,10 +8865,15 @@ parse_term:
     je .cast_use_cti
     cmp r13, TYPE_BYTE
     je .cast_use_bci
+    cmp r13, TYPE_STR
+    je .cast_use_stoi
     ; int(x) where x is already int — no-op, just use the vreg
     jmp .cast_noop
 .cast_use_fti:
     mov r14, IR_CAST_FTI
+    jmp .cast_done_emit
+.cast_use_stoi:
+    mov r14, IR_STOI
     jmp .cast_done_emit
 .cast_use_bti:
     mov r14, IR_CAST_BTI
@@ -6245,10 +8888,15 @@ parse_term:
 .cast_to_float:
     cmp r13, TYPE_INT
     je .cast_use_itf
+    cmp r13, TYPE_STR
+    je .cast_use_stof
     ; float(x) where x is already float — no-op
     jmp .cast_noop
 .cast_use_itf:
     mov r14, IR_CAST_ITF
+    jmp .cast_done_emit
+.cast_use_stof:
+    mov r14, IR_STOF
     jmp .cast_done_emit
 
 .cast_to_bool:
@@ -6290,6 +8938,32 @@ parse_term:
     mov r14, IR_CAST_CTB
     jmp .cast_done_emit
 
+.cast_to_str:
+    cmp r13, TYPE_INT
+    je .cast_use_itos
+    cmp r13, TYPE_FLOAT
+    je .cast_use_ftos
+    cmp r13, TYPE_BOOL
+    je .cast_use_btos
+    cmp r13, TYPE_CHAR
+    je .cast_use_ctos
+    cmp r13, TYPE_BYTE
+    je .cast_use_ctos
+    ; str(x) where x is already str — no-op
+    jmp .cast_noop
+.cast_use_itos:
+    mov r14, IR_ITOS
+    jmp .cast_done_emit
+.cast_use_ftos:
+    mov r14, IR_FTOS
+    jmp .cast_done_emit
+.cast_use_btos:
+    mov r14, IR_BTOS
+    jmp .cast_done_emit
+.cast_use_ctos:
+    mov r14, IR_CTOS
+    jmp .cast_done_emit
+
 .cast_noop:
     ; No cast needed — return source vreg with target type
     pop rax ; source vreg
@@ -6316,8 +8990,13 @@ parse_term:
 ; Returns rax = label ID (0, 1, 2, ...)
 gen_label:
     mov eax, [label_counter]
+    cmp eax, 65536
+    jae .overflow
     inc dword [label_counter]
     ret
+.overflow:
+    mov rdi, err_label_overflow
+    jmp compile_error
 
 ; Build unique hidden loop variable name "_for_end<label_counter>" into for_hidden_buf
 ; Returns: rdi = name ptr, rax = length (excluding null terminator)
@@ -6454,6 +9133,74 @@ emit_jcc:
     call emit_ir
     ret
 
+; Helper: push a loop context frame for stop/skip (design §8.5)
+; rdi = loop_end label, rsi = loop_skip label
+push_loop_context:
+    mov eax, [loop_depth]
+    cmp eax, LOOP_MAX_DEPTH
+    jge .ctx_overflow
+    mov [loop_end_labels + rax * 8], rdi
+    mov [loop_skip_labels + rax * 8], rsi
+    inc dword [loop_depth]
+    xor eax, eax
+    ret
+.ctx_overflow:
+    mov rdi, err_loop_nesting
+    jmp compile_error
+
+; Helper: pop a loop context frame (called at loop exit)
+pop_loop_context:
+    dec dword [loop_depth]
+    ret
+
+; Helper: emit a label into the loop_skip slot of the current (innermost) frame
+; Used to mark the increment section of for/each/repeat loops so `skip`
+; lands before the increment runs (design §8.5: "jump to condition check").
+emit_loop_skip_label:
+    mov eax, [loop_depth]
+    test eax, eax
+    jz .skip_no_frame
+    dec eax
+    mov rdi, [loop_skip_labels + rax * 8]
+    call emit_label
+.skip_no_frame:
+    ret
+
+; Helper: finish a loop by checking for an optional `else:` clause
+; (design.md §8.6 — runs only when the loop exits naturally, not via `stop`).
+; The loop's natural-exit JCC targets loop_else_entry; `stop` targets loop_end
+; (stored in loop_end_labels), which is past the else block.
+; Stack on entry: [retaddr][loop_else_entry][loop_end][loop_start].
+; Emits the labels (else block between else_entry and loop_end). Does NOT touch
+; the stack — the caller drops the three labels with `add rsp, 24` after the call.
+loop_else_chain:
+    mov eax, [current_token]
+    cmp eax, TOK_NEWLINE
+    jne .lec_cont
+    call advance ; single-line loop body ends with NEWLINE before `else:`
+    mov eax, [current_token]
+.lec_cont:
+    cmp eax, TOK_ELSE
+    je .lec_else
+    ; No else — else_entry and loop_end coincide at the loop's exit point
+    mov rdi, [rsp + 8]  ; loop_else_entry
+    call emit_label
+    mov rdi, [rsp + 16] ; loop_end
+    call emit_label
+    ret
+.lec_else:
+    mov rdi, [rsp + 8]  ; loop_else_entry
+    call emit_label
+    call advance ; consume 'else'
+    mov edi, TOK_COLON
+    call expect
+    call parse_block
+    mov rdi, [rsp + 16] ; loop_end
+    call emit_jmp
+    mov rdi, [rsp + 16] ; loop_end
+    call emit_label
+    ret
+
 ; Helper: parse an indented block (INDENT ... DEDENT)
 ; Calls parse_stmt for each statement in the block
 ; Expects the current token to be NEWLINE (after ':')
@@ -6506,7 +9253,17 @@ parse_block:
     mov edi, [block_sym_save + rax]
     call sym_remove_block_scope
 
+    ret
+
 .block_single:
+    ; Single-line block: the body is one statement on the same line as
+    ; the ':' (e.g. `if cond: :x = 5`). The condition's JCC and the
+    ; trailing JMP/labels were already emitted by the caller, so the
+    ; body MUST be parsed here, while the current token still points at
+    ; the body statement. Otherwise the body would be left to the outer
+    ; statement loop, landing AFTER the end-label in the IR and
+    ; executing unconditionally (miscompile: both branches fall through).
+    call parse_stmt
     ret
 
 .block_too_deep:
@@ -6558,77 +9315,377 @@ save_ident:
     ret
 
 ; Report a compile error and exit
-; rdi = message string
+; rdi = message string (null-terminated; carries its own "Compile Error: "/"Syntax Error: " prefix)
  compile_error:
-     push rdi
-     
-     ; Print error prefix to stderr
-     mov rax, 1
-     mov rdi, 2
-     mov rsi, .err_prefix
-     mov rdx, .err_prefix_len
-     syscall
-     
-     ; Print message
-    pop rsi ; original message
-    push rsi
+    mov rbx, rdi             ; rbx = message
+
+    ; Print message to stderr
     xor rdx, rdx
 .len_loop:
-    cmp byte [rsi + rdx], 0
+    cmp byte [rbx + rdx], 0
     je .len_done
     inc rdx
     jmp .len_loop
 .len_done:
     mov rax, 1
     mov rdi, 2
+    mov rsi, rbx
     syscall
-    
-    ; Print line details
+
+    ; Print " at line "
     mov rax, 1
     mov rdi, 2
-    mov rsi, .line_suffix
-    mov rdx, .line_suffix_len
+    lea rsi, [rel .at_line]
+    mov rdx, .at_line_len
     syscall
-    
+
     ; Print line number
-    call get_error_loc ; rax = line
-    ; Simple division to print integer line number
-    mov rbx, 10
-    push 10 ; newline at end
-    mov rcx, 1 ; count of chars pushed
-.div_loop:
-    xor rdx, rdx
-    div rbx
-    add rdx, '0'
-    push rdx
-    inc rcx
-    test rax, rax
-    jnz .div_loop
-    
-.print_loop:
-    dec rcx
-    push rcx
+    mov rdi, [line_num]
+    call print_uint_to_stderr
+
+    ; Print ", column "
     mov rax, 1
     mov rdi, 2
-    lea rsi, [rsp + 8] ; print char pushed
+    lea rsi, [rel .at_col]
+    mov rdx, .at_col_len
+    syscall
+
+    ; Print token start column (1-based).
+    ; tok_str_ptr points at the token in the source (identifiers, numbers,
+    ; operators). For string literals it points into the translation pool,
+    ; so fall back to get_error_loc when it is outside the source buffer.
+    mov rax, [tok_str_ptr]
+    test rax, rax
+    jz .col_fallback
+    mov rcx, [src_ptr]
+    cmp rax, rcx
+    jb .col_fallback
+    mov rdx, [src_len]
+    add rdx, rcx
+    cmp rax, rdx
+    ja .col_fallback
+    sub rax, rcx            ; token start offset in source
+    mov rcx, [line_start_idx]
+    sub rax, rcx            ; 0-based column
+    inc rax                 ; 1-based
+    jmp .col_ready
+.col_fallback:
+    call get_error_loc      ; rax = line, rdx = column
+    mov rax, rdx
+.col_ready:
+    test rax, rax
+    jg .col_positive
+    mov rax, 1
+.col_positive:
+    mov r13, rax            ; save column for the caret line
+    mov rdi, rax
+    call print_uint_to_stderr
+
+    ; Print newline
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [rel .nl]
     mov rdx, 1
     syscall
-    pop rcx
-    pop rax ; remove char from stack
+
+    ; Print the offending source line (indented two spaces, capped at 120 cols)
+    ; Skip the source line + caret entirely if the current line is empty
+    ; (e.g. an error that fires on a NEWLINE/EOF at the end of the statement).
+    mov rbx, [src_ptr]
+    mov rcx, [line_start_idx]
+    add rbx, rcx            ; rbx = start of current line
+    xor r12, r12            ; r12 = line length
+.line_loop:
+    cmp r12, 120
+    jae .line_done
+    movzx rax, byte [rbx + r12]
+    cmp al, 10
+    je .line_done
+    cmp al, 13
+    je .line_done
+    test al, al
+    jz .line_done
+    inc r12
+    jmp .line_loop
+.line_done:
+    test r12, r12
+    jz .exit
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [rel .two_sp]
+    mov rdx, 2
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    mov rsi, rbx
+    mov rdx, r12
+    syscall
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [rel .nl]
+    mov rdx, 1
+    syscall
+
+    ; Print caret line: two spaces, (col-1) spaces, then '^'
+    ; r13 = column (1-based) — must be stored by the header computation.
+    ; Build "  <spaces>^\n" in err_caret_buf and write it once.
+    lea rdi, [err_caret_buf]
+    mov byte [rdi], ' '
+    mov byte [rdi + 1], ' '
+    add rdi, 2
+    mov rcx, r13
+    dec rcx                 ; spaces before caret = col-1
+    cmp rcx, 120
+    jbe .cap_ok
+    mov rcx, 120
+.cap_ok:
+    mov r12, rcx            ; remember space count
+.caret_space:
     test rcx, rcx
-    jnz .print_loop
-    
+    jz .caret_space_done
+    mov byte [rdi], ' '
+    inc rdi
+    dec rcx
+    jmp .caret_space
+.caret_space_done:
+    mov byte [rdi], '^'
+    inc rdi
+    mov byte [rdi], 10
+    inc rdi
+    mov byte [rdi], 0
+    ; write caret line: 2 + spaces + '^' + newline
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [err_caret_buf]
+    lea rdx, [r12 + 4]
+    syscall
+
+.exit:
+    ; Exit with code 1
     mov rax, 60
-    mov rdi, 1 ; exit code 1
+    mov rdi, 1
     syscall
 
 section .rodata
-    .err_prefix db "Compile Error: "
-    .err_prefix_len equ $ - .err_prefix
-    .line_suffix db " at line "
-    .line_suffix_len equ $ - .line_suffix
+    .at_line db " at line "
+    .at_line_len equ $ - .at_line
+    .at_col db ", column "
+    .at_col_len equ $ - .at_col
+    .nl db 10
+    .two_sp db "  "
 
 section .text
+
+; ======================================================
+; print_uint_to_stderr: print unsigned integer in rdi to stderr (fd 2)
+; ======================================================
+print_uint_to_stderr:
+    lea rsi, [print_num_buf + 15]
+    mov r8, 10
+    xor ecx, ecx
+    test rdi, rdi
+    jnz .num_loop
+    mov byte [rsi], '0'
+    mov ecx, 1
+    jmp .num_print
+.num_loop:
+    xor edx, edx
+    mov rax, rdi
+    div r8
+    add dl, '0'
+    mov [rsi], dl
+    dec rsi
+    inc ecx
+    mov rdi, rax
+    test rdi, rdi
+    jnz .num_loop
+    inc rsi
+.num_print:
+    mov rax, 1
+    mov rdi, 2
+    mov rdx, rcx
+    syscall
+    ret
+
+section .text
+
+; ======================================================
+; strcpy_z: copy null-terminated string from rsi to rdi.
+; Returns: rdi = pointer to the terminating null (so callers can append).
+; ======================================================
+strcpy_z:
+.str_cp:
+    cmp byte [rsi], 0
+    je .str_done
+    mov al, [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    jmp .str_cp
+.str_done:
+    mov byte [rdi], 0
+    ret
+
+; ======================================================
+; undef_error: report "Undefined variable '<name>'".
+; The offending identifier must still be the current token
+; (tok_str_ptr / tok_str_len). Never returns.
+; ======================================================
+undef_error:
+    lea rdi, [error_msg_buf]
+    lea rsi, [err_undef]
+    call strcpy_z
+    mov byte [rdi], ' '
+    inc rdi
+    mov byte [rdi], 39      ; opening '
+    inc rdi
+    mov rsi, [tok_str_ptr]
+    mov rcx, [tok_str_len]
+    cmp rcx, 64
+    jbe .tok_len_ok
+    mov rcx, 64
+.tok_len_ok:
+    test rcx, rcx
+    jz .tok_cp_done
+.tok_cp:
+    mov al, [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .tok_cp
+.tok_cp_done:
+    mov byte [rdi], 39      ; closing '
+    inc rdi
+    mov byte [rdi], 0
+    lea rdi, [error_msg_buf]
+    jmp compile_error
+
+; ======================================================
+; type_name_str: map a type id to a display name.
+; rdi = type id → rax = pointer to null-terminated string.
+; ======================================================
+type_name_str:
+    cmp rdi, TYPE_INT
+    je .t_int
+    cmp rdi, TYPE_FLOAT
+    je .t_float
+    cmp rdi, TYPE_BOOL
+    je .t_bool
+    cmp rdi, TYPE_STR
+    je .t_str
+    cmp rdi, TYPE_SEQ
+    je .t_seq
+    cmp rdi, TYPE_DICT
+    je .t_dict
+    cmp rdi, TYPE_CHAR
+    je .t_char
+    cmp rdi, TYPE_BYTE
+    je .t_byte
+    cmp rdi, TYPE_FILE
+    je .t_file
+    cmp rdi, TYPE_TUP
+    je .t_tuple
+    cmp rdi, TYPE_COMPLEX
+    je .t_struct
+    cmp rdi, TYPE_TUP
+    ja .t_registered
+    jmp .t_value
+.t_int:    lea rax, [str_t_int]
+    ret
+.t_float:  lea rax, [str_t_float]
+    ret
+.t_bool:   lea rax, [str_t_bool]
+    ret
+.t_str:    lea rax, [str_t_str]
+    ret
+.t_seq:    lea rax, [str_t_seq]
+    ret
+.t_dict:   lea rax, [str_t_dict]
+    ret
+.t_char:   lea rax, [str_t_char]
+    ret
+.t_byte:   lea rax, [str_t_byte]
+    ret
+.t_file:   lea rax, [str_t_file]
+    ret
+.t_tuple:  lea rax, [str_t_tuple]
+    ret
+.t_struct: lea rax, [str_t_struct]
+    ret
+.t_registered:
+    ; User-defined type id: look up the registered name.
+    ; type_table entry: kind@0, size@4, name_ptr@8, name_len@16, aux@24.
+    extern type_count
+    extern type_table
+    cmp rdi, [type_count]
+    jae .t_value
+    imul rdi, rdi, 32
+    mov rax, [type_table + rdi + 8]   ; name_ptr
+    test rax, rax
+    jz .t_value
+    ret
+.t_value:  lea rax, [str_t_value]
+    ret
+
+; ======================================================
+; unknown_method_error: report "Unknown method '<name>' on type <type>".
+; method_buf / method_len = method name; r13 = type id. Never returns.
+; ======================================================
+unknown_method_error:
+    lea r14, [err_unknown_method_on]
+    jmp unknown_member_error
+
+; ======================================================
+; unknown_field_error: report "Unknown field '<name>' on type <type>".
+; method_buf / method_len = field name; r13 = type id. Never returns.
+; ======================================================
+unknown_field_error:
+    lea r14, [err_unknown_field]
+    jmp unknown_member_error
+
+; ======================================================
+; unknown_member_error: shared body for the two above.
+; r14 = base message, r13 = type id, method_buf / method_len = member name.
+; ======================================================
+unknown_member_error:
+    lea rdi, [error_msg_buf]
+    mov rsi, r14
+    call strcpy_z
+    mov byte [rdi], ' '
+    inc rdi
+    mov byte [rdi], 39      ; opening '
+    inc rdi
+    lea rsi, [method_buf]
+    mov rcx, [method_len]
+    cmp rcx, 64
+    jbe .m_len_ok
+    mov rcx, 64
+.m_len_ok:
+    test rcx, rcx
+    jz .m_cp_done
+.m_cp:
+    mov al, [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .m_cp
+.m_cp_done:
+    mov byte [rdi], 39      ; closing '
+    inc rdi
+    mov byte [rdi], 0
+    ; append " on type <name>"
+    lea rsi, [str_on_type]
+    call strcpy_z
+    mov r12, rdi            ; save buffer end
+    mov rdi, r13
+    call type_name_str      ; rax = type name
+    mov rsi, rax
+    mov rdi, r12
+    call strcpy_z
+    lea rdi, [error_msg_buf]
+    jmp compile_error
 
 ; ======================================================
 ; ident_is: compare method_buf against null-terminated string in rdi
@@ -6689,11 +9746,16 @@ parse_proto_call:
     jne .pc_syntax_err
     mov rdi, [tok_str_ptr]
     mov rsi, [tok_str_len]
-    call proto_lookup
+    call proto_resolve_call
     cmp rax, -1
     je .pc_undef
     mov r15, rax ; proto_id
 
+; Shared call-parsing body. Entry: r15 = proto_id (resolved), current token
+; = the proto name IDENT (advance → '('). Used by @name calls and qualified
+; mod.name(...) calls. Expects rbx/r12-r15 pushed on entry (popped on ret).
+; Referenced as parse_proto_call.pc_resolved.
+.pc_resolved:
     call advance ; consume name → '('
     mov edi, TOK_LPAREN
     call expect ; consume '('
@@ -6839,10 +9901,12 @@ parse_proto_call:
     pop rbx
 
     ; Restore caller's local vars (reverse order — LIFO)
+    ; NOTE: rbx holds the lo return vreg here — do NOT clobber it.
     cmp dword [block_nesting], 0
     je .pc_no_restores
+    push rbx
     mov ebx, [sym_count]
-    jz .pc_no_restores
+    jz .pc_restores_pop
 .pc_restore_loop:
     dec ebx
     mov rdi, rbx
@@ -6869,7 +9933,8 @@ parse_proto_call:
 .pc_restore_next:
     test ebx, ebx
     jnz .pc_restore_loop
-.pc_restores_done:
+.pc_restores_pop:
+    pop rbx
 .pc_no_restores:
 
     ; Record hi return vreg for multi-target mutation
@@ -6939,44 +10004,110 @@ parse_postfix:
     je .pp_method_name
     cmp eax, TOK_LEN
     je .pp_method_name
+    cmp eax, TOK_TYPE
+    je .pp_method_name
     jmp .pp_syntax_err
 
 .pp_method_name:
 
-    ; Check if this is a struct field access
-    cmp r13, TYPE_COMPLEX
-    jne .pp_not_struct_field
-    ; Look up struct type_id from vreg_type_map
+    ; Check if this is a struct field access (base vreg holds a pointer to a
+    ; struct slot; vreg_type_map carries the struct type id).
     movzx eax, word [vreg_type_map + r12 * 4]
     test eax, eax
     jz .pp_not_struct_field
+    push rax
+    mov rdi, rax
+    call type_get_kind
+    mov rcx, rax
+    pop rax
+    cmp rcx, TYPE_COMPLEX
+    jne .pp_not_struct_field
     ; Look up field by name
+    ; Stash the field name in method_buf first — it is needed if the
+    ; lookup misses (advance below clobbers tok_str_ptr).
+    ; NOTE: must not clobber rax here — it holds the struct type id, and
+    ; the copy loop below writes al.
+    push rax                ; save struct type id
+    mov rsi, [tok_str_ptr]
+    mov rcx, [tok_str_len]
+    cmp rcx, 31
+    jle .pp_fnlen_ok
+    mov rcx, 31
+.pp_fnlen_ok:
+    mov [method_len], rcx
+    lea rdi, [method_buf]
+    test rcx, rcx
+    jz .pp_fcopy_done
+.pp_fcopy:
+    mov al, [rsi]
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .pp_fcopy
+.pp_fcopy_done:
+    lea rdi, [method_buf]
+    add rdi, [method_len]
+    mov byte [rdi], 0
+    pop rax                 ; restore struct type id
     mov rdi, rax            ; struct type_id
     mov rsi, [tok_str_ptr]  ; field name ptr
     mov rdx, [tok_str_len]  ; field name len
-    call advance            ; consume field name
     push r12                ; save base vreg
     call type_struct_find_field
+    push rax                ; save offset
+    push rcx                ; save field type
+    call advance            ; consume field name
+    pop r13                 ; r13 = field type
+    pop rax                 ; rax = field offset
     cmp rax, -1
     je .pp_struct_miss
-    ; rax = field offset, ecx = field type_id
-    mov r13, rcx            ; r13 = field type
+    ; rax = field offset, r13 = field_type_id
     push rax                ; save offset
     call alloc_vreg
     pop r9                  ; r9 = field offset
     mov rdx, rax            ; dst vreg
-    pop rcx                 ; src1 = base vreg
-    ; Emit IR_LOAD_VAR
-    mov rdi, IR_LOAD_VAR
+    pop rcx                 ; src1 = base vreg (pointer)
+    push rcx                ; preserve base across type_get_kind
+    push rdx                ; save result vreg
+    push r9                 ; preserve offset across type_get_kind
+    push r13                ; save field type
+    mov rdi, r13
+    call type_get_kind
+    mov rbx, rax
+    pop r13
+    pop r9
+    pop rdx
+    pop rcx
+    ; Nested struct field → the result is a pointer into the parent body:
+    ; dst = base + offset (IR_LEA_FIELD). Scalar field → dst = [base + offset].
+    cmp rbx, TYPE_COMPLEX
+    jne .pp_field_scalar
+    mov rdi, IR_LEA_FIELD
     mov rsi, r13            ; type
     xor r8, r8
     xor r10, r10
-    push rdx                ; save result vreg
+    push rdx
+    call emit_ir
+    pop rdx
+    mov [vreg_type_map + rdx * 4], r13d
+    mov r12, rdx
+    jmp .pp_loop
+.pp_field_scalar:
+    mov rdi, IR_LOAD_FIELD
+    mov rsi, r13            ; type
+    xor r8, r8
+    xor r10, r10
+    push rdx
     call emit_ir
     pop r12                 ; r12 = result vreg
     jmp .pp_loop
 .pp_struct_miss:
     pop r12                 ; restore base vreg
+    ; r12 = base vreg → struct type id is in vreg_type_map[r12*4];
+    ; method_buf holds the field name.
+    movzx r13, word [vreg_type_map + r12 * 4]
+    jmp unknown_field_error
 .pp_not_struct_field:
 
     ; Copy method name into method_buf
@@ -7024,6 +10155,8 @@ parse_postfix:
     je .pp_seq_dispatch
     cmp r13, TYPE_DICT
     je .pp_dict_dispatch
+    cmp r13, TYPE_FILE
+    je .pp_file_dispatch
     jmp .pp_type_err
 
 ; ─────────── INT methods ───────────────────────────────
@@ -7048,23 +10181,23 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_int_signum
-    lea rdi, [str_is_zero]
+    lea rdi, [str_zero]
     call ident_is
     test rax,rax
     jnz .pp_int_is_zero
-    lea rdi, [str_is_positive]
+    lea rdi, [str_positive]
     call ident_is
     test rax,rax
     jnz .pp_int_is_pos
-    lea rdi, [str_is_negative]
+    lea rdi, [str_negative]
     call ident_is
     test rax,rax
     jnz .pp_int_is_neg
-    lea rdi, [str_is_even]
+    lea rdi, [str_even]
     call ident_is
     test rax,rax
     jnz .pp_int_is_even
-    lea rdi, [str_is_odd]
+    lea rdi, [str_odd]
     call ident_is
     test rax,rax
     jnz .pp_int_is_odd
@@ -7116,6 +10249,10 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_int_to_oct
+    lea rdi, [str_pow]
+    call ident_is
+    test rax,rax
+    jnz .pp_int_pow
     jmp .pp_method_err
 
 .pp_int_abs:
@@ -7537,6 +10674,30 @@ parse_postfix:
     mov r13, TYPE_STR
     jmp .pp_loop
 
+.pp_int_pow:
+    call parse_expr
+    mov r14, rax
+    cmp rdx, TYPE_INT
+    jne .pp_pow_type_err
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_POW_I
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_pow_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
 ; ─────────── FLOAT methods ─────────────────────────────
 .pp_float_dispatch:
     lea rdi, [str_abs]
@@ -7583,27 +10744,27 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_float_recip
-    lea rdi, [str_is_zero]
+    lea rdi, [str_zero]
     call ident_is
     test rax,rax
     jnz .pp_float_is_zero
-    lea rdi, [str_is_positive]
+    lea rdi, [str_positive]
     call ident_is
     test rax,rax
     jnz .pp_float_is_pos
-    lea rdi, [str_is_negative]
+    lea rdi, [str_negative]
     call ident_is
     test rax,rax
     jnz .pp_float_is_neg
-    lea rdi, [str_is_nan]
+    lea rdi, [str_nan]
     call ident_is
     test rax,rax
     jnz .pp_float_is_nan
-    lea rdi, [str_is_infinite]
+    lea rdi, [str_inf]
     call ident_is
     test rax,rax
     jnz .pp_float_is_inf
-    lea rdi, [str_is_finite]
+    lea rdi, [str_finite]
     call ident_is
     test rax,rax
     jnz .pp_float_is_finite
@@ -8012,6 +11173,8 @@ parse_postfix:
 .pp_float_pow:
     call parse_expr
     mov r14, rax
+    cmp rdx, TYPE_FLOAT
+    jne .pp_pow_type_err
     mov edi, TOK_RPAREN
     call expect
     call alloc_vreg
@@ -8093,6 +11256,10 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_bool_or
+    lea rdi, [str_str_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_bool_str
     jmp .pp_method_err
 
 .pp_bool_is_true:
@@ -8228,6 +11395,23 @@ parse_postfix:
     mov r12, rbx
     jmp .pp_loop
 
+.pp_bool_str:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_BTOS
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
 ; ─────────── CHAR methods ──────────────────────────────
 .pp_char_dispatch:
     lea rdi, [str_is_alpha]
@@ -8286,6 +11470,54 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_char_to_digit
+    lea rdi, [str_str_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_str
+    lea rdi, [str_int_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_to_int
+    lea rdi, [str_byte_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_to_byte
+    lea rdi, [str_alpha]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_is_alpha
+    lea rdi, [str_digit]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_to_digit
+    lea rdi, [str_alnum_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_is_alnum
+    lea rdi, [str_whitespace]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_is_space
+    lea rdi, [str_upper]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_to_upper
+    lea rdi, [str_lower]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_to_lower
+    lea rdi, [str_punct_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_is_punct
+    lea rdi, [str_printable_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_is_print
+    lea rdi, [str_ascii_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_char_is_ascii
     jmp .pp_method_err
 
 %macro pp_char_pred 2
@@ -8416,28 +11648,29 @@ parse_postfix:
     mov r13, TYPE_INT
     jmp .pp_loop
 
+.pp_char_str:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CTOS
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
 ; ─────────── BYTE methods ──────────────────────────────
 .pp_byte_dispatch:
     lea rdi, [str_popcount]
     call ident_is
     test rax,rax
     jnz .pp_byte_popcount
-    lea rdi, [str_is_zero]
-    call ident_is
-    test rax,rax
-    jnz .pp_byte_is_zero
-    lea rdi, [str_is_even]
-    call ident_is
-    test rax,rax
-    jnz .pp_byte_is_even
-    lea rdi, [str_is_odd]
-    call ident_is
-    test rax,rax
-    jnz .pp_byte_is_odd
-    lea rdi, [str_is_ascii]
-    call ident_is
-    test rax,rax
-    jnz .pp_byte_is_ascii
     lea rdi, [str_to_int]
     call ident_is
     test rax,rax
@@ -8458,6 +11691,46 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_byte_ctz
+    lea rdi, [str_str_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_str
+    lea rdi, [str_int_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_to_int
+    lea rdi, [str_char_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_to_char
+    lea rdi, [str_bit]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_bit
+    lea rdi, [str_rotate_left]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_rol
+    lea rdi, [str_rotate_right]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_ror
+    lea rdi, [str_hex_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_hex
+    lea rdi, [str_bin_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_bin
+    lea rdi, [str_zero]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_is_zero
+    lea rdi, [str_ascii_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_byte_is_ascii
     jmp .pp_method_err
 
 .pp_byte_popcount:
@@ -8489,40 +11762,6 @@ parse_postfix:
     xor r8,r8
     xor r9,r9
     mov r10,COND_EQ
-    call emit_ir
-    mov r12, rbx
-    mov r13, TYPE_BOOL
-    jmp .pp_loop
-
-.pp_byte_is_even:
-    mov edi, TOK_RPAREN
-    call expect
-    call alloc_vreg
-    mov rbx, rax
-    mov rdi, IR_IS_EVEN
-    mov rsi, TYPE_BYTE
-    mov rdx, rbx
-    mov rcx, r12
-    xor r8,r8
-    xor r9,r9
-    xor r10,r10
-    call emit_ir
-    mov r12, rbx
-    mov r13, TYPE_BOOL
-    jmp .pp_loop
-
-.pp_byte_is_odd:
-    mov edi, TOK_RPAREN
-    call expect
-    call alloc_vreg
-    mov rbx, rax
-    mov rdi, IR_IS_ODD
-    mov rsi, TYPE_BYTE
-    mov rdx, rbx
-    mov rcx, r12
-    xor r8,r8
-    xor r9,r9
-    xor r10,r10
     call emit_ir
     mov r12, rbx
     mov r13, TYPE_BOOL
@@ -8629,6 +11868,118 @@ parse_postfix:
     mov r13, TYPE_INT
     jmp .pp_loop
 
+.pp_byte_str:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_CTOS
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
+.pp_byte_bit:
+    call parse_expr
+    mov r14, rax
+    cmp rdx, TYPE_INT
+    jne .pp_pow_type_err
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_BYTE_BIT
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_BOOL
+    jmp .pp_loop
+
+.pp_byte_rol:
+    call parse_expr
+    mov r14, rax
+    cmp rdx, TYPE_INT
+    jne .pp_pow_type_err
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_BYTE_ROL
+    mov rsi, TYPE_BYTE
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_byte_ror:
+    call parse_expr
+    mov r14, rax
+    cmp rdx, TYPE_INT
+    jne .pp_pow_type_err
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_BYTE_ROR
+    mov rsi, TYPE_BYTE
+    mov rdx, rbx
+    mov rcx, r12
+    mov r8, r14
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    jmp .pp_loop
+
+.pp_byte_hex:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_BYTE_HEX
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
+.pp_byte_bin:
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_BYTE_BIN
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
 ; ─────────── SEQ methods ───────────────────────────────
 .pp_seq_dispatch:
     lea rdi, [str_push]
@@ -8667,10 +12018,18 @@ parse_postfix:
     call ident_is
     test rax,rax
     jnz .pp_seq_contains
+    lea rdi, [str_index]
+    call ident_is
+    test rax,rax
+    jnz .pp_seq_index_of
     lea rdi, [str_index_of]
     call ident_is
     test rax,rax
     jnz .pp_seq_index_of
+    lea rdi, [str_count]
+    call ident_is
+    test rax,rax
+    jnz .pp_seq_count_of
     lea rdi, [str_count_of]
     call ident_is
     test rax,rax
@@ -9193,6 +12552,386 @@ parse_postfix:
     mov r13, TYPE_INT
     jmp .pp_loop
 
+; ─────────── File methods (design.md §15.4) ───────────
+.pp_file_dispatch:
+    lea rdi, [str_read]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_read
+    lea rdi, [str_read_line]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_read_line
+    lea rdi, [str_read_bytes]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_read_bytes
+    lea rdi, [str_read_all_bytes]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_read_all_bytes
+    lea rdi, [str_lines_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_lines
+    lea rdi, [str_write_m]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_write
+    lea rdi, [str_writeln]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_writeln
+    lea rdi, [str_write_bytes]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_write_bytes
+    lea rdi, [str_seek]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_seek
+    lea rdi, [str_seek_end]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_seek_end
+    lea rdi, [str_pos]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_pos
+    lea rdi, [str_size]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_size
+    lea rdi, [str_is_eof]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_is_eof
+    lea rdi, [str_flush]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_flush
+    lea rdi, [str_path]
+    call ident_is
+    test rax,rax
+    jnz .pp_file_path
+    jmp .pp_method_err
+
+.pp_file_read:
+    ; .read() → str (remaining file)
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_READ
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
+.pp_file_read_line:
+    ; .read_line() → str (includes \n, empty at EOF)
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_READ_LINE
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
+.pp_file_read_bytes:
+    ; .read_bytes(n) → seq[byte]
+    call parse_expr ; n vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_INT
+    jne .pp_file_type_err
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_READ_BYTES
+    mov rsi, TYPE_SEQ
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    mov r8, r14     ; src2 = n
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_SEQ
+    mov dword [vreg_elem_types + r12 * 4], TYPE_BYTE
+    jmp .pp_loop
+
+.pp_file_read_all_bytes:
+    ; .read_all_bytes() → seq[byte]
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_READ_ALL_BYTES
+    mov rsi, TYPE_SEQ
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_SEQ
+    mov dword [vreg_elem_types + r12 * 4], TYPE_BYTE
+    jmp .pp_loop
+
+.pp_file_lines:
+    ; .lines() → seq[str]
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_LINES
+    mov rsi, TYPE_SEQ
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_SEQ
+    mov dword [vreg_elem_types + r12 * 4], TYPE_STR
+    jmp .pp_loop
+
+.pp_file_write:
+    ; .write(s) — void
+    call parse_expr ; s vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_STR
+    jne .pp_file_type_err
+    mov rdi, IR_FILE_WRITE
+    mov rsi, TYPE_FILE
+    xor rdx, rdx     ; dst = 0 (void)
+    mov rcx, r12     ; src1 = handle
+    mov r8, r14      ; src2 = s
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    jmp .pp_loop
+
+.pp_file_writeln:
+    ; .writeln(s) — void
+    call parse_expr ; s vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_STR
+    jne .pp_file_type_err
+    mov rdi, IR_FILE_WRITELN
+    mov rsi, TYPE_FILE
+    xor rdx, rdx     ; dst = 0 (void)
+    mov rcx, r12     ; src1 = handle
+    mov r8, r14      ; src2 = s
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    jmp .pp_loop
+
+.pp_file_write_bytes:
+    ; .write_bytes(b) — void
+    call parse_expr ; b vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_SEQ
+    jne .pp_file_type_err
+    mov rdi, IR_FILE_WRITE_BYTES
+    mov rsi, TYPE_FILE
+    xor rdx, rdx     ; dst = 0 (void)
+    mov rcx, r12     ; src1 = handle
+    mov r8, r14      ; src2 = b
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    jmp .pp_loop
+
+.pp_file_seek:
+    ; .seek(pos) — void
+    call parse_expr ; pos vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r14
+    cmp rdx, TYPE_INT
+    jne .pp_file_type_err
+    mov rdi, IR_FILE_SEEK
+    mov rsi, TYPE_FILE
+    xor rdx, rdx     ; dst = 0 (void)
+    mov rcx, r12     ; src1 = handle
+    mov r8, r14      ; src2 = pos
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    jmp .pp_loop
+
+.pp_file_seek_end:
+    ; .seek_end(n) — void (n bytes before end; default 0)
+    mov r14, r12 ; save handle vreg (arg parse may use r12)
+    mov eax, [current_token]
+    cmp eax, TOK_RPAREN
+    je .pp_seek_end_default
+    call parse_expr ; n vreg
+    push rax
+    push rdx
+    mov edi, TOK_RPAREN
+    call expect
+    pop rdx
+    pop r15
+    cmp rdx, TYPE_INT
+    jne .pp_file_type_err
+    jmp .pp_seek_end_emit
+.pp_seek_end_default:
+    mov edi, TOK_RPAREN
+    call expect
+    ; default offset 0: emit IR_LOAD_IMM 0
+    call alloc_vreg
+    push rax
+    mov rdi, IR_LOAD_IMM
+    xor rsi, rsi
+    mov rdx, [rsp]
+    xor rcx, rcx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    pop r15
+.pp_seek_end_emit:
+    mov r12, r14 ; restore handle vreg
+    mov rdi, IR_FILE_SEEK_END
+    mov rsi, TYPE_FILE
+    xor rdx, rdx
+    mov rcx, r12     ; src1 = handle
+    mov r8, r15      ; src2 = n
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .pp_loop
+
+.pp_file_pos:
+    ; .pos() → int
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_POS
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_INT
+    jmp .pp_loop
+
+.pp_file_size:
+    ; .size() → int
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_SIZE
+    mov rsi, TYPE_INT
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_INT
+    jmp .pp_loop
+
+.pp_file_is_eof:
+    ; .is_eof() → bool
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_IS_EOF
+    mov rsi, TYPE_BOOL
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_BOOL
+    jmp .pp_loop
+
+.pp_file_flush:
+    ; .flush() — void
+    mov edi, TOK_RPAREN
+    call expect
+    mov rdi, IR_FILE_FLUSH
+    mov rsi, TYPE_FILE
+    xor rdx, rdx
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    call emit_ir
+    jmp .pp_loop
+
+.pp_file_path:
+    ; .path → str (no parentheses in Python; here used as path())
+    mov edi, TOK_RPAREN
+    call expect
+    call alloc_vreg
+    mov rbx, rax
+    mov rdi, IR_FILE_PATH
+    mov rsi, TYPE_STR
+    mov rdx, rbx
+    mov rcx, r12    ; src1 = handle
+    xor r8,r8
+    xor r9,r9
+    xor r10,r10
+    call emit_ir
+    mov r12, rbx
+    mov r13, TYPE_STR
+    jmp .pp_loop
+
+.pp_file_type_err:
+    mov rdi, err_type_mismatch
+    jmp compile_error
+
 ; ─────────── bracket index s[i] ───────────────────────
 .pp_bracket_index:
     ; r12 = base vreg, r13 = base type
@@ -9214,8 +12953,15 @@ parse_postfix:
 .pp_bracket_seq:
     call alloc_vreg
     push rax
+    ; Determine element type: seq[T] → T (from vreg_elem_types); default INT
+    mov eax, [vreg_elem_types + r12 * 4]
+    test eax, eax
+    jnz .pp_bracket_seq_elem_ok
+    mov eax, TYPE_INT
+.pp_bracket_seq_elem_ok:
+    mov r15d, eax ; element type
     mov rdi, IR_SEQ_LOAD
-    mov rsi, TYPE_INT
+    mov rsi, r15 ; element type
     mov rdx, [rsp] ; dst
     ; rcx = seq vreg (src1)
     mov r8, r14 ; index vreg (src2)
@@ -9223,13 +12969,22 @@ parse_postfix:
     xor r10, r10
     call emit_ir
     pop r12 ; result vreg
-    mov r13, TYPE_INT
+    mov r13, r15
+    ; record element type on the result vreg for further indexing
+    mov [vreg_elem_types + r12 * 4], r15d
     jmp .pp_loop
 .pp_bracket_dict:
     call alloc_vreg
     push rax
+    ; Determine value type: dict[T] → T (from vreg_elem_types); default INT
+    mov eax, [vreg_elem_types + r12 * 4]
+    test eax, eax
+    jnz .pp_bracket_dict_val_ok
+    mov eax, TYPE_INT
+.pp_bracket_dict_val_ok:
+    mov r15d, eax ; value type
     mov rdi, IR_DICT_LOAD
-    mov rsi, TYPE_INT
+    mov rsi, r15 ; value type
     mov rdx, [rsp] ; dst
     ; rcx = dict vreg (src1)
     mov r8, r14 ; key vreg (src2)
@@ -9237,7 +12992,9 @@ parse_postfix:
     xor r10, r10
     call emit_ir
     pop r12 ; result vreg
-    mov r13, TYPE_INT
+    mov r13, r15
+    ; record value type on the result vreg for further indexing
+    mov [vreg_elem_types + r12 * 4], r15d
     jmp .pp_loop
 .pp_bracket_arr:
     ; Array index access: dst = arr[index]
@@ -9285,13 +13042,7 @@ parse_postfix:
     jmp compile_error
 
 .pp_method_err:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    mov rdi, err_unknown_method
-    jmp compile_error
+    jmp unknown_method_error
 
 ; Global error handlers accessible from any function
 expected_ident:
@@ -9309,3 +13060,212 @@ full_error:
 type_error:
     mov rdi, err_type_mismatch
     jmp compile_error
+
+; ─────────────────────────────────────────────────────────────
+; parse_qualified_expr — evaluate a qualified module reference as an
+; expression (design.md §17.2): `mod.name` (global read) or `mod.name(...)`
+; (protocol call). Entry: r15 = module id, current token = member IDENT
+; (the `mod.` prefix already consumed). Returns rax = vreg, rdx = type.
+parse_qualified_expr:
+    call save_ident
+    call lexer_peek_token
+    cmp eax, TOK_LPAREN
+    je .q_expr_call
+    ; --- Qualified global read: mod.name ---
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    mov edx, r15d
+    call sym_lookup_module
+    cmp rax, -1
+    je .q_expr_undef
+    mov r14, rax ; sym idx
+    ; Private members are visible only inside the defining module.
+    mov rdi, r14
+    call sym_is_private
+    test rax, rax
+    jz .q_expr_read
+    mov eax, [current_module]
+    cmp eax, r15d
+    je .q_expr_read
+    jmp .q_expr_private
+.q_expr_read:
+    call advance ; consume member name
+    push r14 ; sym_idx
+    mov rdi, [rsp]
+    call sym_is_init
+    test rax, rax
+    jz .q_expr_uninit
+    mov rdi, [rsp]
+    call sym_get_type
+    push rax ; type
+    call alloc_vreg
+    push rax ; vreg
+    mov rdi, [rsp + 16] ; sym_idx
+    call sym_get_offset
+    mov r9, rax ; offset
+    ; Struct variables hold a pointer to their slot: emit LEA_VAR.
+    mov rdi, [rsp + 8] ; type
+    push rdi
+    call type_get_kind
+    mov rcx, rax
+    pop rdi
+    cmp rcx, TYPE_COMPLEX
+    je .q_expr_struct
+    mov rdi, IR_LOAD_VAR
+    mov rsi, [rsp + 8] ; type
+    mov rdx, [rsp] ; dst
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+    jmp .q_expr_ready
+.q_expr_struct:
+    mov rdi, IR_LEA_VAR
+    mov rsi, [rsp + 8] ; type
+    mov rdx, [rsp] ; dst
+    xor rcx, rcx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+.q_expr_ready:
+    pop rax ; vreg
+    pop rdx ; type
+    ; Store type_id in vreg_type_map for struct field access
+    push rax
+    push rdx
+    mov [vreg_type_map + rax * 4], edx
+    ; Store container element type for bracket indexing
+    push rbx
+    push rcx
+    push rax
+    mov rdi, [rsp + 40] ; sym_idx
+    call sym_get_elem_type
+    mov rcx, rax
+    pop rax
+    mov [vreg_elem_types + rax * 4], ecx
+    pop rcx
+    pop rbx
+    pop rdx
+    pop rax
+    add rsp, 8 ; clean up sym_idx
+    ret
+.q_expr_call:
+    ; --- Qualified protocol call: mod.name(...) ---
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    mov edx, r15d
+    call proto_lookup_module
+    cmp rax, -1
+    je .q_expr_undef
+    mov r14, rax ; proto id
+    ; Private protos are callable only inside the defining module.
+    mov rdi, r14
+    call proto_get_private
+    test rax, rax
+    jz .q_expr_call_ok
+    mov eax, [current_module]
+    cmp eax, r15d
+    je .q_expr_call_ok
+    jmp .q_expr_private
+.q_expr_call_ok:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r15, r14 ; proto id
+    jmp parse_proto_call.pc_resolved
+.q_expr_undef:
+    jmp undef_error
+.q_expr_uninit:
+    mov rdi, err_uninit
+    jmp compile_error
+.q_expr_private:
+    mov rdi, err_private_member
+    jmp compile_error
+
+; ─────────────────────────────────────────────────────────────
+; parse_qualified_mutation — `:mod.name = expr`. Entry: r15 = module id,
+; current token = member IDENT (the `mod.` prefix already consumed).
+parse_qualified_mutation:
+    call save_ident
+    mov rdi, ident_buf
+    mov rsi, [ident_len]
+    mov edx, r15d
+    call sym_lookup_module
+    cmp rax, -1
+    je .q_mut_undef
+    mov r14, rax ; sym idx
+    ; Private members are visible only inside the defining module.
+    mov rdi, r14
+    call sym_is_private
+    test rax, rax
+    jz .q_mut_ok
+    mov eax, [current_module]
+    cmp eax, r15d
+    jne .q_mut_private
+.q_mut_ok:
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_mutable
+    call advance ; consume member name
+    mov edi, TOK_ASSIGN
+    call expect
+    call parse_expr ; rax = vreg, rdx = type
+    mov rdi, r14
+    push rax
+    push rdx
+    call sym_get_type
+    pop rdx
+    call types_compatible
+    je .q_mut_type_ok
+    jmp type_error
+.q_mut_type_ok:
+    mov rdi, r14
+    mov rsi, 1
+    call sym_set_init
+    mov rdi, r14
+    call sym_get_offset
+    mov r9, rax ; imm = offset
+    mov rdi, r14
+    call sym_get_type
+    mov r12, rax ; type
+    pop rcx ; src1 vreg
+    mov rdi, IR_STORE_VAR
+    mov rsi, r12
+    xor rdx, rdx
+    xor r8, r8
+    xor r10, r10
+    call emit_ir
+    ret
+.q_mut_undef:
+    jmp undef_error
+.q_mut_private:
+    mov rdi, err_private_member
+    jmp compile_error
+
+; Null-compatible type check (design.md §4.16):
+; A `null` literal (expr type = TYPE_VOID) may be stored into any reference
+; type: str, seq, dict, tup, and struct (TYPE_COMPLEX).
+; Inputs:  rax = declared type, rdx = expression type
+; Output:  ZF = 1 if compatible (types equal, or null -> reference type)
+types_compatible:
+    cmp rax, rdx
+    je .tc_match
+    cmp rdx, TYPE_VOID
+    jne .tc_nomatch
+    cmp rax, TYPE_STR
+    je .tc_match
+    cmp rax, TYPE_SEQ
+    je .tc_match
+    cmp rax, TYPE_DICT
+    je .tc_match
+    cmp rax, TYPE_TUP
+    je .tc_match
+    cmp rax, TYPE_COMPLEX
+    je .tc_match
+.tc_nomatch:
+    ret ; ZF = 0 (last cmp mismatch)
+.tc_match:
+    cmp rax, rax ; ZF = 1
+    ret

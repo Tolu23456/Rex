@@ -134,14 +134,6 @@ BITS 64
     mov rdi, 1          ; stdout
     syscall
 
-    ; Print newline
-    mov byte [rbp-1], 10
-    lea rsi, [rbp-1]
-    mov rdx, 1
-    mov rax, 1          ; sys_write
-    mov rdi, 1          ; stdout
-    syscall
-
     mov rsp, rbp
     pop r13
     pop r12
@@ -168,26 +160,23 @@ BITS 64
     mov byte [rbp-7], 'i'
     mov byte [rbp-6], 'n'
     mov byte [rbp-5], 'f'
-    mov byte [rbp-4], 10
     lea rsi, [rbp-8]
-    mov rdx, 5
+    mov rdx, 4
     jmp .print_nan_inf_write
 .print_inf_pos:
     mov byte [rbp-8], 'i'
     mov byte [rbp-7], 'n'
     mov byte [rbp-6], 'f'
-    mov byte [rbp-5], 10
     lea rsi, [rbp-8]
-    mov rdx, 4
+    mov rdx, 3
     jmp .print_nan_inf_write
 .print_nan:
     ; Print "nan"
     mov byte [rbp-8], 'n'
     mov byte [rbp-7], 'a'
     mov byte [rbp-6], 'n'
-    mov byte [rbp-5], 10
     lea rsi, [rbp-8]
-    mov rdx, 4
+    mov rdx, 3
 .print_nan_inf_write:
     mov rax, 1
     mov rdi, 1

@@ -127,11 +127,11 @@ run_optimizations:
     ret
 
 pass_constant_folding:
-    ; Scan for branching IR opcodes. If any exist, skip this pass entirely
-    ; because linear-scan constant folding is unsound across branches.
-    call has_branching_ir
-    test rax, rax
-    jnz .done              ; branching detected — skip pass
+    ; Fold constant expressions. vreg constants are SSA-sound (a vreg is
+    ; defined exactly once), so they can be tracked across branches safely.
+    ; var_is_const is only sound within a branch-free linear region, so it is
+    ; invalidated at every branch opcode (IR_JCC/JMP/LABEL/CALL/…): a store
+    ; followed by a branch may be bypassed, so later loads must not fold.
     ; Initialize state
     mov rcx, VREG_MAX
     lea rdi, [vreg_is_const]
@@ -162,6 +162,30 @@ pass_constant_folding:
     
     movzx eax, byte [r13 + 0] ; opcode
     
+    ; Branch or call — invalidate var constants, skip this instruction
+    cmp eax, IR_JCC
+    je .invalidate_and_next
+    cmp eax, IR_JMP
+    je .invalidate_and_next
+    cmp eax, IR_LABEL
+    je .invalidate_and_next
+    cmp eax, IR_CALL
+    je .invalidate_and_next
+    cmp eax, IR_CALL_ARG
+    je .invalidate_and_next
+    cmp eax, IR_PROTO_BEGIN
+    je .invalidate_and_next
+    cmp eax, IR_SAVE_ARG
+    je .invalidate_and_next
+    cmp eax, IR_SAVE_LOCAL_VAR
+    je .invalidate_and_next
+    cmp eax, IR_RESTORE_LOCAL_VAR
+    je .invalidate_and_next
+    cmp eax, IR_WHEN
+    je .invalidate_and_next
+    cmp eax, IR_ABORT
+    je .invalidate_and_next
+
     cmp eax, IR_LOAD_IMM
     je .handle_load_imm
 
@@ -409,6 +433,14 @@ pass_constant_folding:
     mov [vreg_const_val + rcx * 8], r8
     jmp .next
 
+.invalidate_and_next:
+    ; A branch/call may bypass a prior const store — drop all var constants.
+    mov rcx, VAR_MAX
+    lea rdi, [var_is_const]
+    xor eax, eax
+    rep stosb
+    jmp .next
+
 .next:
     inc ebx
     jmp .loop
@@ -445,6 +477,12 @@ pass_dead_store_elimination:
     cmp eax, IR_STORE_VAR
     je .dse_store_var
     
+    ; IR_SWAP_VARS reads both memory operands (imm=offset_a, aux=offset_b) even
+    ; though neither is expressed as a vreg — without marking them read, a store
+    ; feeding the swap is killed as dead and the swap exchanges with garbage.
+    cmp eax, IR_SWAP_VARS
+    je .dse_swap_vars
+    
     jmp .next_dse
 
 .dse_load_var:
@@ -469,6 +507,21 @@ pass_dead_store_elimination:
     
 .kill_store:
     mov byte [r13 + 0], IR_NOP
+    
+.dse_swap_vars:
+    mov rdi, [r13 + 8] ; imm = offset_a
+    call sym_find_by_offset
+    cmp rax, -1
+    je .dse_swap_b
+    mov r8, rax
+    mov byte [var_is_read + r8], 1
+.dse_swap_b:
+    mov rdi, [r13 + 16] ; aux = offset_b
+    call sym_find_by_offset
+    cmp rax, -1
+    je .next_dse
+    mov r8, rax
+    mov byte [var_is_read + r8], 1
     
 .next_dse:
     test ebx, ebx
@@ -600,12 +653,11 @@ pass_load_store_coalescing:
 
 pass_peephole:
     ; Simplifies algebraic identities (+0, *1, *0, *2).
-    ; NOTE: vreg_is_const[] is still populated from pass_constant_folding,
-    ; so peephole reads correct data.  New aliases written here are consumed
-    ; by pass_apply_aliases which runs immediately after.
-    call has_branching_ir
-    test rax, rax
-    jnz .done
+    ; vreg_is_const[] is populated by pass_constant_folding (which always runs),
+    ; so peephole reads correct data.  All rewrites here operate on vregs,
+    ; which are SSA (defined exactly once), so they remain sound across
+    ; branches/loops.  New aliases written here are consumed by
+    ; pass_apply_aliases which runs immediately after.
     mov r12d, [ir_count]
     test r12d, r12d
     jz .done
@@ -794,12 +846,11 @@ pass_peephole:
 ;  Bug 2 fix: pass_apply_aliases
 ;  Propagates ALL accumulated vreg_alias entries through the IR.
 ;  Runs after pass_peephole to catch aliases created by both
-;  pass_load_store_coalescing and pass_peephole.
+;  pass_load_store_coalescing (straight-line code only) and pass_peephole.
+;  Aliases are SSA facts (each dst vreg is defined exactly once), so
+;  propagation remains sound across branches/loops.
 ; ============================================================
 pass_apply_aliases:
-    call has_branching_ir
-    test rax, rax
-    jnz .done
     mov r12d, [ir_count]
     test r12d, r12d
     jz .done
@@ -2037,6 +2088,29 @@ opt_try_promote_loop:
     jae .nest_next
     mov [nest_h2], eax
     mov [nest_j2], ebx
+    ; A nested loop that was already promoted has its original header loads
+    ; NOPed ([h2+1]/[h2+2] are IR_NOP) and its symbol accesses moved outside
+    ; this region (hoisted header loads, post-loop write-backs), so
+    ; prom_nested_conflict cannot see or exclude them. Promoting this outer
+    ; loop would then hoist and corrupt the inner loop's symbols — abort.
+    mov edx, [nest_h2]
+    add edx, 1
+    imul eax, edx, IR_RECORD_SIZE
+    lea r15, [ir_buffer + rax]
+    movzx eax, byte [r15]
+    test al, al
+    jz .nested_promoted
+    mov edx, [nest_h2]
+    add edx, 2
+    imul eax, edx, IR_RECORD_SIZE
+    lea r15, [ir_buffer + rax]
+    movzx eax, byte [r15]
+    test al, al
+    jnz .nested_unpromoted
+.nested_promoted:
+    mov byte [prom_debug], 0x30
+    jmp .fail
+.nested_unpromoted:
     call prom_nested_conflict
 .nest_next:
     inc ebx
@@ -2483,7 +2557,15 @@ opt_try_promote_loop:
     add eax, [prom_shift]
     imul eax, eax, IR_RECORD_SIZE
     lea r15, [ir_buffer + rax]
+    ; The RMW rewrite may have retargeted this LOAD_IMM's dst to a promoted
+    ; vreg (in-loop const mutation, e.g. `:b = 7`). Such a record must stay
+    ; live — only pure hoist copies (dst unchanged) become NOPs.
+    movzx eax, word [r15 + 2]
+    movzx ebx, word [prom_hoist_dst + rdx * 2]
+    cmp ax, bx
+    jne .hist_nop_next
     mov byte [r15], IR_NOP
+.hist_nop_next:
     inc edx
     jmp .hist_nop
 .hist_nop_done:

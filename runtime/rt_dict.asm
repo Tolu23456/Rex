@@ -1,6 +1,12 @@
 ; rt_dict.asm - Dictionary runtime operations for Rex
-; Dict layout: [capacity:8][count:8][keys: cap*8][values: cap*8]
-; Keys are string pointers; 0 = empty slot, 1 = deleted (tombstone)
+;
+; Dict layout: [capacity:8][count:8][keys_ptr:8][values_ptr:8]  (32-byte header)
+; keys array:   [capacity * 8] bytes  (key = string pointer; 0 = empty, 1 = tombstone)
+; values array: [capacity * 8] bytes
+;
+; The header address NEVER changes once created: resize allocates NEW keys/values
+; arrays and swaps the pointers in place, so caller-held dict pointers always
+; stay valid. Heap is bump-allocated via brk (two-step: brk(0) then brk(base+size)).
 BITS 64
 
 section .text
@@ -17,27 +23,58 @@ rt_dict_new:
     push rbx
     push r12
     push r13
-    mov r12, rdi
-    mov rax, r12
-    shl rax, 4
-    add rax, 16
-    mov r13, rax
+    push r14
+    mov r12, rdi        ; capacity
+
+    ; Allocate header (32 bytes) via two-step brk
     mov rax, 12
     xor rdi, rdi
     syscall
-    mov rbx, rax
-    mov rdi, rbx
-    add rdi, r13
+    mov rbx, rax        ; rbx = header
+    lea rdi, [rbx + 32]
     mov rax, 12
     syscall
-    mov [rbx], r12
-    mov qword [rbx + 8], 0
-    lea rdi, [rbx + 16]
+
+    ; Allocate keys array (capacity * 8)
+    mov rax, 12
+    xor rdi, rdi
+    syscall
+    mov r13, rax        ; r13 = keys
+    mov rax, r12
+    shl rax, 3
+    mov rdi, r13
+    add rdi, rax
+    mov rax, 12
+    syscall
+
+    ; Allocate values array (capacity * 8)
+    mov rax, 12
+    xor rdi, rdi
+    syscall
+    mov r14, rax        ; r14 = values
+    mov rax, r12
+    shl rax, 3
+    mov rdi, r14
+    add rdi, rax
+    mov rax, 12
+    syscall
+
+    ; Initialize header
+    mov [rbx], r12          ; capacity
+    mov qword [rbx + 8], 0  ; count = 0
+    mov [rbx + 16], r13     ; keys_ptr
+    mov [rbx + 24], r14     ; values_ptr
+
+    ; Zero keys + values arrays (capacity * 2 qwords total)
+    mov rdi, r13
     mov rcx, r12
     shl rcx, 1
     xor rax, rax
+    cld
     rep stosq
+
     mov rax, rbx
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -96,15 +133,16 @@ rt_dict_get:
     jz .get_nf
     mov rdi, r12
     call rt_djb2_hash
-    mov r14, [rbx]
+    mov r14, [rbx]      ; capacity
     test r14, r14
     jz .get_nf
     xor rdx, rdx
     div r14
-    mov r15, rdx
+    mov r15, rdx        ; probe index = hash % capacity (remainder)
 .get_probe:
     lea rcx, [r15 * 8]
-    mov rsi, [rbx + 16 + rcx]
+    mov rsi, [rbx + 16] ; keys_ptr
+    mov rsi, [rsi + rcx]
     test rsi, rsi
     jz .get_nf
     cmp rsi, 1
@@ -120,10 +158,7 @@ rt_dict_get:
     ; Probed entire table — key not found
     jmp .get_nf
 .get_found:
-    mov rax, r14
-    shl rax, 3
-    add rax, 16
-    add rax, rbx
+    mov rax, [rbx + 24] ; values_ptr
     lea rcx, [r15 * 8]
     mov rax, [rax + rcx]
     pop r15
@@ -145,7 +180,7 @@ rt_dict_get:
 ; rdi = dict pointer
 ; rsi = key (string pointer)
 ; rdx = value
-; Returns: rax = dict pointer
+; Returns: rax = dict pointer (header is stable, pointer never changes)
 rt_dict_set:
     push rbx
     push r12
@@ -159,15 +194,16 @@ rt_dict_set:
     jz .set_done
     mov rdi, r12
     call rt_djb2_hash
-    mov r14, [rbx]
+    mov r14, [rbx]      ; capacity
     test r14, r14
     jz .set_done
     xor rdx, rdx
     div r14
-    mov r15, rdx
+    mov r15, rdx        ; probe index = hash % capacity (remainder)
 .set_probe:
     lea rcx, [r15 * 8]
-    mov rsi, [rbx + 16 + rcx]
+    mov rsi, [rbx + 16] ; keys_ptr
+    mov rsi, [rsi + rcx]
     test rsi, rsi
     jz .set_empty
     cmp rsi, 1
@@ -180,14 +216,12 @@ rt_dict_set:
     inc r15
     cmp r15, r14
     jb .set_probe
-    ; Table is full — resize and rehash
+    ; Table is full — resize (swaps pointers in place) and retry
     mov rdi, rbx
     call rt_dict_resize
-    mov rbx, rax            ; use new dict
-    ; Re-hash the key and retry
     mov rdi, r12
     call rt_djb2_hash
-    mov r14, [rbx]          ; new capacity
+    mov r14, [rbx]      ; new capacity
     xor rdx, rdx
     div r14
     mov r15, rdx
@@ -195,24 +229,18 @@ rt_dict_set:
 .set_empty:
     ; Store key at keys[r15]
     lea rcx, [r15 * 8]
-    mov [rbx + 16 + rcx], r12
-    ; Store value at values[r15] = dict + 16 + cap*8 + r15*8
-    mov rax, r14
-    shl rax, 3
-    add rax, 16
-    add rax, rbx
-    lea rcx, [r15 * 8]
-    mov [rax + rcx], r13
+    mov rsi, [rbx + 16] ; keys_ptr
+    mov [rsi + rcx], r12
+    ; Store value at values[r15]
+    mov rsi, [rbx + 24] ; values_ptr
+    mov [rsi + rcx], r13
     inc qword [rbx + 8]
     jmp .set_done
 .set_update:
     ; Update value at values[r15]
-    mov rax, r14
-    shl rax, 3
-    add rax, 16
-    add rax, rbx
     lea rcx, [r15 * 8]
-    mov [rax + rcx], r13
+    mov rsi, [rbx + 24] ; values_ptr
+    mov [rsi + rcx], r13
 .set_done:
     mov rax, rbx
     pop r15
@@ -231,85 +259,87 @@ rt_dict_len:
 
 ; rt_dict_resize: Double the dict capacity and rehash all entries
 ; rdi = dict pointer
-; Returns: rax = new dict pointer
+; Returns: rax = dict pointer (same stable header)
 rt_dict_resize:
     push rbx
     push r12
     push r13
     push r14
     push r15
-    mov rbx, rdi            ; old dict
+    mov rbx, rdi            ; dict (stable header)
     mov r14, [rbx]          ; old capacity
     mov r15, [rbx + 8]      ; count
     ; New capacity = old * 2
     lea r12, [r14 * 2]
-    ; Allocate new dict: 16 + new_cap*8 (keys) + new_cap*8 (values)
-    mov rax, r12
-    shl rax, 4
-    add rax, 16
-    mov rdi, rax
-    mov rax, 12             ; sys_brk
+
+    ; Allocate new keys array (new_cap * 8)
+    mov rax, 12
+    xor rdi, rdi
     syscall
-    ; rax = new dict — save it immediately
-    mov r13, rax            ; r13 = new dict
-    ; Set new capacity and count
-    mov [r13], r12
-    mov [r13 + 8], r15
-    ; Zero out keys + values arrays (new_cap * 16 bytes starting at r13+16)
-    lea rdi, [r13 + 16]
-    xor eax, eax
+    mov r13, rax            ; r13 = new keys
+    mov rax, r12
+    shl rax, 3
+    mov rdi, r13
+    add rdi, rax
+    mov rax, 12
+    syscall
+
+    ; Allocate new values array (new_cap * 8)
+    mov rax, 12
+    xor rdi, rdi
+    syscall
+    mov r9, rax             ; r9 = new values (rt_djb2_hash does not touch r9)
+    mov rax, r12
+    shl rax, 3
+    mov rdi, r9
+    add rdi, rax
+    mov rax, 12
+    syscall
+
+    ; Zero out new keys + values arrays (new_cap * 2 qwords)
+    mov rdi, r13
     mov rcx, r12
-    shl rcx, 1             ; new_cap * 2 (keys + values)
-.resize_zero:
-    mov [rdi], rax
-    add rdi, 8
-    dec rcx
-    jnz .resize_zero
-    ; Rehash: iterate old entries and insert into new dict
+    shl rcx, 1
+    xor rax, rax
+    cld
+    rep stosq
+
+    ; Rehash: iterate old entries and insert into new arrays
     test r15, r15
-    jz .resize_done
-    xor r9, r9             ; r9 = old index
+    jz .resize_swap
+    xor r8, r8              ; r8 = old index
 .resize_loop:
-    cmp r9, r14
-    jae .resize_done
-    lea rcx, [r9 * 8]
-    mov rsi, [rbx + 16 + rcx]  ; key
+    cmp r8, r14
+    jae .resize_swap
+    lea rcx, [r8 * 8]
+    mov rsi, [rbx + 16]     ; old keys_ptr
+    mov rsi, [rsi + rcx]    ; key
     test rsi, rsi
     jz .resize_next
     cmp rsi, 1
     je .resize_next         ; skip tombstones
     ; Hash the key
-    push r9
+    push r8
     mov rdi, rsi
     call rt_djb2_hash
-    pop r9
+    pop r8
     ; Insert into new dict: find empty slot
     xor rdx, rdx
-    div r12                 ; rax = hash % new_capacity
-    mov r10, rax            ; r10 = probe index
+    div r12                 ; rdx = hash % new_capacity (remainder)
+    mov r10, rdx            ; r10 = probe index
 .resize_probe:
     lea rcx, [r10 * 8]
-    mov rax, [r13 + 16 + rcx]
+    mov rax, [r13 + rcx]    ; new keys[probe]
     test rax, rax
     jnz .resize_probe_next
-    ; Found empty slot — store key
+    ; Found empty slot — store key and value at probe
     lea rcx, [r10 * 8]
-    ; Recover key from old dict
-    lea rax, [r9 * 8]
-    mov rsi, [rbx + 16 + rax]
-    mov [r13 + 16 + rcx], rsi
-    ; Store value
-    mov rax, r14
-    shl rax, 3
-    add rax, 16
-    add rax, rbx
-    mov rsi, [rax + rcx]    ; old value
-    ; values offset in new dict = 16 + new_cap*8
-    mov rax, r12
-    shl rax, 3
-    add rax, 16
-    add rax, r13
-    mov [rax + rcx], rsi
+    mov rsi, [rbx + 16]     ; old keys_ptr
+    mov rsi, [rsi + r8 * 8] ; key (old index r8)
+    mov [r13 + rcx], rsi    ; new keys[probe] = key
+    mov rsi, [rbx + 24]     ; old values_ptr
+    mov rsi, [rsi + r8 * 8] ; value (old index r8)
+    mov [r9 + rcx], rsi     ; new values[probe] = value
     jmp .resize_next
 .resize_probe_next:
     inc r10
@@ -318,10 +348,14 @@ rt_dict_resize:
     xor r10, r10
     jmp .resize_probe
 .resize_next:
-    inc r9
+    inc r8
     jmp .resize_loop
-.resize_done:
-    mov rax, r13            ; return new dict
+.resize_swap:
+    ; Swap new arrays into the header (count unchanged)
+    mov [rbx], r12          ; capacity = new_cap
+    mov [rbx + 16], r13     ; keys_ptr = new keys
+    mov [rbx + 24], r9      ; values_ptr = new values
+    mov rax, rbx            ; return same header
     pop r15
     pop r14
     pop r13

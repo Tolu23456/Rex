@@ -1,0 +1,42 @@
+// test_int_pow.rex
+// Integer exponentiation: method form and standalone builtin (§4.2)
+//
+// Expected output:
+//   81
+//   1024
+//   1
+//   1
+//   7
+//   0
+//   8.0
+//   9.0
+//   4.0
+
+// int method form
+int n = 3
+output(n.pow(4))
+
+// standalone, both ints -> integer exponentiation
+output(pow(2, 10))
+
+// edge cases: x^0 = 1, 0^0 = 1
+output(pow(0, 0))
+output(pow(7, 0))
+
+// x^1 = x
+output(pow(7, 1))
+
+// negative exponent truncates to 0
+output(pow(2, -1))
+
+// float form requires float arguments
+output(pow(2.0, 3.0))
+output(pow(3.0, 2.0))
+float f = 2.0
+output(f.pow(2.0))
+
+// float pow with negative literal exponents (RA live-range regression:
+// folded-away 0.0/1.0 loads used to clobber the live base register)
+output(pow(4.0, -1.0))
+output(pow(2.0, -3.0))
+output(pow(2.0, -2.0))

@@ -1,0 +1,44 @@
+// test_char_methods.rex
+// char methods: predicates, transforms, conversions (§4.8)
+//
+// Expected output:
+//   R
+//   82
+//   R
+//   true
+//   true
+//   -1
+//   false
+//   false
+//   true
+//   true
+//   R
+//   Q
+//   r
+//   7
+
+char c = 'R'
+output(str(c.str()))
+output(str(c.int()))
+output(str(c.byte()))
+
+// predicates
+output(c.alpha())
+output(c.alnum())
+output(str(c.digit()))
+output(c.whitespace())
+output(c.punct())
+output(c.printable())
+output(c.ascii())
+
+// transforms
+output(str(c.upper()))
+
+char q = 'q'
+output(str(q.upper()))
+
+char r = 'R'
+output(str(r.lower()))
+
+char seven = '7'
+output(str(seven.digit()))

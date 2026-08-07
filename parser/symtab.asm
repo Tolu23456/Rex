@@ -5,7 +5,19 @@
 
 section .data
     global current_stack_offset
+    global current_sym_module
     current_stack_offset dd VAR_STORAGE_BASE
+    ; Module id stamped onto every symbol added via sym_add (design.md §17).
+    ; Locals/params live in the current module context; globals are matched
+    ; by (name, module) so each module keeps its own global namespace.
+    current_sym_module   dd 0
+    ; Globals are allocated from global_cursor, which only ever grows, and is
+    ; pushed above any transient local/param use seen so far. Locals/params
+    ; are allocated from current_stack_offset, which resets to global_cursor
+    ; at scope boundaries, so the two never overlap regardless of whether a
+    ; module declares its globals before or after its protocol bodies.
+    global_cursor        dd VAR_STORAGE_BASE
+    local_high_water     dd VAR_STORAGE_BASE
 
 section .bss
     global sym_table
@@ -18,6 +30,8 @@ section .text
     global sym_clear
     global sym_add
     global sym_lookup
+    global sym_lookup_module
+    global sym_get_module
     global sym_get_type
     global sym_set_type
     global sym_get_scope
@@ -28,13 +42,20 @@ section .text
     global sym_get_offset
     global sym_find_by_offset
     global sym_set_private
+    global sym_is_private
+    global sym_get_elem_type
+    global sym_set_elem_type
     global sym_remove_block_scope
     global sym_remove_after
+    global sym_set_const
+    global sym_is_const
 
 ; Clear the symbol table
 sym_clear:
     mov dword [sym_count], 0
     mov dword [current_stack_offset], VAR_STORAGE_BASE
+    mov dword [global_cursor], VAR_STORAGE_BASE
+    mov dword [local_high_water], VAR_STORAGE_BASE
     ret
 
 ; Remove all block-scoped symbols (SCOPE_BLOCK) from the symbol table.
@@ -100,8 +121,9 @@ sym_remove_block_scope:
     mov [sym_count], r13d
 
     ; Recompute current_stack_offset: find max (offset + size) among surviving entries
-    ; For simplicity, reset to VAR_STORAGE_BASE then walk all surviving entries
-    mov dword [current_stack_offset], VAR_STORAGE_BASE
+    ; Locals may never dip below the global region.
+    mov eax, [global_cursor]
+    mov [current_stack_offset], eax
 
     xor ebx, ebx
 .recalc_loop:
@@ -159,7 +181,9 @@ sym_remove_after:
 
 .ro_recalc:
     ; Recompute current_stack_offset: find max (offset + size) among surviving entries
-    mov dword [current_stack_offset], VAR_STORAGE_BASE
+    ; Locals may never dip below the global region.
+    mov eax, [global_cursor]
+    mov [current_stack_offset], eax
 
     xor ebx, ebx
 .ro_recalc_loop:
@@ -253,11 +277,18 @@ sym_add:
     test rax, rax
     jz .next_dup
     
-    ; Match found! Check scope
+    ; Match found! Check scope and module
     imul eax, ebx, SYM_ENTRY_SIZE
-    movzx eax, byte [sym_table + rax + 36] ; entry scope
+    lea rdi, [sym_table + rax]
+    movzx eax, byte [rdi + 36] ; entry scope
     cmp eax, r15d
-    je .err_dup ; duplicate in same scope!
+    jne .next_dup
+    ; Same scope — module-qualified namespaces: two globals with the same
+    ; name may exist in different modules (design.md §17.3).
+    movzx eax, byte [rdi + SYM_MODULE_OFF]
+    cmp eax, [current_sym_module]
+    jne .next_dup
+    jmp .err_dup ; duplicate in same scope + module!
 
 .next_dup:
     inc ebx
@@ -292,18 +323,50 @@ sym_add:
     mov byte [rdi + 37], 0 ; is_mutable = 0 (by default)
     mov byte [rdi + 38], 0 ; is_init = 0 (by default)
     mov byte [rdi + 39], 0 ; is_private = 0 (by default)
+    mov byte [rdi + 47], 0 ; is_const = 0 (by default)
+    movzx eax, byte [current_sym_module]
+    mov [rdi + SYM_MODULE_OFF], al ; owning module id
     
-    ; Set offset to current_stack_offset
-    mov edx, [current_stack_offset]
-    mov [rdi + 40], edx ; offset
-
-    ; Get type size and increment current_stack_offset
+    ; Get type size and allocate the offset
     extern type_get_size
     push rdi
     mov rdi, r14 ; type_id
     call type_get_size
     pop rdi
-    add [current_stack_offset], eax ; increment offset
+    ; Globals use the monotonic global cursor (pushed above any transient
+    ; local/param use); locals/params use the resetting stack cursor.
+    cmp r15, SCOPE_GLOBAL
+    jne .alloc_local
+    mov edx, [global_cursor]
+    cmp [local_high_water], edx
+    jbe .ghw_ok
+    mov edx, [local_high_water]
+    mov [global_cursor], edx
+.ghw_ok:
+    mov edx, [global_cursor]
+    mov [rdi + 40], edx ; offset
+    add [global_cursor], eax
+    jmp .alloc_done
+.alloc_local:
+    mov edx, [current_stack_offset]
+    ; Locals may never dip below the global region: globals allocate from the
+    ; monotonic global_cursor and no longer advance current_stack_offset, so a
+    ; local allocated after a global (e.g. a nested-loop variable) must start
+    ; at or above global_cursor or it will alias the outer global.
+    cmp edx, [global_cursor]
+    jae .loc_base_ok
+    mov edx, [global_cursor]
+    mov [current_stack_offset], edx
+.loc_base_ok:
+    mov [rdi + 40], edx ; offset
+    add edx, eax
+    mov [current_stack_offset], edx
+    ; Track the transient high-water so later globals stay clear of it.
+    mov edx, [current_stack_offset]
+    cmp [local_high_water], edx
+    jae .alloc_done
+    mov [local_high_water], edx
+.alloc_done:
 
     ; Increment sym_count
     inc dword [sym_count]
@@ -337,6 +400,8 @@ sym_add:
 ; Lookup a symbol (searches from innermost scope to outermost, so back to front)
 ; rdi = name_ptr, rsi = name_len
 ; Returns rax = symbol index, or -1 if not found
+; Module-aware: globals only match the current module's namespace (design.md
+; §17.3); locals/params match regardless (they belong to the active context).
 sym_lookup:
     push rbx
     push r12
@@ -359,22 +424,95 @@ sym_lookup:
     test rax, rax
     jz .next
     
-    ; Found!
+    ; Found a name match — check scope/module
+    imul eax, ebx, SYM_ENTRY_SIZE
+    lea rdi, [sym_table + rax]
+    movzx eax, byte [rdi + 36] ; scope
+    cmp eax, SCOPE_GLOBAL
+    jne .found         ; local/param/block: current context
+    movzx eax, byte [rdi + SYM_MODULE_OFF]
+    cmp eax, [current_sym_module]
+    jne .next          ; foreign module's global — invisible unqualified
+    jmp .found
+
+.next:
+    dec ebx
+    jmp .loop
+
+.found:
     mov rax, rbx
     pop r13
     pop r12
     pop rbx
     ret
 
-.next:
-    dec ebx
-    jmp .loop
-
 .not_found:
     mov rax, -1
     pop r13
     pop r12
     pop rbx
+    ret
+
+; Lookup a global symbol in a specific module (qualified access, e.g.
+; `config.PORT`). rdi = name_ptr, rsi = name_len, edx = module_id.
+; Returns rax = symbol index, or -1 if not found.
+sym_lookup_module:
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov r12, rdi        ; name_ptr
+    mov r13, rsi        ; name_len
+    mov r14d, edx       ; module_id
+
+    mov ebx, [sym_count]
+    dec ebx
+.slm_loop:
+    cmp ebx, 0
+    jl .slm_not_found
+
+    imul eax, ebx, SYM_ENTRY_SIZE
+    lea rdi, [sym_table + rax]
+    mov rsi, r12
+    mov rdx, r13
+    call match_name
+    test rax, rax
+    jz .slm_next
+
+    imul eax, ebx, SYM_ENTRY_SIZE
+    lea rdi, [sym_table + rax]
+    movzx eax, byte [rdi + 36] ; scope
+    cmp eax, SCOPE_GLOBAL
+    jne .slm_next        ; only globals are qualified-addressable
+    movzx eax, byte [rdi + SYM_MODULE_OFF]
+    cmp eax, r14d
+    je .slm_found
+
+.slm_next:
+    dec ebx
+    jmp .slm_loop
+
+.slm_found:
+    mov rax, rbx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.slm_not_found:
+    mov rax, -1
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; rdi = symbol index → rax = owning module id
+sym_get_module:
+    call sym_check_index
+    movzx eax, byte [sym_table + rdi + SYM_MODULE_OFF]
     ret
 
 
@@ -447,9 +585,32 @@ sym_set_offset:
     mov [sym_table + rdi + 40], esi
     ret
 
+sym_get_elem_type:
+    ; rdi = index → rax = element type (for seq/dict/arr vars; 0 = none)
+    call sym_check_index
+    movzx eax, word [sym_table + rdi + 44]
+    ret
+
+sym_set_elem_type:
+    ; rdi = index, rsi = element type (0 = none)
+    call sym_check_index
+    mov [sym_table + rdi + 44], si
+    ret
+
 sym_is_private:
     call sym_check_index
     movzx rax, byte [sym_table + rdi + 39]
+    ret
+
+sym_set_const:
+    ; rdi = index, rsi = const (0/1)
+    call sym_check_index
+    mov [sym_table + rdi + 47], sil
+    ret
+
+sym_is_const:
+    call sym_check_index
+    movzx rax, byte [sym_table + rdi + 47]
     ret
 
 sym_set_private:
@@ -481,3 +642,4 @@ sym_find_by_offset:
     mov rax, rbx
     pop rbx
     ret
+

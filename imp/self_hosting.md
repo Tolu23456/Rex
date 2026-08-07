@@ -28,7 +28,7 @@ be written:
 | 1 | Recursive protocols (`@recurse` or indirect call) | **done** — per-call stack frames, `@proto` syntax |
 | 2 | String operations (concat, char-index, compare, slice) | **done** — `str_at`, `str_eq`, `str_slice` wired |
 | 3 | Dynamic sequences (realloc on overflow) | **done** — issue #19 fixed |
-| 4 | File I/O syscall wrappers (read, write, open, close) | **done** — `file_open/read_all/write/close` live |
+| 4 | File I/O syscall wrappers (read, write, open, close) | **done** — `open(path[,mode])`, 17 `file` methods (`read`, `read_line`, `read_bytes`, `read_all_bytes`, `lines`, `write`, `writeln`, `write_bytes`, `seek`, `seek_end`, `pos`, `size`, `is_eof`, `flush`, `path`), `file_exists(path)`, `with open(...) as f:` auto-close (design.md §15.4) |
 | 5 | Dict / hash-map for symbol tables | **done** — Stage 4 complete |
 | 6 | Bitwise byte operations (shr 8, and 0xFF) | **done** — Stage 3b complete |
 | 7 | Module / include system | planned |

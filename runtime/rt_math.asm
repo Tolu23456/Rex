@@ -67,7 +67,6 @@ rt_math_tan:
 
 ; ──────────────────────────────────────────────────────────────
 ; rt_math_pow: pow(x, y) = 2^(y * log2(x))
-; Uses x87: fyl2x, f2xm1, fscale
 ; Input:  xmm0 = x, xmm1 = y
 ; Output: xmm0 = x^y
 ; ──────────────────────────────────────────────────────────────
@@ -76,43 +75,38 @@ rt_math_pow:
     movq [rsp], xmm0           ; [rsp] = x
     movq [rsp+8], xmm1         ; [rsp+8] = y
 
-    ; Special cases
-    ; If x == 1.0, result is 1.0
-    fld qword [rsp]            ; st(0) = x
-    fld1                       ; st(0) = 1.0, st(1) = x
-    fcomip st0, st1            ; compare 1.0 vs x
-    fstp st0                   ; pop x (st(0) = 1.0)
-    je .pow_one
-
-    ; If y == 0.0, result is 1.0 (anything^0 = 1)
+    ; If y == 0.0, result is 1.0 (covers x^0 and 0^0)
     fld qword [rsp+8]          ; st(0) = y
     fldz                       ; st(0) = 0.0, st(1) = y
     fcomip st0, st1
-    fstp st0                   ; pop y
+    fstp st0
     je .pow_one
 
     ; General case: x^y = 2^(y * log2(x))
     fld qword [rsp+8]          ; st(0) = y
     fld qword [rsp]            ; st(0) = x, st(1) = y
-    fyl2x                      ; st(0) = y * log2(x)
-    fld st0                    ; duplicate for integer/frac split
-    frndint                    ; st(0) = floor(y*log2(x))
-    fxch st1                   ; st(0) = frac, st(1) = int
-    f2xm1                      ; st(0) = 2^frac - 1
-    fld1                       ; st(0) = 1, st(1) = 2^frac-1, st(2) = int
-    faddp st1, st0             ; st(0) = 2^frac, st(1) = int
-    fscale                     ; st(0) = 2^frac * 2^int = x^y
+    fyl2x                      ; st(0) = y*log2(x)
+    fld st0                    ; duplicate
+    frndint                    ; st(0)=round(t), st(1)=t
+    fxch st1                   ; st(0)=t, st(1)=round(t)
+    fsub st0, st1              ; st(0)=frac=t-round(t)
+    f2xm1                      ; st(0)=2^frac-1
+    fld1                       ; st(0)=1, st(1)=2^frac-1, st(2)=round(t)
+    faddp st1, st0             ; st(0)=2^frac, st(1)=round(t)
+    fscale                     ; st(0)=2^frac*2^round(t)=x^y
     fstp st1                   ; pop the integer exponent
     jmp .pow_store
 
 .pow_one:
     fld1                       ; st(0) = 1.0
-
 .pow_store:
     fstp qword [rsp]
     movq xmm0, [rsp]
     add rsp, 16
     ret
+
+    ; Pad to keep rt_math_cbrt at its fixed offset (0xA3)
+    times 80-($-rt_math_pow) db 0x90
 
 ; ──────────────────────────────────────────────────────────────
 ; rt_math_cbrt: cbrt(x) = 2^(log2(x)/3)
@@ -139,7 +133,7 @@ rt_math_cbrt:
     ; Divide by 3
     push dword 3
     fild dword [rsp]
-    add rsp, 4
+    add rsp, 8
     fdivp st1, st0             ; st(0) = log2(x)/3
     ; Compute 2^(result)
     fld st0
@@ -161,7 +155,7 @@ rt_math_cbrt:
     fyl2x                      ; st(0) = log2(-x)
     push dword 3
     fild dword [rsp]
-    add rsp, 4
+    add rsp, 8
     fdivp st1, st0
     fld st0
     frndint
@@ -218,38 +212,60 @@ rt_math_gcd:
 
 ; ──────────────────────────────────────────────────────────────
 ; rt_math_lcm: Least Common Multiple
-; lcm(a, b) = |a*b| / gcd(a, b)
+; lcm(a, b) = (|a| / gcd(|a|, |b|)) * |b|
+; Divide before multiply so |a*b| >= 2^63 does not corrupt the result.
 ; Input:  rdi = a, rsi = b
 ; Output: rax = lcm(a, b)
 ; ──────────────────────────────────────────────────────────────
 rt_math_lcm:
-    ; Save inputs
     mov rax, rdi
-    mov rcx, rsi
-
-    ; Compute gcd first
-    push rax
-    push rcx
-    call rt_math_gcd
-    mov r8, rax                ; r8 = gcd
-    pop rcx                    ; rcx = b
-    pop rax                    ; rax = a
-
-    test r8, r8
-    jz .lcm_zero
-
-    ; lcm = |a * b| / gcd
-    cqo                        ; sign-extend rax into rdx:rax
-    imul rcx                   ; rdx:rax = a * b (signed)
-    ; Take absolute value
-    test rax, rax
-    jns .lcm_pos
-    neg rax
-.lcm_pos:
     cqo
-    idiv r8                    ; rax = |a*b| / gcd
+    xor rax, rdx
+    sub rax, rdx               ; rax = |a|
+    mov r8, rax                ; r8 = |a|
+    mov rax, rsi
+    cqo
+    xor rax, rdx
+    sub rax, rdx               ; rax = |b|
+    mov r9, rax                ; r9 = |b|
+    ; gcd(|a|, |b|)
+    mov rdi, r8
+    mov rsi, r9
+    push r8
+    push r9
+    call rt_math_gcd
+    pop r9
+    pop r8
+    test rax, rax
+    jz .lcm_zero
+    mov rcx, rax               ; rcx = gcd
+    mov rax, r8
+    xor edx, edx
+    div rcx                    ; rax = |a| / gcd
+    imul rax, r9               ; rax = (|a|/gcd) * |b|
     ret
 
 .lcm_zero:
     xor eax, eax
+    ret
+
+; ──────────────────────────────────────────────────────────────
+; rt_math_int_pow: integer exponentiation
+; Input:  rdi = base, rsi = exponent (>= 0)
+; Output: rax = base^exp (0^0 = 1; overflow wraps — best-effort)
+; ──────────────────────────────────────────────────────────────
+rt_math_int_pow:
+    mov rax, 1
+    mov rcx, rdi
+    test rsi, rsi
+    jz .pow_done
+    js .pow_neg
+.pow_loop:
+    imul rax, rcx
+    dec rsi
+    jnz .pow_loop
+.pow_done:
+    ret
+.pow_neg:
+    xor eax, eax            ; negative exponent → 0 (integer truncation)
     ret

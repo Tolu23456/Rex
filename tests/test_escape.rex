@@ -1,0 +1,9 @@
+// test_escape.rex
+// String escape `\e` = ESC (0x1B) (design §13.11), plus str len via `len()`.
+
+str s = "A\eB"
+output(len(s))
+str t = "\e"
+output(len(t))
+output(s)
+output(t)

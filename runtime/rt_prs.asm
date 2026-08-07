@@ -1,4 +1,4 @@
-; rt_prs.asm - print null-terminated string in RDI to stdout followed by newline
+; rt_prs.asm - print null-terminated string in RDI to stdout (no newline)
 BITS 64
 
     push rbp
@@ -17,21 +17,11 @@ BITS 64
     jmp .len_loop
 .len_done:
     test rdx, rdx
-    jz .newline
+    jz .done
     
     mov rax, 1          ; sys_write
     mov rdi, 1          ; stdout
     syscall
-    
-.newline:
-    sub rsp, 8
-    mov byte [rsp], 10
-    mov rsi, rsp
-    mov rdx, 1
-    mov rax, 1          ; sys_write
-    mov rdi, 1          ; stdout
-    syscall
-    add rsp, 8
 
 .done:
     mov rsp, rbp

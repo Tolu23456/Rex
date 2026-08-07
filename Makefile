@@ -31,13 +31,16 @@ RT_BINS=$(RUNTIME_DIR)/rt_pri.bin \
 	$(RUNTIME_DIR)/rt_dict.bin \
 	$(RUNTIME_DIR)/rt_math.bin \
 	$(RUNTIME_DIR)/rt_conv.bin \
-	$(RUNTIME_DIR)/rt_err.bin
+	$(RUNTIME_DIR)/rt_err.bin \
+	$(RUNTIME_DIR)/rt_file.bin
 
 # Compiler Object Files
-OBJS=$(MAIN_DIR)/main.o \
+OBJS=	$(MAIN_DIR)/main.o \
+	$(MAIN_DIR)/ir_dump.o \
 	$(LEXER_DIR)/lexer.o \
 	$(PARSER_DIR)/type_reg.o \
 	$(PARSER_DIR)/symtab.o \
+	$(PARSER_DIR)/module.o \
 	$(PARSER_DIR)/proto.o \
 	$(PARSER_DIR)/parser.o \
 	$(IRGEN_DIR)/irgen.o \
@@ -68,6 +71,9 @@ $(PARSER_DIR)/symtab.o: $(PARSER_DIR)/symtab.asm $(INC_FILES)
 $(PARSER_DIR)/proto.o: $(PARSER_DIR)/proto.asm $(INC_FILES)
 	$(ASM) $(ASMFLAGS) -f elf64 -I ./ $< -o $@
 
+$(PARSER_DIR)/module.o: $(PARSER_DIR)/module.asm $(INC_FILES)
+	$(ASM) $(ASMFLAGS) -f elf64 -I ./ $< -o $@
+
 $(PARSER_DIR)/type_reg.o: $(PARSER_DIR)/type_reg.asm $(INC_FILES)
 	$(ASM) $(ASMFLAGS) -f elf64 -I ./ $< -o $@
 
@@ -84,6 +90,9 @@ $(IRGEN_DIR)/opt.o: $(IRGEN_DIR)/opt.asm $(INC_FILES)
 	$(ASM) $(ASMFLAGS) -f elf64 -I ./ $< -o $@
 
 $(MAIN_DIR)/main.o: $(MAIN_DIR)/main.asm $(INC_FILES)
+	$(ASM) $(ASMFLAGS) -f elf64 -I ./ $< -o $@
+
+$(MAIN_DIR)/ir_dump.o: $(MAIN_DIR)/ir_dump.asm $(INC_FILES)
 	$(ASM) $(ASMFLAGS) -f elf64 -I ./ $< -o $@
 
 # Link the Rex compiler

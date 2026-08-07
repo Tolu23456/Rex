@@ -154,7 +154,6 @@ statement       ::= declaration
                   | return_stmt
                   | swap_stmt
                   | inc_dec_stmt
-                  | flip_stmt
                   | use_stmt
                   | blast_stmt
                   | with_stmt
@@ -178,7 +177,9 @@ Every statement occupies one or more lines. Block bodies are delimited by
 ## 6. Output and I/O Statements
 
 ```ebnf
-output_stmt     ::= "output" "(" expr ")" <NEWLINE>
+output_stmt     ::= "output" "(" [ output_arg ("," output_arg)* ] ")" <NEWLINE>
+
+output_arg      ::= expr | "sep" "=" expr | "end" "=" expr
 
 input_expr      ::= "input" "(" expr ")"
 
@@ -202,7 +203,10 @@ fmt_type        ::= "d" | "f" | "e" | "g"
 ```
 
 `output` dispatches to the correct printer at compile time from the type of
-`expr`, appending a newline.
+each `expr`. Multiple values are printed space-separated (default `sep=" "`)
+and terminated by `end` (default `"\n"`). `sep` and `end` are keyword-only
+arguments; their values must be `str` or `char`. `output()` with no value
+args prints only `end` (an empty line by default). See design §15.1.
 
 `fmt` returns a `str`. Fields inside the template string use `{name}` or
 `{name:spec}` syntax. The format specifier mirrors Python's mini-language:
@@ -273,15 +277,15 @@ output(if n == 0: "zero" else: "nonzero")
 
 ---
 
-## 8. `switch` / `is` and `when`
+## 8. `switch` and `when`
 
-### 8.1 `switch` / `is` — Value Dispatch
+### 8.1 `switch` — Value Dispatch
 
 ```ebnf
 switch_stmt     ::= "switch" expr ":" <NEWLINE>
-                    <INDENT> { is_clause } [ switch_else ] <DEDENT>
+                    <INDENT> { switch_case } [ switch_default ] <DEDENT>
 
-is_clause       ::= "is" switch_pattern { "," switch_pattern } ":" <NEWLINE>
+switch_case     ::= "->" switch_pattern { "," switch_pattern } ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 
 switch_pattern  ::= <INT_LIT>
@@ -297,14 +301,14 @@ enum_variant    ::= <IDENT> "." <IDENT>
 
 range_pattern   ::= <INT_LIT> ".." <INT_LIT>
 
-switch_else     ::= "else" ":" <NEWLINE>
+switch_default  ::= "_" ":" <NEWLINE>
                     <INDENT> { statement } <DEDENT>
 ```
 
 `switch` evaluates the subject expression once and dispatches by value.
 Ranges are **exclusive** on the right: `1..5` matches 1, 2, 3, 4.
-Multiple patterns per `is` line are comma-separated — any one matching triggers the case.
-`else` is the default/fallthrough case and must be last.
+Multiple patterns per `->` line are comma-separated — any one matching triggers the case.
+`_` is the default/fallthrough case and must be last.
 Dense integer ranges compile to O(1) jump tables.
 No implicit fallthrough between cases.
 
@@ -610,15 +614,15 @@ is immediately used in an expression or discarded.
 ## 13. Other Statements
 
 ```ebnf
-swap_stmt       ::= "swap" <IDENT> <IDENT> <NEWLINE>
+swap_stmt       ::= "swap" "(" <IDENT> "," <IDENT> ")" <NEWLINE>
 
 inc_dec_stmt    ::= ( "++" | "--" ) <IDENT> <NEWLINE>
                   | <IDENT> ( "++" | "--" ) <NEWLINE>
-
-flip_stmt       ::= "flip" <IDENT> <NEWLINE>
 ```
 
-`flip` negates a `bool` variable in place (`true`↔`false`). Equivalent to `:b = not b`. The variable must be declared mutable.
+`swap` exchanges the values of two variables in place. `++`/`--` increment or
+decrement a numeric variable by 1 in place (`++x` is equivalent to `:x += 1`).
+Both are self-evidently mutations, so no `:` sigil is needed.
 
 ---
 
@@ -990,8 +994,8 @@ Keywords are reserved and cannot be used as identifiers.
 | Types       | `int` `float` `bool` `str` `char` `byte` `seq` `arr` `dict` `tup` `file` `error` `struct` `enum` `type`   |
 | Literals    | `true` `false` `null`                                                                                       |
 | Statements  | `output` `input` `fmt`                                                                                      |
-|             | `if` `elif` `else` `switch` `is` `when` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`           |
-|             | `return` `swap` `flip` `prot` `use` `module` `blast`                                                       |
+|             | `if` `elif` `else` `switch` `when` `for` `in` `while` `each` `repeat` `stop` `skip` `pass`               |
+|             | `return` `swap` `prot` `use` `module` `blast`                                                             |
 |             | `with` `open` `as`                                                                                          |
 |             | `try` `except` `finally` `raise`                                                                            |
 |             | `decorator` `before` `after` `wrap` `on_error`                                                              |

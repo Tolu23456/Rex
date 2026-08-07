@@ -1,7 +1,13 @@
 ; rt_seq.asm - Sequence runtime operations for Rex
 ; Provides: rt_seq_new, rt_seq_push, rt_seq_get, rt_seq_len, rt_seq_set
 ;           rt_seq_insert, rt_seq_remove
-; Seq layout: [capacity:8][length:8][data: element_size * capacity]
+;
+; Seq layout: [capacity:8][length:8][data_ptr:8]   (24-byte header)
+; data array: [elem_size * capacity] bytes at data_ptr
+;
+; The header address NEVER changes once created: growth allocates a NEW data
+; array and swaps data_ptr in place, so caller-held seq pointers always stay
+; valid. Heap is bump-allocated via brk (two-step: brk(0) then brk(base+size)).
 BITS 64
 
 section .text
@@ -25,34 +31,36 @@ rt_seq_new:
     push r12
     push r13
     push r14
-    cld
     mov rbx, rdi        ; element size
     mov r12, rsi        ; capacity
 
-    ; Calculate total size: 16 (header) + capacity * element_size
-    mov rax, r12
-    imul rax, rbx
-    add rax, 16         ; header size
-    mov r13, rax        ; total size
-
-    ; Allocate memory using brk syscall
-    ; Get current brk
+    ; Allocate header (24 bytes) via two-step brk
     mov rax, 12         ; sys_brk
     xor rdi, rdi
     syscall
-    mov r14, rax        ; current brk
-    ; Grow brk by r13 bytes
-    mov rdi, r14
-    add rdi, r13
-    mov rax, 12         ; sys_brk
+    mov r13, rax        ; r13 = header start
+    lea rdi, [r13 + 24]
+    mov rax, 12
     syscall
-    ; rax = new brk, r14 = old brk (start of our allocation)
+
+    ; Allocate data array (capacity * element_size) via two-step brk
+    mov rax, 12
+    xor rdi, rdi
+    syscall
+    mov r14, rax        ; r14 = data start
+    mov rax, r12
+    imul rax, rbx
+    mov rdi, r14
+    add rdi, rax
+    mov rax, 12
+    syscall
 
     ; Initialize header
-    mov [r14], r12      ; capacity
-    mov qword [r14 + 8], 0  ; length = 0
+    mov [r13], r12          ; capacity
+    mov qword [r13 + 8], 0  ; length = 0
+    mov [r13 + 16], r14     ; data_ptr
 
-    mov rax, r14        ; return pointer
+    mov rax, r13
     pop r14
     pop r13
     pop r12
@@ -63,7 +71,7 @@ rt_seq_new:
 ; rdi = seq pointer
 ; rsi = value to push
 ; rdx = element size
-; Returns: rax = seq pointer (may have reallocated)
+; Returns: rax = seq pointer (header is stable, pointer never changes)
 rt_seq_push:
     push rbx
     push r12
@@ -80,32 +88,26 @@ rt_seq_push:
     cmp rax, r14
     jl .push_store
 
-    ; Need to grow - double capacity
+    ; Need to grow - double capacity, allocate new data array
     shl r14, 1
-
-    ; Calculate new total size: 16 + capacity * element_size
+    mov rax, 12         ; sys_brk
+    xor rdi, rdi
+    syscall
+    mov r15, rax        ; r15 = new data start
     mov rax, r14
     imul rax, r13
-    add rax, 16
-
-    ; Allocate new buffer via brk
-    mov rdi, rax
-    mov rax, 12         ; sys_brk
+    mov rdi, r15
+    add rdi, rax
+    mov rax, 12
     syscall
-    ; rax = new buffer start, save it
-    mov r15, rax        ; r15 = new buffer
 
-    ; Copy header
-    mov [r15], r14      ; new capacity
+    ; Copy old data bytes into new array
     mov rcx, [rbx + 8]  ; old length
-    mov [r15 + 8], rcx  ; copy length
-
-    ; Copy data
     imul rcx, r13       ; old data bytes
     test rcx, rcx
     jz .push_copy_done
-    lea rsi, [rbx + 16] ; src = old data
-    lea rdi, [r15 + 16] ; dest = new data
+    mov rsi, [rbx + 16] ; old data_ptr
+    mov rdi, r15        ; new data
 .push_copy_loop:
     movzx eax, byte [rsi]
     mov [rdi], al
@@ -114,15 +116,16 @@ rt_seq_push:
     dec rcx
     jnz .push_copy_loop
 .push_copy_done:
-    mov rbx, r15        ; use new buffer
+    ; Swap in the new data array and capacity (header stays put)
+    mov [rbx + 16], r15
+    mov [rbx], r14
 
 .push_store:
     ; Store element at data[length]
     mov rax, [rbx + 8]  ; length
-    imul rax, r13       ; offset = length * element_size
-    add rax, 16         ; skip header
-    add rax, rbx        ; absolute address
-    mov [rax], r12      ; store value
+    imul rax, r13
+    mov rcx, [rbx + 16] ; data_ptr
+    mov [rcx + rax], r12 ; store value
 
     ; Increment length
     inc qword [rbx + 8]
@@ -139,18 +142,21 @@ rt_seq_push:
 ; rdi = seq pointer
 ; rsi = index
 ; rdx = element size
-; Returns: rax = element value
+; Returns: rax = element value (0 if index out of bounds)
 rt_seq_get:
     push rbx
     mov rbx, rdi        ; seq pointer
-
-    ; Calculate offset: index * element_size + 16
+    mov rax, [rbx + 8]  ; length
+    cmp rsi, rax
+    jae .get_oob
     mov rax, rsi
     imul rax, rdx
-    add rax, 16
-    add rax, rbx
-    mov rax, [rax]      ; load element
-
+    mov rcx, [rbx + 16] ; data_ptr
+    mov rax, [rcx + rax]
+    pop rbx
+    ret
+.get_oob:
+    xor rax, rax
     pop rbx
     ret
 
@@ -159,17 +165,18 @@ rt_seq_get:
 ; rsi = index
 ; rdx = value
 ; rcx = element size
+; Out-of-bounds index is silently ignored
 rt_seq_set:
     push rbx
     mov rbx, rdi        ; seq pointer
-
-    ; Calculate offset: index * element_size + 16
+    mov rax, [rbx + 8]  ; length
+    cmp rsi, rax
+    jae .set_done
     mov rax, rsi
     imul rax, rcx
-    add rax, 16
-    add rax, rbx
-    mov [rax], rdx      ; store value
-
+    mov rdi, [rbx + 16] ; data_ptr
+    mov [rdi + rax], rdx
+.set_done:
     pop rbx
     ret
 
@@ -198,9 +205,8 @@ rt_seq_pop:
     dec rax
     mov [rbx + 8], rax
     imul rax, rsi
-    add rax, 16
-    add rax, rbx
-    mov rax, [rax]
+    mov rcx, [rbx + 16]
+    mov rax, [rcx + rax]
     pop rbx
     ret
 .pop_empty:
@@ -213,7 +219,7 @@ rt_seq_pop:
 ; rsi = index
 ; rdx = value
 ; rcx = element size
-; Returns: rax = seq pointer
+; Returns: rax = seq pointer (header is stable)
 rt_seq_insert:
     push rbx
     push r12
@@ -230,30 +236,25 @@ rt_seq_insert:
     mov r15, [rbx]         ; capacity
     cmp rax, r15
     jl .insert_nogrow
-    ; Need to grow - double capacity and reallocate
+    ; Need to grow - double capacity, allocate new data array
     shl r15, 1
-    ; Calculate new total size
-    mov r8, r15
-    imul r8, r13
-    add r8, 16
-    ; Allocate new buffer
-    push rbx
-    mov rdi, r8
     mov rax, 12            ; sys_brk
+    xor rdi, rdi
     syscall
-    ; rax = new buffer
-    mov r9, rax            ; r9 = new buffer
-    pop rbx
-    ; Copy header
-    mov [r9], r15          ; new capacity
-    mov rcx, [rbx + 8]    ; old length
-    mov [r9 + 8], rcx     ; copy length
-    ; Copy data
+    mov r9, rax            ; r9 = new data start
+    mov rax, r15
+    imul rax, r13
+    mov rdi, r9
+    add rdi, rax
+    mov rax, 12
+    syscall
+    ; Copy old data bytes into new array
+    mov rcx, [rbx + 8]
     imul rcx, r13
     test rcx, rcx
     jz .insert_copy_done
-    lea rsi, [rbx + 16]
-    lea rdi, [r9 + 16]
+    mov rsi, [rbx + 16]
+    mov rdi, r9
 .insert_copy_loop:
     movzx eax, byte [rsi]
     mov [rdi], al
@@ -262,7 +263,8 @@ rt_seq_insert:
     dec rcx
     jnz .insert_copy_loop
 .insert_copy_done:
-    mov rbx, r9            ; use new buffer
+    mov [rbx + 16], r9
+    mov [rbx], r15
 .insert_nogrow:
     mov r15, [rbx + 8]     ; length (reload)
     test r15, r15
@@ -273,20 +275,19 @@ rt_seq_insert:
     jl .insert_store
     mov rcx, rax
     imul rcx, r13
-    add rcx, 16
     mov rdx, rax
     inc rdx
     imul rdx, r13
-    add rdx, 16
-    mov rsi, [rbx + rcx]
-    mov [rbx + rdx], rsi
+    mov rsi, [rbx + 16]    ; data_ptr
+    mov r8, [rsi + rcx]    ; tmp = data[i]
+    mov [rsi + rdx], r8    ; data[i+1] = tmp
     dec rax
     jmp .insert_loop
 .insert_store:
     mov rax, r14
     imul rax, r13
-    add rax, 16
-    mov [rbx + rax], r12
+    mov rcx, [rbx + 16]
+    mov [rcx + rax], r12
     inc qword [rbx + 8]
 .insert_done:
     mov rax, rbx
@@ -317,8 +318,8 @@ rt_seq_remove:
     jae .remove_oob
     mov rax, r12
     imul rax, r13
-    add rax, 16
-    mov r14, [rbx + rax]  ; removed value
+    mov rcx, [rbx + 16]
+    mov r14, [rcx + rax]  ; removed value
     mov rax, r12           ; i = index
 .remove_loop:
     mov rcx, [rbx + 8]
@@ -328,12 +329,11 @@ rt_seq_remove:
     mov rcx, rax
     inc rcx
     imul rcx, r13
-    add rcx, 16
-    mov rdx, [rbx + rcx]  ; data[i+1]
-    mov rcx, rax
-    imul rcx, r13
-    add rcx, 16
-    mov [rbx + rcx], rdx  ; data[i] = data[i+1]
+    mov rdx, rax
+    imul rdx, r13
+    mov rsi, [rbx + 16]   ; data_ptr
+    mov r8, [rsi + rcx]   ; data[i+1]
+    mov [rsi + rdx], r8   ; data[i] = data[i+1]
     inc rax
     jmp .remove_loop
 .remove_done:
@@ -364,17 +364,16 @@ rt_seq_contains:
     mov r12, rsi
     mov r13, rdx
     mov r14, [rbx + 8]    ; length
-    xor rcx, rcx           ; i = 0
+    mov rcx, [rbx + 16]   ; data_ptr
+    xor rdx, rdx           ; i = 0
 .contains_loop:
-    cmp rcx, r14
+    cmp rdx, r14
     jge .contains_not_found
-    mov rax, rcx
+    mov rax, rdx
     imul rax, r13
-    add rax, 16
-    mov rax, [rbx + rax]  ; data[i]
-    cmp rax, r12
+    cmp r12, [rcx + rax]  ; data[i]
     je .contains_found
-    inc rcx
+    inc rdx
     jmp .contains_loop
 .contains_found:
     mov rax, 1
@@ -403,20 +402,19 @@ rt_seq_index_of:
     mov r12, rsi
     mov r13, rdx
     mov r14, [rbx + 8]
-    xor rcx, rcx
+    mov rcx, [rbx + 16]
+    xor rdx, rdx
 .index_loop:
-    cmp rcx, r14
+    cmp rdx, r14
     jge .index_not_found
-    mov rax, rcx
+    mov rax, rdx
     imul rax, r13
-    add rax, 16
-    mov rax, [rbx + rax]
-    cmp rax, r12
+    cmp r12, [rcx + rax]
     je .index_found
-    inc rcx
+    inc rdx
     jmp .index_loop
 .index_found:
-    mov rax, rcx
+    mov rax, rdx
     pop r14
     pop r13
     pop r12
@@ -443,38 +441,35 @@ rt_seq_copy:
     mov r12, rsi
     mov r13, [rbx]        ; capacity
     mov r14, [rbx + 8]    ; length
-    ; Inline allocation (same as rt_seq_new but without call)
-    mov rax, r13
-    imul rax, r12
-    add rax, 16           ; header size
-    mov r15, rax           ; total size
-    ; Get current brk
+    ; Allocate new header (24 bytes)
     mov rax, 12
     xor rdi, rdi
     syscall
-    mov rcx, rax           ; current brk
-    ; Grow brk
-    mov rdi, rcx
-    add rdi, r15
+    mov r15, rax          ; r15 = new header
+    lea rdi, [r15 + 24]
     mov rax, 12
     syscall
-    mov r15, rcx           ; new seq pointer
-    ; Initialize header
-    mov [r15], r13         ; capacity
-    mov [r15 + 8], r14     ; length = src length
-    ; Copy data
-    xor rcx, rcx
-.copy_loop:
-    cmp rcx, r14
-    jge .copy_done
-    mov rax, rcx
+    ; Allocate new data array (capacity * element_size)
+    mov rax, 12
+    xor rdi, rdi
+    syscall
+    mov [r15 + 16], rax   ; new data_ptr
+    mov rax, r13
     imul rax, r12
-    add rax, 16
-    mov rdx, [rbx + rax]  ; src[i]
-    mov [r15 + rax], rdx  ; dst[i]
-    inc rcx
-    jmp .copy_loop
-.copy_done:
+    mov rdi, [r15 + 16]
+    add rdi, rax
+    mov rax, 12
+    syscall
+    ; Initialize header
+    mov [r15], r13        ; capacity
+    mov [r15 + 8], r14    ; length
+    ; Copy data bytes
+    cld
+    mov rcx, r14
+    imul rcx, r12
+    mov rsi, [rbx + 16]   ; src data_ptr
+    mov rdi, [r15 + 16]   ; dst data_ptr
+    rep movsb
     mov rax, r15
     pop r15
     pop r14
@@ -498,20 +493,19 @@ rt_seq_reverse:
     jl .reverse_done
     xor r13, r13           ; left = 0
     lea r15, [r14 - 1]    ; right = len - 1
+    mov rcx, [rbx + 16]   ; data_ptr
 .reverse_loop:
     cmp r13, r15
     jge .reverse_done
     ; Swap data[left] and data[right]
     mov rax, r13
     imul rax, r12
-    add rax, 16
-    mov rcx, [rbx + rax]  ; tmp = data[left]
     mov rdx, r15
     imul rdx, r12
-    add rdx, 16
-    mov rsi, [rbx + rdx]  ; data[right]
-    mov [rbx + rax], rsi  ; data[left] = data[right]
-    mov [rbx + rdx], rcx  ; data[right] = tmp
+    mov rsi, [rcx + rax]  ; tmp = data[left]
+    mov rdi, [rcx + rdx]  ; data[right]
+    mov [rcx + rdx], rsi  ; data[right] = tmp
+    mov [rcx + rax], rdi  ; data[left] = data[right]
     inc r13
     dec r15
     jmp .reverse_loop
@@ -533,16 +527,16 @@ rt_seq_sum:
     mov rbx, rdi
     mov r12, rsi
     mov r13, [rbx + 8]    ; length
-    xor rax, rax           ; sum = 0
-    xor rcx, rcx
+    mov rcx, [rbx + 16]   ; data_ptr
+    xor rax, rax
+    xor rdx, rdx
 .sum_loop:
-    cmp rcx, r13
+    cmp rdx, r13
     jge .sum_done
-    mov rdx, rcx
-    imul rdx, r12
-    add rdx, 16
-    add rax, [rbx + rdx]
-    inc rcx
+    mov rsi, rdx
+    imul rsi, r12
+    add rax, [rcx + rsi]
+    inc rdx
     jmp .sum_loop
 .sum_done:
     pop r13
@@ -563,17 +557,16 @@ rt_seq_min:
     mov r13, [rbx + 8]
     test r13, r13
     jz .min_empty
-    mov rax, [rbx + 16]  ; min = data[0]
+    mov rcx, [rbx + 16]   ; data_ptr
+    mov rax, [rcx]        ; min = data[0]
     mov r14, 1            ; i = 1
 .min_loop:
     cmp r14, r13
     jge .min_done
-    mov rcx, r14
-    imul rcx, r12
-    add rcx, 16
-    mov rdx, [rbx + rcx]
-    cmp rdx, rax
-    cmovl rax, rdx
+    mov rdx, r14
+    imul rdx, r12
+    cmp [rcx + rdx], rax
+    cmovl rax, [rcx + rdx]
     inc r14
     jmp .min_loop
 .min_done:
@@ -603,17 +596,16 @@ rt_seq_max:
     mov r13, [rbx + 8]
     test r13, r13
     jz .max_empty
-    mov rax, [rbx + 16]  ; max = data[0]
+    mov rcx, [rbx + 16]   ; data_ptr
+    mov rax, [rcx]        ; max = data[0]
     mov r14, 1
 .max_loop:
     cmp r14, r13
     jge .max_done
-    mov rcx, r14
-    imul rcx, r12
-    add rcx, 16
-    mov rdx, [rbx + rcx]
-    cmp rdx, rax
-    cmovg rax, rdx
+    mov rdx, r14
+    imul rdx, r12
+    cmp [rcx + rdx], rax
+    cmovg rax, [rcx + rdx]
     inc r14
     jmp .max_loop
 .max_done:
@@ -657,7 +649,7 @@ rt_seq_count_of:
     mov rcx, [r12 + 8]  ; length
     test rcx, rcx
     jz .count_done
-    lea r11, [r12 + 16] ; data pointer
+    mov r11, [r12 + 16] ; data_ptr
 .count_loop:
     ; Load element based on element_size
     cmp r13, 8
@@ -691,4 +683,79 @@ rt_seq_count_of:
     pop rbx
     ret
 
-; Pad to 2048 bytes to accommodate new functions
+; rt_seq_slice: New heap seq with elements [lo, hi) copied from source
+; rdi = seq pointer, rsi = lo, rdx = hi, rcx = element size
+; Returns: rax = new seq pointer (lo/hi clamped to source length)
+rt_seq_slice:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rdi        ; seq
+    mov r12, rsi        ; lo
+    mov r13, rdx        ; hi
+
+    ; Clamp hi to source length
+    mov rax, [rbx + 8]  ; source length
+    cmp r13, rax
+    jbe .slice_hi_ok
+    mov r13, rax
+.slice_hi_ok:
+    ; Clamp lo to hi (empty slice if lo >= hi)
+    cmp r12, r13
+    jbe .slice_lo_ok
+    mov r12, r13
+.slice_lo_ok:
+    ; new length = hi - lo
+    mov r15, r13
+    sub r15, r12
+
+    mov r14, rcx        ; element size
+
+    ; Allocate data array
+    ; NOTE: sys_brk clobbers rcx and r11 — recompute byte counts after it.
+    mov rax, 12
+    xor rdi, rdi
+    syscall
+    mov r13, rax        ; r13 = data_start
+    mov rax, r15
+    imul rax, r14
+    mov rcx, rax        ; rcx = data_bytes
+    lea rdi, [r13 + rcx]
+    mov rax, 12
+    syscall
+
+    ; Allocate header (24 bytes)
+    mov rax, 12
+    xor rdi, rdi
+    syscall
+    mov rdx, rax        ; rdx = header
+    lea rdi, [rdx + 24]
+    mov rax, 12
+    syscall
+
+    ; Initialize header
+    mov [rdx], r15      ; capacity = new length
+    mov [rdx + 8], r15  ; length = new length
+    mov [rdx + 16], r13 ; data_ptr
+
+    ; Copy src[lo*elem .. lo*elem + len*elem) into new data
+    mov rax, r12
+    imul rax, r14
+    mov rsi, [rbx + 16]
+    add rsi, rax        ; rsi = src = data + lo*elem
+    mov rdi, r13        ; rdi = dst = data_start
+    mov rax, r15
+    imul rax, r14
+    mov rcx, rax        ; rcx = byte count
+    cld
+    rep movsb
+
+    mov rax, rdx        ; return header
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret

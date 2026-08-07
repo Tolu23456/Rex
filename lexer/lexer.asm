@@ -79,6 +79,7 @@ section .bss
     global src_len
     global src_idx
     global line_num
+    global line_start_idx
 
     global tok_type
     global tok_str_ptr
@@ -115,6 +116,10 @@ section .text
     global lex_init
     global next_token
     global get_error_loc
+    global lexer_peek_token
+    global lexer_save_state
+    global lexer_restore_state
+    global lexer_load_buffer
 
 ; Initialize the lexer
 ; rdi = buffer_ptr, rsi = buffer_size
@@ -624,6 +629,8 @@ next_token:
     je .se_f
     cmp rax, 'v'
     je .se_v
+    cmp rax, 'e'
+    je .se_e
     ; '\\', '\"', '\'' and unrecognised escapes: keep the literal char
     jmp .se_store
 .se_n:  mov rax, 10  ; LF
@@ -641,6 +648,7 @@ next_token:
 .se_f:  mov rax, 12  ; FF
     jmp .se_store
 .se_v:  mov rax, 11  ; VT
+.se_e:  mov rax, 27  ; ESC (0x1B, design.md §13.11)
 .se_store:
     mov [r11 + r8], al
     inc r8
@@ -1939,4 +1947,175 @@ section .text
 .syscall:
     mov dword [tok_type], TOK_SYSCALL
     mov qword [tok_str_len], 1
+    ret
+
+; Peek at the next token without consuming it.
+; Saves/restores every mutable lexer state variable so the caller's view of
+; the token stream is unchanged. Returns the peeked tok_type in eax.
+; Clobbers rax, rcx, rdx, rsi, rdi, r8-r11. Preserves callee-saved regs.
+lexer_peek_token:
+    push rbx
+    push rbp
+    mov rbp, rsp
+    sub rsp, 224
+
+    ; --- Save state ---
+    mov rax, [src_idx]
+    mov [rsp + 0], rax
+    mov rax, [line_num]
+    mov [rsp + 8], rax
+    mov rax, [line_start_idx]
+    mov [rsp + 16], rax
+    mov rax, [tok_str_ptr]
+    mov [rsp + 24], rax
+    mov rax, [tok_str_len]
+    mov [rsp + 32], rax
+    mov rax, [tok_ival]
+    mov [rsp + 40], rax
+    mov rax, [tok_fval]
+    mov [rsp + 48], rax
+    mov rax, [tok_str_pool_idx]
+    mov [rsp + 56], rax
+    mov eax, [tok_type]
+    mov [rsp + 64], eax
+    mov eax, [pending_dedents]
+    mov [rsp + 68], eax
+    movzx eax, byte [at_line_start]
+    mov [rsp + 72], eax
+    mov eax, [indent_stack_len]
+    mov [rsp + 76], eax
+    lea rsi, [indent_stack]
+    lea rdi, [rsp + 80]
+    mov ecx, 128
+    rep movsb
+
+    ; --- Fetch next token ---
+    call next_token
+    mov ebx, [tok_type]
+
+    ; --- Restore state ---
+    mov rax, [rsp + 0]
+    mov [src_idx], rax
+    mov rax, [rsp + 8]
+    mov [line_num], rax
+    mov rax, [rsp + 16]
+    mov [line_start_idx], rax
+    mov rax, [rsp + 24]
+    mov [tok_str_ptr], rax
+    mov rax, [rsp + 32]
+    mov [tok_str_len], rax
+    mov rax, [rsp + 40]
+    mov [tok_ival], rax
+    mov rax, [rsp + 48]
+    mov [tok_fval], rax
+    mov rax, [rsp + 56]
+    mov [tok_str_pool_idx], rax
+    mov eax, [rsp + 64]
+    mov [tok_type], eax
+    mov eax, [rsp + 68]
+    mov [pending_dedents], eax
+    mov eax, [rsp + 72]
+    mov byte [at_line_start], al
+    mov eax, [rsp + 76]
+    mov [indent_stack_len], eax
+    lea rsi, [rsp + 80]
+    lea rdi, [indent_stack]
+    mov ecx, 128
+    rep movsb
+
+    mov rax, rbx
+    mov rsp, rbp
+    pop rbp
+    pop rbx
+    ret
+
+; ------------------------------------------------------------------
+; Cross-buffer state management (module system, design.md §17)
+; ------------------------------------------------------------------
+
+; Save the full lexer state into a LEXSV_SIZE byte area (rdi = area).
+; tok_str_pool_idx is NOT saved (the pool is monotonic across the whole
+; compile; string literals from earlier files must stay valid).
+lexer_save_state:
+    push rsi
+    mov rax, [src_ptr]
+    mov [rdi + LEXSV_SRC_PTR], rax
+    mov rax, [src_len]
+    mov [rdi + LEXSV_SRC_LEN], rax
+    mov rax, [src_idx]
+    mov [rdi + LEXSV_SRC_IDX], rax
+    mov rax, [line_num]
+    mov [rdi + LEXSV_LINE_NUM], rax
+    mov rax, [line_start_idx]
+    mov [rdi + LEXSV_LINE_START], rax
+    mov eax, [tok_type]
+    mov [rdi + LEXSV_TOK_TYPE], eax
+    mov rax, [tok_str_ptr]
+    mov [rdi + LEXSV_TOK_STR_PTR], rax
+    mov rax, [tok_str_len]
+    mov [rdi + LEXSV_TOK_STR_LEN], rax
+    mov rax, [tok_ival]
+    mov [rdi + LEXSV_TOK_IVAL], rax
+    mov rax, [tok_fval]
+    mov [rdi + LEXSV_TOK_FVAL], rax
+    mov eax, [pending_dedents]
+    mov [rdi + LEXSV_PEND_DEDENTS], eax
+    movzx eax, byte [at_line_start]
+    mov [rdi + LEXSV_AT_LINE_START], eax
+    mov eax, [indent_stack_len]
+    mov [rdi + LEXSV_INDENT_LEN], eax
+    lea rsi, [indent_stack]
+    lea rdi, [rdi + LEXSV_INDENT_STACK]
+    mov ecx, 128
+    rep movsb
+    pop rsi
+    ret
+
+; Restore the lexer state saved by lexer_save_state (rdi = area).
+; tok_str_pool_idx is left untouched (monotonic).
+lexer_restore_state:
+    mov rax, [rdi + LEXSV_SRC_PTR]
+    mov [src_ptr], rax
+    mov rax, [rdi + LEXSV_SRC_LEN]
+    mov [src_len], rax
+    mov rax, [rdi + LEXSV_SRC_IDX]
+    mov [src_idx], rax
+    mov rax, [rdi + LEXSV_LINE_NUM]
+    mov [line_num], rax
+    mov rax, [rdi + LEXSV_LINE_START]
+    mov [line_start_idx], rax
+    mov eax, [rdi + LEXSV_TOK_TYPE]
+    mov [tok_type], eax
+    mov rax, [rdi + LEXSV_TOK_STR_PTR]
+    mov [tok_str_ptr], rax
+    mov rax, [rdi + LEXSV_TOK_STR_LEN]
+    mov [tok_str_len], rax
+    mov rax, [rdi + LEXSV_TOK_IVAL]
+    mov [tok_ival], rax
+    mov rax, [rdi + LEXSV_TOK_FVAL]
+    mov [tok_fval], rax
+    mov eax, [rdi + LEXSV_PEND_DEDENTS]
+    mov [pending_dedents], eax
+    movzx eax, byte [rdi + LEXSV_AT_LINE_START]
+    mov [at_line_start], al
+    mov eax, [rdi + LEXSV_INDENT_LEN]
+    mov [indent_stack_len], eax
+    lea rsi, [rdi + LEXSV_INDENT_STACK]
+    lea rdi, [indent_stack]
+    mov ecx, 128
+    rep movsb
+    ret
+
+; Point the lexer at a fresh buffer (rdi = ptr, rsi = len) without touching
+; tok_str_pool_idx (the string pool is global and monotonic across modules).
+lexer_load_buffer:
+    mov [src_ptr], rdi
+    mov [src_len], rsi
+    mov qword [src_idx], 0
+    mov qword [line_num], 1
+    mov qword [line_start_idx], 0
+    mov dword [pending_dedents], 0
+    mov byte [at_line_start], 1
+    mov dword [indent_stack], 0
+    mov dword [indent_stack_len], 1
     ret

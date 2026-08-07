@@ -117,6 +117,10 @@ section .bss
     gc_max_vreg         resd 1                       ; = min(vreg_counter-1, GRAPHCOL_VMAX-1)
     gc_remaining        resd 1                       ; active (non-removed) defined-vreg count
 
+    ; ---- label index map (back-edge live-range extension) ----
+    ; gc_label_idx[label_id] = IR index of its LABEL record (0xFFFF = none)
+    gc_label_idx        resw IR_MAX_RECORDS
+
 section .text
     global allocate_registers
 
@@ -473,6 +477,118 @@ allocate_registers:
     jmp .phase1_loop
 
 .phase1_done:
+
+    ; ----------------------------------------------------------
+    ; Live-range fix: a vreg defined but never used has gc_last_use = 0,
+    ; i.e. an empty backwards range [def, 0].  The Phase 2 overlap test
+    ; (def[a] <= last[b] && def[b] <= last[a]) would then miss edges to
+    ; vregs live across the dead definition, letting a dead load reuse
+    ; the colour of an earlier-loaded live vreg and clobber its value
+    ; before the use (e.g. pow(4.0, -1.0): the folded-away 1.0/0.0 loads
+    ; overwrote the live 4.0 base register).  Clamp the range to the def
+    ; point so the def is treated as a write that interferes as usual.
+    ; ----------------------------------------------------------
+    mov r12d, [gc_max_vreg]
+    mov r14d, 1
+.range_fix_loop:
+    cmp r14d, r12d
+    jg .range_fix_done
+    cmp dword [gc_def + r14 * 4], UNSET_IDX
+    je .range_fix_next
+    mov eax, [gc_def + r14 * 4]
+    cmp [gc_last_use + r14 * 4], eax
+    jae .range_fix_next
+    mov [gc_last_use + r14 * 4], eax
+.range_fix_next:
+    inc r14d
+    jmp .range_fix_loop
+.range_fix_done:
+
+    ; ----------------------------------------------------------
+    ; Phase 1.5: loop back-edge live-range extension
+    ; ----------------------------------------------------------
+    ; The [def, last_use] interval model cannot represent a value defined
+    ; before a loop and used inside it: its interval does not span the
+    ; loop back-edge, so an unrelated short-lived vreg defined inside the
+    ; loop body may be assigned the same physical register and clobber
+    ; the carried value on a later iteration.  Loop promotion hoists
+    ; exactly these loads (loop-invariant LOAD_IMM / LOAD_VAR) out of the
+    ; loop, leaving their uses inside, which makes the bug observable
+    ; (e.g. skip2.rex: the hoisted b=0 constant was clobbered by the b+1
+    ; add, so the inner loop restarted at b=3 instead of b=0).
+    ;
+    ; Fix: for every back-edge (JMP/JCC at index m targeting a LABEL at
+    ; index t < m), any vreg defined before t and used at/after t is live
+    ; across the whole loop, so extend its gc_last_use to m.  This forces
+    ; interference with every in-loop definition and guarantees a distinct
+    ; physical register.
+    ; ----------------------------------------------------------
+    mov ecx, IR_MAX_RECORDS
+    lea rdi, [gc_label_idx]
+    mov eax, 0xFFFF
+    rep stosw
+
+    xor ebx, ebx            ; i = IR record index
+.bf_label_scan:
+    cmp ebx, [ir_count]
+    jae .bf_label_done
+    imul eax, ebx, IR_RECORD_SIZE
+    lea r13, [ir_buffer + rax]
+    movzx eax, byte [r13]
+    cmp al, IR_LABEL
+    jne .bf_label_next
+    movzx eax, word [r13 + 8]        ; label id
+    cmp eax, IR_MAX_RECORDS
+    jae .bf_label_next
+    mov [gc_label_idx + rax * 2], bx
+.bf_label_next:
+    inc ebx
+    jmp .bf_label_scan
+.bf_label_done:
+
+    xor ebx, ebx            ; i = IR record index
+.bf_jmp_scan:
+    cmp ebx, [ir_count]
+    jae .bf_done
+    imul eax, ebx, IR_RECORD_SIZE
+    lea r13, [ir_buffer + rax]
+    movzx eax, byte [r13]
+    cmp al, IR_JMP
+    je .bf_is_backedge
+    cmp al, IR_JCC
+    jne .bf_jmp_next
+.bf_is_backedge:
+    movzx eax, word [r13 + 8]        ; target label id
+    cmp eax, IR_MAX_RECORDS
+    jae .bf_jmp_next
+    movzx ecx, word [gc_label_idx + rax * 2]
+    cmp ecx, 0xFFFF
+    je .bf_jmp_next                  ; unknown label (shouldn't happen)
+    cmp ecx, ebx
+    jae .bf_jmp_next                 ; forward jump → not a back-edge
+    ; ecx = header index t, ebx = back-edge index m
+    mov edx, 1                       ; vreg id
+.bf_vreg_loop:
+    cmp edx, [gc_max_vreg]
+    ja .bf_jmp_next
+    mov eax, [gc_def + rdx * 4]
+    cmp eax, UNSET_IDX
+    je .bf_vreg_next
+    cmp eax, ecx
+    jae .bf_vreg_next                ; defined at/after header → redefined in loop
+    mov eax, [gc_last_use + rdx * 4]
+    cmp eax, ecx
+    jb .bf_vreg_next                 ; dead before the loop → not carried
+    cmp eax, ebx
+    jae .bf_vreg_next                ; already spans the back-edge
+    mov [gc_last_use + rdx * 4], ebx
+.bf_vreg_next:
+    inc edx
+    jmp .bf_vreg_loop
+.bf_jmp_next:
+    inc ebx
+    jmp .bf_jmp_scan
+.bf_done:
 
     ; ----------------------------------------------------------
     ; Force-spill pass: any vreg whose live range [def, last_use]
@@ -886,6 +1002,36 @@ allocate_registers:
     jmp .map_loop
 
 .map_done:
+    ; ----------------------------------------------------------
+    ; Overflow vregs: vreg ids above gc_max_vreg never entered the
+    ; interference graph, so gc_def[] stays UNSET_IDX and Phase 5 left
+    ; vreg_phys[] = COLOR_SPILL with no stack slot and no frame setup.
+    ; Codegen would then emit [rbp+off] with off = 0 against an
+    ; uninitialized rbp → runtime SIGSEGV. Assign a real spill slot to
+    ; every vreg that still reads COLOR_SPILL with a zero offset, so the
+    ; frame gets sized and the prologue (push rbp/mov rbp,rsp/sub rsp)
+    ; is emitted. Spilling overflow vregs is always safe (correctness
+    ; over optimality) and prevents silent miscompiles on large programs.
+    ; ----------------------------------------------------------
+    mov r15d, [vreg_counter]        ; vreg ids are 1 .. vreg_counter-1
+    mov r14d, 1
+.slot_loop:
+    cmp r14d, r15d
+    jae .slot_done
+    cmp byte [vreg_phys + r14], COLOR_SPILL
+    jne .slot_next
+    cmp dword [vreg_offset + r14 * 4], 0
+    jne .slot_next                  ; already has a slot (Phase 5 assigned it)
+    mov eax, [stack_frame_size]
+    add eax, 8
+    mov [stack_frame_size], eax
+    neg eax
+    mov [vreg_offset + r14 * 4], eax
+.slot_next:
+    inc r14d
+    jmp .slot_loop
+.slot_done:
+
     ; Align spill frame to 16 bytes
     mov eax, [stack_frame_size]
     add eax, 15

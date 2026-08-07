@@ -18,7 +18,7 @@ x = 5
 output(x)                       // 5
 
 y = 3.14
-output(y, 2)                    // 3.14
+output(y)                    // 3.14
 
 z = "hello"
 output(z)                       // hello
@@ -39,7 +39,7 @@ int i = 42
 output(i)                       // 42
 
 float f = 3.14
-output(f, 2)                    // 3.14
+output(f)                    // 3.14
 
 bool bt = true
 bool bn = neutral
@@ -74,10 +74,10 @@ int million = 1_000_000
 output(million)                 // 1000000
 
 float big = 9_999.99
-output(big, 2)                  // 9999.98
+output(big)                  // 9999.98
 
 float sci = 1.5e2
-output(sci, 1)                  // 150.0
+output(sci)                  // 150.0
 
 // === §4.3 Bool Ternary Logic ===
 bool ba = true
@@ -100,7 +100,7 @@ output(iv)                      // 3
 
 int isrc = 42
 float fsrc = float(isrc)
-output(fsrc, 1)                 // 42.0
+output(fsrc)                 // 42.0
 
 bool bp = bool(5)
 output(bp)                      // true

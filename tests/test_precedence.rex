@@ -1,0 +1,13 @@
+// test_precedence.rex
+// Design §5.1: `+ - | & ^` all share tier 4 (left-assoc); `* / % << >>`
+// are tier 3 (tighter). Before the fix, bitwise ops bound looser than `+ -`.
+
+output(1 | 2 + 3)
+output(1 & 2 + 3)
+output(1 ^ 2 + 3)
+output(1 + 2 | 3)
+output(1 | 2 | 3 + 1)
+output(2 * 3 + 4)
+output(1 | 2 * 3)
+output(8 >> 1 + 1)
+output(1 | 2 - 3)

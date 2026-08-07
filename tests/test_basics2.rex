@@ -14,7 +14,7 @@
 // --- swap ---
 int m = 5
 int p = 10
-swap m p
+swap(m, p)
 output(m)
 output(p)
 

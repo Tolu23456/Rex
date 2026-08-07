@@ -1,0 +1,12 @@
+// test_membership.rex
+// `in` membership operator (design §5.6).
+
+seq[int] nums = [1, 2, 3]
+output(2 in nums)
+output(5 in nums)
+if 3 in nums:
+    output("found")
+seq[byte] bs = [10, 20, 30]
+output(20 in bs)
+if not (99 in nums):
+    output("not-found")

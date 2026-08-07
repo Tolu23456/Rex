@@ -1,0 +1,57 @@
+// test_type_builtins.rex
+// Standalone type builtins: char classification, numeric predicates,
+// and string conversions (§4.2, §4.8, §6)
+//
+// Expected output:
+//   true
+//   true
+//   7
+//   -1
+//   Q
+//   r
+//   true
+//   true
+//   true
+//   true
+//   ff
+//   101
+//   10
+//   true
+//   true
+//   true
+//   true
+//   true
+//   true
+//   false
+//   true
+
+// char classification
+output(alpha('A'))
+output(alnum('5'))
+output(str(digit('7')))
+output(str(digit('x')))
+output(str(upper('q')))
+output(str(lower('R')))
+output(whitespace(' '))
+output(punct('!'))
+output(printable('A'))
+output(ascii('A'))
+
+// numeric string forms
+output(hex(255))
+output(bin(5))
+output(oct(8))
+
+// numeric predicates
+output(zero(0))
+output(positive(5))
+output(negative(-5))
+output(even(4))
+output(odd(7))
+
+// float predicates
+float f = 0.0 / 0.0
+output(f.nan())
+output(f.finite())
+float g = 1.0 / 0.0
+output(g.inf())

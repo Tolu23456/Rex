@@ -28,6 +28,29 @@ run_one() {
     name=$(basename "$src" .rex)
 
     if [[ ! -f "$expected_file" ]]; then
+        if [[ -f "${src%.rex}.err" ]]; then
+            # Negative test: compile must fail with the expected message.
+            local err_file="${src%.rex}.err"
+            local compile_out compile_rc=0
+            compile_out=$("$REXC" "$src" -o "$TMP_BIN" 2>&1) || compile_rc=$?
+            if [[ $compile_rc -eq 0 ]]; then
+                echo "FAIL $name — expected compile error but succeeded"
+                ((FAIL++)) || true
+                return
+            fi
+            if [[ "$compile_out" != *"$(cat "$err_file")"* ]]; then
+                echo "FAIL $name — error message mismatch"
+                if [[ $VERBOSE -eq 1 ]]; then
+                    echo "  expected substring: $(cat "$err_file")"
+                    printf '  actual: %s\n' "$compile_out"
+                fi
+                ((FAIL++)) || true
+                return
+            fi
+            echo "PASS $name"
+            ((PASS++)) || true
+            return
+        fi
         echo "SKIP $name (no .expected file)"
         ((SKIP++)) || true
         return

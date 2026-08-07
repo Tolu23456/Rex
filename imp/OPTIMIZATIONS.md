@@ -44,15 +44,27 @@ All Rex variants eliminate the loop entirely at code-gen time — static via com
 | 14 | **Anti-sum fold (static N)** | ✅ Working | `for i in 0..N: total-=i` → `sub [total],N*(N-1)/2` at compile time (0 iterations) |
 | 15 | **Anti-sum fold (runtime N)** | ✅ Working | `for i in 0..n: total-=i` → 7-instruction closed form with SUB opcode, N≤0 guard |
 
-### Tier 2: IR Pipeline (5 passes, wired into codegen)
+### Tier 2: IR Pipeline (7 passes, wired into codegen)
 
-| # | Optimization | Status | Description |
-|---|---|---|---|
-| 16 | **IR constant folding (Pass 1)** | ✅ Working | Folds IR_ADD/SUB/MUL/DIV/MOD/NEG with known constants → IR_LOAD_IMM |
-| 17 | **IR dead store elimination (Pass 2)** | ✅ Working | Removes IR_STORE_VAR never read before overwrite → IR_NOP |
-| 18 | **IR load-store coalescing (Pass 3)** | ✅ Working | IR_LOAD_VAR + IR_STORE_VAR same var → both NOP |
-| 19 | **IR linear scan register allocation (Pass 4)** | ✅ Working | Maps vregs to 14 physical GPRs, spills when needed |
-| 20 | **IR peephole (Pass 5)** | ✅ Working | INC/DEC recognition, strength reduction, MOV elimination, step doubling, LICM, tail call, NOP compaction |
+The IR optimizer (`irgen/opt.asm`, `run_optimizations`) runs 7 passes:
+
+1. **IR constant folding (Pass 1)** — folds IR_ADD/SUB/MUL/DIV/MOD/NEG with known
+   constants → IR_LOAD_IMM. vreg constants are SSA-sound and tracked across
+   branches; variable constants are invalidated at every branch/call, so folding
+   stays sound in branchy code.
+2. **IR dead store elimination (Pass 2)** — removes IR_STORE_VAR never read
+   before overwrite → IR_NOP. **Gated**: only runs when the IR is branch-free
+   (reverse-scan DSE is unsound across branches/loops).
+3. **IR load-store coalescing (Pass 3)** — IR_LOAD_VAR + IR_STORE_VAR of the
+   same var → both NOP. **Gated**: only runs when the IR is branch-free
+   (forward-scan caching is unsound across branches/loops).
+4. **IR peephole (Pass 5)** — algebraic identities (+0, *1, *0, *2, x^0, 0-x…)
+   on SSA vregs; runs unconditionally.
+5. **IR alias application** — propagates all accumulated vreg aliases (SSA facts)
+   through src1/src2; runs unconditionally.
+6. **Closed-form accumulation fold** — `for i in 0..N: acc+=i` → static arithmetic.
+7. **Loop register promotion** — canonical loops keep the induction variable,
+   bound and accumulators in physical registers instead of memory round-trips.
 
 ### Tier 3: IR Emitter (new opcodes + codegen integration)
 

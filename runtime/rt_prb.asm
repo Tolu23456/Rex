@@ -1,4 +1,4 @@
-; rt_prb.asm - print tri-state bool (RDI) to stdout followed by newline
+; rt_prb.asm - print tri-state bool (RDI) to stdout (no newline)
 BITS 64
 
     push rbp
@@ -8,19 +8,19 @@ BITS 64
     jg .print_true
     je .print_neutral
 
-    ; print "false\n"
+    ; print "false"
     lea rsi, [rel .str_false]
-    mov rdx, 6
+    mov rdx, 5
     jmp .print
 
 .print_neutral:
     lea rsi, [rel .str_neutral]
-    mov rdx, 8
+    mov rdx, 7
     jmp .print
 
 .print_true:
     lea rsi, [rel .str_true]
-    mov rdx, 5
+    mov rdx, 4
 
 .print:
     mov rax, 1          ; sys_write
@@ -31,8 +31,8 @@ BITS 64
     pop rbp
     ret
 
-.str_true    db "true",    10
-.str_neutral db "neutral", 10
-.str_false   db "false",   10
+.str_true    db "true"
+.str_neutral db "neutral"
+.str_false   db "false"
 
 ; Pad to exactly 256 bytes

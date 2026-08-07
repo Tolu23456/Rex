@@ -133,6 +133,7 @@ TYPE_DICT       equ 7
 TYPE_CHAR       equ 8
 TYPE_BYTE       equ 9
 TYPE_ALIAS      equ 10
+TYPE_FILE       equ 10 ; file handle (8-byte heap ptr) — reuses unused alias slot
 TYPE_TUP        equ 11
 TYPE_ARR        equ 12
 
@@ -149,9 +150,12 @@ SCOPE_BLOCK     equ 2
 ; 37      1     is_mutable (0 = no, 1 = yes)
 ; 38      1     is_init (0 = no, 1 = yes)
 ; 40      4     offset (offset on stack or memory address)
-; 44      20    _pad (unused)
+; 44      2     elem_type (container element type, seq/dict/arr)
+; 46      1     module id (owning module, design.md §17)
+; 47      17    _pad (unused)
 SYM_ENTRY_SIZE  equ 64
 SYM_MAX         equ 256
+SYM_MODULE_OFF  equ 46
 
 ; ELF64 Layout Constants
 LOAD_BASE        equ 0x00400000
@@ -161,10 +165,18 @@ VAR_ENTRY_SIZE_LOG2 equ 6
 VAR_MAX          equ 256
 HEADERS_SIZE     equ 125       ; 64 ELF header + 56 program header + 5 JMP
 
+; Struct construction scratch pool lives in the OUTPUT binary's data segment,
+; right after the variable storage area, so the emitted LEA_VAR addresses are
+; valid in the running program (the parser's own bss is rexc-process memory).
+STRUCT_SCRATCH_BASE equ (VAR_STORAGE_BASE + (VAR_MAX * VAR_ENTRY_SIZE))
+STRUCT_SCRATCH_SIZE equ 262144 ; struct construction scratch pool (never reclaimed)
+
 VREG_MAX         equ 65536
 SRC_FILE_MAX     equ 65536
 OUT_BUF_MAX      equ 131072
-VAR_MEM_OFFSET   equ (VAR_STORAGE_BASE - LOAD_BASE) + (VAR_MAX * VAR_ENTRY_SIZE)
+VAR_MEM_OFFSET   equ (STRUCT_SCRATCH_BASE - LOAD_BASE) + STRUCT_SCRATCH_SIZE
+WHEN_MONITOR_MAX equ 256      ; distinct `when expr` monitors per program
+LOOP_MAX_DEPTH   equ 32       ; max nested loop depth for stop/skip tracking
 
 ; Protocol Table Layout (proto table entries, grammar.md Section 30)
 ; Offset  Size  Field
@@ -191,6 +203,9 @@ PROTO_RET_TYPE_OFF   equ 41
 PROTO_RET_COUNT_OFF  equ 42
 PROTO_RET_IS_RESULT_OFF equ 43
 PROTO_DECORATOR_MASK_OFF equ 44
+PROTO_MODULE_OFF     equ 45   ; owning module id (design.md §17)
+PROTO_PRIVATE_OFF    equ 46   ; 1 = private (`_` prefix, invisible outside module)
+PROTO_DEFINED_OFF    equ 47   ; 1 = body parsed
 PROTO_PARAM_VAR_IDX_OFF equ 48
 PROTO_RET0_TYPE_OFF  equ 121
 PROTO_RET1_TYPE_OFF  equ 122
@@ -227,3 +242,65 @@ CALL_ARG_STACK    equ 6 ; pushed on stack
 DICT_INITIAL_CAPACITY equ 16
 SEQ_ELEMENT_SIZE equ 8
 TYPE_NAME_BUF_SIZE equ 4096
+
+; Module System (design.md §17)
+; Module table entry layout (128 bytes)
+; Offset  Size  Field
+; 0       64    name (null-terminated, max 63)
+; 64      1     status (MOD_ST_*)
+; 65      1     kind (MOD_KIND_*)
+; 66      2     _pad
+; 68      8     source buffer ptr (file modules)
+; 76      8     source length (file modules)
+; 84      4     prescan visiting flag (cycle detection)
+; 88      40    _pad
+MODULE_MAX          equ 32
+MODULE_ENTRY_SIZE   equ 128
+MODULE_NAME_MAX     equ 64
+MODULE_NAME_OFF     equ 0
+MODULE_STATUS_OFF   equ 64
+MODULE_KIND_OFF     equ 65
+MODULE_SRC_PTR_OFF  equ 68
+MODULE_SRC_LEN_OFF  equ 76
+MODULE_VISITING_OFF equ 84
+
+MOD_ST_NONE       equ 0
+MOD_ST_PRESCANNED equ 1
+MOD_ST_PARSED     equ 2
+
+MOD_KIND_MAIN   equ 1
+MOD_KIND_INLINE equ 2
+MOD_KIND_FILE   equ 3
+
+; Import record table (per-module qualified/selective imports, design.md §17.2)
+; Record layout (24 bytes)
+; 0       4     source module id (the importing module)
+; 4       4     target module id
+; 8       8     imported name ptr (pool string; 0 for '*')
+; 16      4     imported name len (0 for '*')
+; 20      4     is_star (1 = `use m: *`)
+IMPORT_MAX         equ 256
+IMPORT_ENTRY_SIZE  equ 24
+IMPORT_SRC_OFF     equ 0
+IMPORT_TGT_OFF     equ 4
+IMPORT_NAME_PTR_OFF equ 8
+IMPORT_NAME_LEN_OFF equ 16
+IMPORT_STAR_OFF    equ 20
+
+; Lexer state save area layout (for cross-buffer module parsing)
+LEXSV_SIZE         equ 224
+LEXSV_SRC_PTR      equ 0
+LEXSV_SRC_LEN      equ 8
+LEXSV_SRC_IDX      equ 16
+LEXSV_LINE_NUM     equ 24
+LEXSV_LINE_START   equ 32
+LEXSV_TOK_TYPE     equ 40
+LEXSV_TOK_STR_PTR  equ 48
+LEXSV_TOK_STR_LEN  equ 56
+LEXSV_TOK_IVAL     equ 64
+LEXSV_TOK_FVAL     equ 72
+LEXSV_PEND_DEDENTS equ 80
+LEXSV_AT_LINE_START equ 84
+LEXSV_INDENT_LEN   equ 88
+LEXSV_INDENT_STACK equ 96
+; 96 + 128 = 224

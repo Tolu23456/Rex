@@ -1,4 +1,4 @@
-; rt_pri.asm - print integer in RDI to stdout followed by newline
+; rt_pri.asm - print integer in RDI to stdout (no newline)
 BITS 64
 
     push rbx
@@ -23,7 +23,7 @@ BITS 64
     mov rdi, 1
     syscall
     pop rax
-    jmp .print_newline
+    jmp .done
 .not_min:
 
     ; Print negative sign '-'
@@ -61,15 +61,7 @@ BITS 64
     mov rdi, 1          ; stdout
     syscall
 
-.print_newline:
-    ; Print newline
-    mov byte [rbp-1], 10
-    lea rsi, [rbp-1]
-    mov rdx, 1
-    mov rax, 1          ; sys_write
-    mov rdi, 1          ; stdout
-    syscall
-
+.done:
     mov rsp, rbp
     pop rbp
     pop rbx

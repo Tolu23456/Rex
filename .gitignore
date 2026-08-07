@@ -7,3 +7,10 @@ rexc
 .mimicode/
 .replit
 cleanups/
+
+# Session/agent-private files (not part of the project)
+.opencode/
+MEMORY.md
+Knowledge-Base.md
+deep-codebase-audit-protocol.md
+deep-component-improve.skill

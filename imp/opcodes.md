@@ -862,7 +862,7 @@ Total: **15 bytes**.
 
 ## 22. `swap`
 
-### `swap a b` — `codegen_emit_swap_vars`
+### `swap(a, b)` — `codegen_emit_swap_vars`
 
 ```
 48 8B 04 25  <addr_a>         mov rax, [var_a]
@@ -996,3 +996,51 @@ behaviour in the current compiler (no overflow guard beyond `break_jump_stack`).
 | `48 0F 48 C3` | `cmovs rax, rbx` — branchless abs |
 | `C3` | `ret` — return from protocol |
 | `F3 48 A5` | `rep movsq` — bulk element copy in seq grow |
+
+---
+
+## 30. Type-Method / Cast Emitters (codegen.asm)
+
+IR opcodes 0x91–0x98 and 0xAC–0xAF (see `include/rex_ir.inc`) are emitted
+from `codegen_emit_all` dispatch; most use the shared `load_src1_phys` /
+`load_src2_phys` / `get_dst_phys` helpers and `store_dst_spill`.
+
+| IR op | Emitter | Emitted bytes |
+|---|---|---|
+| IR_BTOS (0x91) | `cge_btos_op` | `cmp r(src1),0`-style tri-state test → string pointer in rax (rt_conv.bin @0x63A) |
+| IR_CTOS (0x92) | `cge_ctos_op` | `movzx eax, byte [var]; call rt_conv @0x66D` → 1-char string |
+| IR_POW_I (0x93) | `cge_pow_i_op` | `mov rdi,r(src1); mov rsi,r(src2); call rt_math.bin @0x185` |
+| IR_BYTE_BIT (0x94) | `cge_byte_bit_op` | `and cl,7; mov rcx,1; shl rcx,cl; test al,cl; setne` (inline) |
+| IR_BYTE_ROL (0x95) | `cge_byte_rol_op` | `movzx eax,al; and cl,7; rol al,cl; movzx 4C 0F B6` (inline) |
+| IR_BYTE_ROR (0x96) | `cge_byte_ror_op` | `and cl,7; ror al,cl; movzx 4C 0F B6` (inline) |
+| IR_BYTE_HEX (0x97) | `cge_byte_hex_op` | `movzx eax,al; call rt_conv.bin @0x67E` |
+| IR_BYTE_BIN (0x98) | `cge_byte_bin_op` | `movzx eax,al; call rt_conv.bin @0x6B7` |
+| IR_ITOS (0xAC) | `cge_itos_op` | `mov rdi,r(src1); call rt_conv.bin @0x141` |
+| IR_FTOS (0xAD) | `cge_ftos_op` | `movq xmm0,r(src1); call rt_conv.bin @0x196` |
+| IR_STOI (0xAE) | `cge_stoi_op` | `mov rdi,r(src1); call rt_conv.bin @0x39E` |
+| IR_STOF (0xAF) | `cge_stof_op` | `mov rdi,r(src1); call rt_conv.bin @0x4BD` |
+
+All float-in/GPR-in runtime calls use the shared `emit_runtime_call` (which
+preserves r8–r11).  The char classification emitters (`cge_cpred_*`,
+IR_IS_ALPHA/IR_IS_DIGIT_C/IR_IS_ALNUM/IR_IS_SPACE/IR_IS_PRINT/IR_IS_UPPER/
+IR_IS_LOWER_C/IR_IS_PUNCT) load the char with `mov rax, r(src1)`
+(`4C 89 (0xC0|src1)`) then `sub/cmp/setbe`.
+
+### Runtime blob offsets referenced
+
+| Blob | Offset | Function |
+|---|---|---|
+| rt_conv.bin | 0x141 | to_dec (int→decimal str) |
+| rt_conv.bin | 0x196 | ftos (float→str) |
+| rt_conv.bin | 0x39E | stoi (str→int) |
+| rt_conv.bin | 0x4BD | stof (str→float) |
+| rt_conv.bin | 0x63A | btos (bool→str) |
+| rt_conv.bin | 0x66D | ctos (char/byte→1-char str) |
+| rt_conv.bin | 0x67E | btohex (byte→hex) |
+| rt_conv.bin | 0x6B7 | btobin (byte→bin) |
+| rt_math.bin | 0x53 | pow_f (x^y, x87 fyl2x/f2xm1/fscale) |
+| rt_math.bin | 0xA3 | cbrt |
+| rt_math.bin | 0x185 | int_pow (base^exp; exp<0 → 0) |
+| rt_conv.bin | 0x48 | to_bin (int→bin str) |
+| rt_conv.bin | 0x97 | to_hex (int→hex str) |
+| rt_conv.bin | 0xF1 | to_oct (int→oct str) |

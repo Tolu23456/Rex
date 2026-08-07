@@ -1,0 +1,28 @@
+// test_byte_ops.rex
+// byte methods: bit ops, rotates, string representations, conversions (§4.9)
+//
+// Expected output:
+//   b4
+//   10110100
+//   true
+//   false
+//   210
+//   45
+//   65
+//   A
+//   false
+//   true
+
+byte by = 0b10110100
+output(by.hex())
+output(by.bin())
+output(by.bit(2))
+output(by.bit(1))
+output(by.rotate_left(2))
+output(by.rotate_right(2))
+
+byte a = 65
+output(str(a.int()))
+output(str(a.char()))
+output(a.zero())
+output(a.ascii())

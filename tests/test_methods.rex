@@ -33,19 +33,19 @@ int b = -7
 output(b.signum())
 
 int z = 0
-bool iz = z.is_zero()
+bool iz = z.zero()
 output(iz)
 
 int pos = 4
-bool ip = pos.is_positive()
+bool ip = pos.positive()
 output(ip)
 
 int even = 8
-bool ie = even.is_even()
+bool ie = even.even()
 output(ie)
 
 int odd = 7
-bool io = odd.is_odd()
+bool io = odd.odd()
 output(io)
 
 int x = 3

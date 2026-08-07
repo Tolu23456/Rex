@@ -19,6 +19,7 @@ section .data
     name_str  db "str", 0
     name_char db "char", 0
     name_byte db "byte", 0
+    name_file db "file", 0
 
 section .bss
     global type_table
@@ -39,6 +40,7 @@ section .text
     global type_set_size
     global type_struct_add_field
     global type_struct_find_field
+    global type_struct_field_at
     global type_lookup
 
 type_reg_init:
@@ -122,6 +124,14 @@ type_reg_init:
     mov rdi, TYPE_BYTE
     mov rsi, 1
     lea rdx, [name_byte]
+    mov rcx, 4
+    xor r8, r8
+    call type_reg_add
+
+    ; Register TYPE_FILE (10)
+    mov rdi, TYPE_FILE
+    mov rsi, 8
+    lea rdx, [name_file]
     mov rcx, 4
     xor r8, r8
     call type_reg_add
@@ -394,6 +404,42 @@ type_struct_find_field:
     xor ecx, ecx
 .find_done:
     pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; type_struct_field_at: enumerate fields by index (for struct copy/compare)
+; rdi = struct_type_id, rsi = field index (0-based among THIS struct's fields)
+; Returns: rax = field_offset (-1 if index out of range), rcx = field_type_id
+type_struct_field_at:
+    push rbx
+    push r12
+    push r13
+    mov r12, rdi            ; struct_type_id
+    xor ebx, ebx            ; flat index
+    xor r13d, r13d          ; count of matching fields seen
+.find_loop:
+    cmp ebx, [struct_field_count]
+    jae .no_field
+    imul eax, ebx, 32
+    lea rax, [struct_fields_table + rax]
+    cmp [rax], r12d         ; belongs to this struct?
+    jne .find_next
+    cmp r13d, esi           ; this is the requested index?
+    je .found
+    inc r13d
+.find_next:
+    inc ebx
+    jmp .find_loop
+.found:
+    mov ecx, [rax + 24]     ; field_type_id
+    mov eax, [rax + 28]     ; field_offset
+    jmp .done
+.no_field:
+    mov rax, -1
+    xor ecx, ecx
+.done:
     pop r13
     pop r12
     pop rbx

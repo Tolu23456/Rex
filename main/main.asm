@@ -40,11 +40,13 @@ section .text
     extern ir_init
     extern parse_program
     extern prescan_protocols
+    extern module_set_main_dir
     extern run_optimizations
     extern allocate_registers
     extern codegen_init
     extern codegen_emit_all
     extern codegen_finish
+    extern ir_dump_debug
 
     extern out_buffer
     extern out_idx
@@ -157,6 +159,9 @@ _start:
 
     ; 1.5 Prescan source for protocol (prot) definitions and validate
     ;     call sites / return statements. Reinitializes the lexer.
+    ;     Record the main source's directory so `use X` finds <dir>/X.rex.
+    mov rdi, r12 ; source file path
+    call module_set_main_dir
     call prescan_protocols
 
     ; 2. Initialize Type Registry, Symbol Table & IR Emitter
@@ -166,9 +171,11 @@ _start:
     
     ; 3. Parse Program (emits IR)
     call parse_program
+    call ir_dump_debug
     
     ; 3.5 Run Optimization Passes
     call run_optimizations
+    call ir_dump_debug
 
     ; 4. Linear Scan Register Allocation
     call allocate_registers
